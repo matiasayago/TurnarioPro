@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<title>Turnos Profesionales — Preview de prueba</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 16px 20px 60px;
+    line-height: 1.4;
+  }
+  h1 { font-size: 1.3rem; }
+  h2 { font-size: 1.05rem; margin-top: 28px; border-bottom: 1px solid #8884; padding-bottom: 6px; }
+  .card {
+    border: 1px solid #8884;
+    border-radius: 10px;
+    padding: 14px 16px;
+    margin: 10px 0;
+    cursor: pointer;
+  }
+  .card:hover { background: #80808014; }
+  .card.static { cursor: default; }
+  .card small { opacity: 0.7; }
+  button, input {
+    font-size: 1rem;
+    padding: 8px 12px;
+    border-radius: 8px;
+    border: 1px solid #8886;
+  }
+  button { cursor: pointer; }
+  button.primary { background: #0d9488; color: white; border: none; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 8px 0; }
+  .pill {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 0.8rem;
+    background: #8884;
+  }
+  .pill.ok { background: #16a34a55; }
+  .pill.warn { background: #ea580c55; }
+  .error { color: #dc2626; }
+  .breadcrumb { opacity: 0.7; font-size: 0.9rem; margin-bottom: 8px; }
+  .breadcrumb span { cursor: pointer; text-decoration: underline; }
+  #resultadoConcurrencia { display: flex; gap: 12px; flex-wrap: wrap; }
+  #resultadoConcurrencia > div { flex: 1; min-width: 220px; border: 1px solid #8884; border-radius: 8px; padding: 10px; }
+  code { background: #8882; padding: 1px 5px; border-radius: 4px; }
+</style>
+</head>
+<body>
+  <h1>🗓️ Turnos Profesionales — preview de prueba</h1>
+  <p><small>Interfaz mínima para ver y probar el backend real en el navegador, sin instalar Flutter. No es la app final — ver <code>../mobile/</code> para el diseño real. Ver <code>README.md</code> de este backend para más contexto.</small></p>
+
+  <section id="seedSection">
+    <h2>1. Datos de ejemplo</h2>
+    <button class="primary" id="btnSeed">Sembrar negocio + profesional + cliente de ejemplo</button>
+    <div id="seedResultado"></div>
+  </section>
+
+  <section id="loginSection" style="display:none">
+    <h2>2. Ingresar</h2>
+    <div class="row">
+      <input id="loginEmail" placeholder="email" />
+      <input id="loginPassword" placeholder="contraseña" type="password" />
+      <button class="primary" id="btnLogin">Ingresar</button>
+    </div>
+    <div id="loginError" class="error"></div>
+  </section>
+
+  <section id="appSection" style="display:none">
+    <div class="row">
+      <span class="pill" id="sesionInfo"></span>
+      <button id="btnLogout">Salir</button>
+    </div>
+    <div id="vistaCliente" style="display:none"></div>
+    <div id="vistaProfesional" style="display:none"></div>
+  </section>
+
+  <section id="concurrenciaSection" style="display:none">
+    <h2>3. Probar la garantía anti-doble-reserva (RN2)</h2>
+    <p><small>Dispara <b>dos reservas simultáneas</b> al mismo horario con dos clientes distintos (<code>Promise.all</code>, no secuencial) contra el mismo profesional/servicio sembrado en el paso 1.</small></p>
+    <button class="primary" id="btnConcurrencia">Disparar 2 reservas simultáneas al mismo slot</button>
+    <div id="resultadoConcurrencia"></div>
+  </section>
+
+  <script src="app.js"></script>
+</body>
+</html>

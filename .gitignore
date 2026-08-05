@@ -1,0 +1,7 @@
+# Overrides personales de Claude Code (no compartir entre miembros del equipo)
+.claude/settings.local.json
+
+# Artefactos de SO / editor
+Thumbs.db
+.DS_Store
+*.swp

@@ -1,0 +1,5 @@
+node_modules/
+dist/
+dev.sqlite3
+dev.sqlite3-*
+*.log
