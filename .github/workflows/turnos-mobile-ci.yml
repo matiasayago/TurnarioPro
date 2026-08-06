@@ -1,0 +1,82 @@
+name: Turnos Profesionales - Mobile CI
+
+# CI del cliente mobile de TURNOS-2026-001 (proyectos/turnos-profesionales/05-codigo/mobile).
+# Este codigo Flutter se escribio a mano y nunca se habia compilado ni corrido: el entorno de
+# desarrollo de Mobile no tiene el SDK de Flutter/Dart instalado (ver README.md de este
+# directorio y memory/proyectos/turnos-profesionales/decisiones.md). Este workflow usa el SDK
+# oficial de Flutter (subosito/flutter-action, gratis dentro de los minutos incluidos de
+# GitHub Actions) para obtener, por primera vez, verificacion real del compilador.
+
+on:
+  push:
+    paths:
+      - "proyectos/turnos-profesionales/05-codigo/mobile/**"
+      - ".github/workflows/turnos-mobile-ci.yml"
+  pull_request:
+    paths:
+      - "proyectos/turnos-profesionales/05-codigo/mobile/**"
+      - ".github/workflows/turnos-mobile-ci.yml"
+
+defaults:
+  run:
+    working-directory: proyectos/turnos-profesionales/05-codigo/mobile
+
+jobs:
+  # ---------------------------------------------------------------------------------------
+  # Un unico job: pub get + analyze (type-check estatico) + build de un APK debug (sin
+  # firmar). Solo Android, no iOS: alcanza para validar el codigo Dart (toda la logica de
+  # este slice vive en lib/, compartida) y un runner macOS para iOS consume minutos de
+  # Actions a 10x sin aportar cobertura adicional sobre el Dart en si.
+  # ---------------------------------------------------------------------------------------
+  analyze-and-build:
+    name: pub get + flutter analyze + build APK (debug)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # pubspec.yaml declara `sdk: '>=3.3.0 <4.0.0'` (environment.sdk). El canal stable de
+      # Flutter siempre trae una version de Dart dentro de ese rango (Dart 4.0 todavia no
+      # existe), asi que alcanza con seguir stable en vez de fijar una version puntual.
+      - name: Setup Flutter (channel stable)
+        uses: subosito/flutter-action@v2
+        with:
+          channel: "stable"
+          cache: true
+
+      - name: flutter --version
+        run: flutter --version
+
+      # Este proyecto se escribio a mano (solo lib/ + pubspec.yaml) sin correr nunca
+      # `flutter create`, asi que le faltan las carpetas nativas por plataforma (android/,
+      # ios/, etc. - no estan en el repo, ver README.md de este directorio y su .gitignore,
+      # que tampoco tiene las entradas que el propio Flutter genera). Sin android/ no hay
+      # nada que `flutter build apk` pueda compilar. La generamos aca con el SDK real (mas
+      # confiable que escribir Gradle/Kotlin a mano sin poder probarlo en este entorno) -
+      # es el mecanismo oficial para agregar soporte de plataforma a un proyecto Flutter
+      # existente. No pisa pubspec.yaml ni lib/ (flutter create no sobreescribe archivos
+      # existentes) y no se commitea de vuelta al repo: es solo para esta verificacion en CI.
+      - name: "Generar carpeta android/ faltante (flutter create --platforms=android)"
+        run: flutter create --platforms=android .
+
+      # `flutter create` tambien completa, si faltan, archivos de la plantilla base
+      # (analysis_options.yaml, test/widget_test.dart) con contenido generico de una
+      # contra-app "MyApp" sin relacion con este proyecto. Los sacamos para que
+      # `flutter analyze` valide unicamente el codigo que si escribimos (lib/): sin esto, el
+      # test generico rompe el analisis (referencia una clase que no existe en este
+      # main.dart) y analysis_options.yaml activaria de golpe flutter_lints con reglas de
+      # estilo sobre codigo que nunca se linteo, tapando con ruido los errores reales que
+      # este workflow busca detectar.
+      - name: Limpiar archivos de plantilla no relacionados con este proyecto
+        run: |
+          rm -rf test
+          rm -f analysis_options.yaml
+
+      - name: flutter pub get
+        run: flutter pub get
+
+      - name: flutter analyze
+        run: flutter analyze
+
+      - name: flutter build apk --debug
+        run: flutter build apk --debug
