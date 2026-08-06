@@ -67,7 +67,7 @@ class _ExcepcionesScreenState extends State<ExcepcionesScreen> {
             if (_mensaje != null)
               Container(
                 padding: const EdgeInsets.all(12),
-                color: Theme.of(context).colorScheme.errorContainer.withOpacity(0.4),
+                color: Theme.of(context).colorScheme.errorContainer.withValues(alpha: 0.4),
                 child: Text(_mensaje!),
               ),
             FilledButton(
