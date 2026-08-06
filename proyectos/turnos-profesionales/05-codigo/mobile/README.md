@@ -3,22 +3,41 @@
 App única con dos modos (Cliente / Profesional) según el rol del usuario autenticado — ver
 `../../04-diseno/mapa-pantallas.md`.
 
-## ⚠️ Estado: código escrito, NO compilado ni corrido
+## ✅ Estado: compilación verificada por CI (2026-08-06) — `flutter run` real, todavía no
 
-Este entorno de desarrollo no tiene el SDK de Flutter (ni Dart standalone) instalado, así que
+Este entorno de desarrollo sigue sin el SDK de Flutter (ni Dart standalone) instalado, así que
 a diferencia del backend (que sí se instaló, corrió y se probó de punta a punta, ver
-`../backend/README.md`), **este código no fue verificado con el compilador ni ejecutado**.
-Se revisó manualmente buscando errores de tipos/imports, y se corrigió al menos un bug real
-en esa revisión (ver más abajo), pero **antes de darlo por funcional hay que correr, como
-mínimo:**
+`../backend/README.md`), acá no se puede ejecutar el compilador localmente. En su lugar, desde
+2026-08-06 hay un workflow de GitHub Actions
+(`.github/workflows/turnos-mobile-ci.yml`, con el SDK oficial de Flutter) que corre en cada
+push/PR que toca este directorio y da, por primera vez, **verificación real** (no solo revisión
+manual): `flutter pub get` + `flutter analyze` + `flutter build apk --debug` — los tres en
+verde (run de referencia:
+[31110105801](https://github.com/matiasayago/TurnarioPro/actions/runs/31110105801)).
+
+En el primer intento, `flutter analyze` encontró 2 deprecaciones reales del SDK de Flutter (no
+bugs de lógica) que se corrigieron:
+- `DropdownButtonFormField.value` → `initialValue` (`screens/profesional/definir_disponibilidad_screen.dart`).
+- `Color.withOpacity(x)` → `Color.withValues(alpha: x)` (`screens/profesional/excepciones_screen.dart`).
+
+**Gap conocido, documentado a propósito en vez de resolverlo a ciegas:** este directorio nunca
+tuvo `android/` ni `ios/` (se escribió a mano, sin correr nunca `flutter create`) — el CI genera
+`android/` al vuelo con `flutter create --platforms=android .` antes de compilar, pero eso pasa
+solo dentro del runner de GitHub Actions y **no se commitea al repo**. Para correr esta app en
+un emulador/dispositivo real (`flutter run`), hace falta primero generar esas carpetas de forma
+permanente:
 
 ```bash
+flutter create --platforms=android,ios .   # agrega android/ e ios/ sin tocar pubspec.yaml ni lib/
 flutter pub get
 flutter analyze
 flutter run
 ```
 
-en una máquina con el SDK de Flutter instalado.
+en una máquina con el SDK de Flutter instalado. Es decir: **compila** (verificado), pero
+**correr la app de punta a punta (flujos de login, reservas, etc. contra el backend real) sigue
+sin probarse** — eso excede lo que `analyze`/`build apk` pueden detectar (por ejemplo, errores
+de lógica en tiempo de ejecución, mismatches con la API del backend, etc.).
 
 ## Bug encontrado y corregido en revisión manual
 
