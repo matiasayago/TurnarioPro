@@ -103,6 +103,17 @@ jobs:
       # usando el GITHUB_TOKEN que Actions provee automaticamente (con permiso contents:write
       # otorgado arriba) - esos comentarios si son legibles despues via la API publica sin
       # autenticacion (GET /repos/{owner}/{repo}/commits/{sha}/comments).
+      #
+      # OJO (hallazgo de este ciclo en turnos-backend-ci.yml, mismo patron aca - ver
+      # memory/proyectos/turnos-profesionales/decisiones.md): la version anterior envolvia
+      # cada log en "<details><summary>...</summary>...</details>". Eso queda en el body como
+      # texto plano (no como archivo adjunto - esta API no tiene ningun concepto de adjunto),
+      # pero <details> se renderiza COLAPSADO por default: sin hacer click para expandirlo,
+      # solo se ve el titulo del comentario y el nombre de cada log, nunca el contenido real.
+      # Se saca <details>: el bloque de codigo va siempre visible, sin click ni sesion
+      # iniciada. Se agrega tambien truncado por lineas (ultimas 200, con tope extra en
+      # bytes) y un tope total del body, para no arriesgar superar el limite de tamano de un
+      # comentario de GitHub si ambos logs fueran grandes a la vez.
       - name: "Publicar salida de flutter analyze/build como comentario del commit (si algo fallo)"
         if: failure()
         env:
@@ -111,27 +122,30 @@ jobs:
           {
             echo "### turnos-mobile-ci.yml - run ${{ github.run_id }} (${{ github.event_name }}, commit ${{ github.sha }})"
             echo
-            if [ -f /tmp/flutter-analyze.log ]; then
-              echo "<details><summary>flutter analyze</summary>"
+            if [ -s /tmp/flutter-analyze.log ]; then
+              echo "#### flutter analyze (ultimas 200 lineas)"
               echo
               echo '```'
-              tail -c 55000 /tmp/flutter-analyze.log
+              tail -n 200 /tmp/flutter-analyze.log | tail -c 20000
               echo '```'
-              echo "</details>"
               echo
             fi
-            if [ -f /tmp/flutter-build.log ]; then
-              echo "<details><summary>flutter build apk --debug</summary>"
+            if [ -s /tmp/flutter-build.log ]; then
+              echo "#### flutter build apk --debug (ultimas 200 lineas)"
               echo
               echo '```'
-              tail -c 55000 /tmp/flutter-build.log
+              tail -n 200 /tmp/flutter-build.log | tail -c 20000
               echo '```'
-              echo "</details>"
+              echo
             fi
           } > /tmp/comment-body.md
           node -e "
             const fs = require('fs');
-            const body = fs.readFileSync('/tmp/comment-body.md', 'utf8');
+            let body = fs.readFileSync('/tmp/comment-body.md', 'utf8');
+            const MAX = 60000;
+            if (body.length > MAX) {
+              body = '_(comentario truncado - se muestran los ultimos ' + MAX + ' caracteres)_\n\n' + body.slice(-MAX);
+            }
             fs.writeFileSync('/tmp/comment-body.json', JSON.stringify({ body }));
           "
           curl -sS -X POST \
