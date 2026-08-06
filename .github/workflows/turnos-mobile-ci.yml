@@ -31,6 +31,10 @@ jobs:
   analyze-and-build:
     name: pub get + flutter analyze + build APK (debug)
     runs-on: ubuntu-latest
+    # `contents: write` habilita el ultimo paso (comentario en el commit con el log de una
+    # falla) - ver el comentario de ese paso para el motivo.
+    permissions:
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -76,7 +80,62 @@ jobs:
         run: flutter pub get
 
       - name: flutter analyze
-        run: flutter analyze
+        run: |
+          set +e
+          flutter analyze > /tmp/flutter-analyze.log 2>&1
+          code=$?
+          cat /tmp/flutter-analyze.log
+          exit $code
 
       - name: flutter build apk --debug
-        run: flutter build apk --debug
+        run: |
+          set +e
+          flutter build apk --debug > /tmp/flutter-build.log 2>&1
+          code=$?
+          cat /tmp/flutter-build.log
+          exit $code
+
+      # Este entorno de desarrollo no tiene forma de leer logs de Actions: la API de descarga
+      # de logs devuelve 403 "Must have admin rights to Repository" aun en un repo publico y
+      # sin autenticacion (comprobado activamente, no es una suposicion), y no hay un token
+      # disponible para autenticar la llamada. Como workaround, publicamos la salida ya
+      # capturada de los pasos de arriba como un comentario en el commit que disparo el run,
+      # usando el GITHUB_TOKEN que Actions provee automaticamente (con permiso contents:write
+      # otorgado arriba) - esos comentarios si son legibles despues via la API publica sin
+      # autenticacion (GET /repos/{owner}/{repo}/commits/{sha}/comments).
+      - name: "Publicar salida de flutter analyze/build como comentario del commit (si algo fallo)"
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          {
+            echo "### turnos-mobile-ci.yml - run ${{ github.run_id }} (${{ github.event_name }}, commit ${{ github.sha }})"
+            echo
+            if [ -f /tmp/flutter-analyze.log ]; then
+              echo "<details><summary>flutter analyze</summary>"
+              echo
+              echo '```'
+              tail -c 55000 /tmp/flutter-analyze.log
+              echo '```'
+              echo "</details>"
+              echo
+            fi
+            if [ -f /tmp/flutter-build.log ]; then
+              echo "<details><summary>flutter build apk --debug</summary>"
+              echo
+              echo '```'
+              tail -c 55000 /tmp/flutter-build.log
+              echo '```'
+              echo "</details>"
+            fi
+          } > /tmp/comment-body.md
+          node -e "
+            const fs = require('fs');
+            const body = fs.readFileSync('/tmp/comment-body.md', 'utf8');
+            fs.writeFileSync('/tmp/comment-body.json', JSON.stringify({ body }));
+          "
+          curl -sS -X POST \
+            -H "Authorization: token $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/commits/${{ github.sha }}/comments" \
+            -d @/tmp/comment-body.json
