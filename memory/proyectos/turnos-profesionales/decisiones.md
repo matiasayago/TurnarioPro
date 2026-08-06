@@ -426,3 +426,68 @@ Detalle completo, razonamiento de ubicación y recomendaciones para Backend en
 - No se tocó `src/` ni `01-requisitos/documento-funcional.md` ni `02-backlog/backlog.md` (ya
   actualizados por Business Analyst y Product Manager en este mismo ciclo) — alcance de DBA
   limitado a esquema, migraciones y documentación del modelo de datos.
+
+## Primera verificación real de compilación de Mobile — CI en GitHub Actions (2026-08-06)
+
+El CEO autorizó usar GitHub Actions (SDK oficial de Flutter, dentro de los minutos gratis
+incluidos) para conseguir, por primera vez, verificación real del código Flutter de
+`05-codigo/mobile` — hasta ahora solo se había revisado a mano (ver entrada de Fase 4 más
+arriba). Resultado: **verde** —
+[run 31110105801](https://github.com/matiasayago/TurnarioPro/actions/runs/31110105801),
+`.github/workflows/turnos-mobile-ci.yml`. Detalle:
+
+- **Hallazgo de partida (no documentado antes):** `05-codigo/mobile` nunca tuvo carpetas
+  nativas por plataforma (`android/`, `ios/`) — se escribió a mano (`lib/` + `pubspec.yaml`)
+  sin correr nunca `flutter create`. Confirmado también por el `.gitignore` del directorio,
+  que no tiene ninguna de las entradas que el propio Flutter genera. Sin `android/`,
+  `flutter build apk` no tiene nada que compilar. El workflow lo resuelve generando
+  `android/` al vuelo (`flutter create --platforms=android .`, mecanismo oficial de Flutter
+  para agregar soporte de plataforma a un proyecto existente — no pisa `pubspec.yaml` ni
+  `lib/`) **dentro del runner de CI, sin commitear esa carpeta al repo**. Pendiente real para
+  un ciclo futuro: generarla de forma permanente (`flutter create --platforms=android,ios .`
+  desde una máquina con el SDK) para que `flutter run` funcione localmente — ver
+  `05-codigo/mobile/README.md`.
+- `flutter create` también completa, si faltan, `analysis_options.yaml` y
+  `test/widget_test.dart` con la plantilla genérica de contra-app ("MyApp") — el workflow los
+  elimina antes de `flutter analyze` a propósito: el test genérico no compila contra este
+  `main.dart` (rompería el análisis por una razón ajena al código real) y activar
+  `flutter_lints` de golpe sobre código nunca linteado habría tapado con ruido de estilo los
+  errores reales que se buscaba encontrar.
+- **Primer intento con código real: falló** — `flutter analyze` encontró 2 deprecaciones
+  reales del SDK de Flutter (no bugs de lógica, `flutter build apk --debug` nunca llegó a
+  correr por el fail-fast del job): `DropdownButtonFormField.value` (deprecado desde Flutter
+  3.33, reemplazo `initialValue`) en `definir_disponibilidad_screen.dart`, y
+  `Color.withOpacity()` (deprecado por pérdida de precisión, reemplazo `withValues(alpha:)`)
+  en `excepciones_screen.dart`. Corregidos ambos (2 líneas). **Segundo intento (con las
+  carpetas nativas al vuelo + esos 2 fixes): verde** — `flutter analyze` y
+  `flutter build apk --debug` pasaron los dos.
+- **Bloqueo operativo encontrado y resuelto sin necesitar credenciales nuevas:** la API de
+  descarga de logs de Actions (`GET .../actions/jobs/{id}/logs`) devuelve 403 ("Must have
+  admin rights to Repository") aun sin autenticar contra un repo público — este entorno no
+  tiene un token de GitHub disponible para autenticar esa llamada (se intentó leer la
+  credencial ya configurada para `git push` vía `git credential fill` para reutilizarla en
+  llamadas de solo lectura a la API, y el propio sistema lo bloqueó por política — no se
+  insistió). El workflow ahora incluye un paso de diagnóstico (`permissions: contents:
+  write` + `GITHUB_TOKEN` que Actions provee automáticamente, sin secretos nuevos) que
+  publica la salida de `flutter analyze`/`build` como comentario del commit cuando el job
+  falla — esos comentarios sí son legibles después vía la API pública sin autenticación.
+  Quedó como capacidad permanente del workflow (no se retiró tras resolver este ciclo),
+  reutilizable para cualquier falla futura de este mismo pipeline.
+- La lista de corridas de este ciclo (para trazabilidad): commit `2d51954` (workflow inicial)
+  → falló en `flutter analyze`, sin visibilidad del log; commit `cb20d12` (agrega el paso de
+  diagnóstico) → mismo fallo, ahora con el log visible vía comentario del commit; commit
+  `4d85c71` (los 2 fixes de deprecación) → **verde**, incluido `flutter build apk --debug`.
+- **No verificado en este ciclo (fuera de lo que `analyze`/`build apk` pueden detectar):**
+  ejecución real de la app (`flutter run`) contra el backend — flujos de login, reservas,
+  etc. Ver gap de `android/`/`ios/` arriba y detalle en `05-codigo/mobile/README.md`.
+
+## Reutilizable para futuros proyectos de la Factory (continuación)
+- Verificar con la API de GitHub (`GET /repos/{owner}/{repo}/actions/runs/...`) es viable sin
+  autenticación para metadata pública (estado/conclusión de un run), pero **la descarga de
+  logs/artefactos exige un token aun en repos públicos** — para cualquier CI nuevo en un
+  entorno sin token disponible, conviene planificar de entrada un mecanismo alternativo de
+  diagnóstico (comentario de commit vía `GITHUB_TOKEN` del propio workflow, como se hizo acá)
+  en vez de asumir que los logs van a poder leerse directo.
+- La API pública sin autenticar de GitHub tiene un límite bajo (60 req/hora) que un polling
+  frecuente agota rápido — para esperar un run de CI, conviene espaciar los chequeos (o
+  hacerlos una sola vez tras una espera) en vez de consultar cada pocos segundos.
