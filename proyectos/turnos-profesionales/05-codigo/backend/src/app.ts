@@ -1,4 +1,5 @@
-import express from 'express';
+import express, { NextFunction, Request, Response } from 'express';
+import helmet from 'helmet';
 import path from 'path';
 import { runMigrations } from './db';
 import { authRouter } from './routes/auth';
@@ -12,6 +13,12 @@ export function createApp() {
   runMigrations();
 
   const app = express();
+  // MEDIUM-2 (ver 07-seguridad/informe-seguridad.md): cabeceras de seguridad HTTP básicas
+  // (quita `X-Powered-By`, agrega `X-Content-Type-Options`, `X-Frame-Options`/frame-ancestors,
+  // `Referrer-Policy`, etc.). Va ANTES de las rutas para cubrir toda la superficie, incluida
+  // `web-preview/` que sirve HTML. `Strict-Transport-Security` queda fuera de alcance acá —
+  // corresponde a la capa de terminación TLS/reverse proxy (DevOps), no a la app Node.
+  app.use(helmet());
   app.use(express.json());
 
   app.get('/health', (_req, res) => res.json({ ok: true }));
@@ -22,12 +29,30 @@ export function createApp() {
   app.use('/turnos', turnosRouter);
   app.use('/clientes', clientesRouter);
 
-  // Solo para desarrollo/demo: seed de datos + preview web del flujo, para poder ver y
-  // probar el golden path en el navegador sin instalar Flutter. NUNCA en producción.
-  if (process.env.NODE_ENV !== 'production') {
+  // HIGH-4 (ver 07-seguridad/informe-seguridad.md): estas rutas NO tienen autenticación propia
+  // (seed de datos + preview web del flujo, para poder probar el golden path sin instalar
+  // Flutter), así que antes dependían solo de `NODE_ENV !== 'production'` (opt-OUT implícito:
+  // si un entorno compartido no seteaba NODE_ENV=production por error, quedaban expuestas sin
+  // querer). Ahora es un opt-IN explícito — solo se montan si ENABLE_DEV_ROUTES=true, sin
+  // importar NODE_ENV. `npm run dev` ya lo setea (ver package.json); en cualquier otro entorno
+  // hay que setearlo a mano a sabiendas de que se está exponiendo un endpoint sin auth.
+  if (process.env.ENABLE_DEV_ROUTES === 'true') {
     app.use('/dev', devRouter);
     app.use(express.static(path.join(__dirname, '..', 'web-preview')));
   }
+
+  // HIGH-2 (ver 07-seguridad/informe-seguridad.md): middleware de manejo de errores
+  // centralizado (4 argumentos — Express lo reconoce como error handler solo por esa firma).
+  // Va AL FINAL, después de montar todas las rutas, para capturar cualquier excepción no
+  // controlada que suba desde un handler síncrono (Express 4 reenvía automáticamente esos
+  // throws acá). Loguea el detalle completo server-side (auditoría) pero nunca devuelve stack
+  // trace ni mensaje interno al cliente, en NINGÚN entorno.
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+    // eslint-disable-next-line no-console
+    console.error('Error no controlado:', err);
+    res.status(500).json({ error: 'Error interno' });
+  });
 
   return app;
 }

@@ -1,7 +1,17 @@
 import { Router } from 'express';
+import { z } from 'zod';
 import { v4 as uuid } from 'uuid';
 import { db, nowIso } from '../db';
 import { requireAuth, AuthedRequest } from '../auth';
+import { calcularSlotsDisponibles } from '../dominio/disponibilidad';
+import {
+  uuidSchema,
+  fechaIsoSchema,
+  diaSemanaSchema,
+  horaSchema,
+  montoPositivoSchema,
+  respuestaValidacionFallida,
+} from '../dominio/validacion';
 
 export const profesionalesRouter = Router();
 
@@ -9,13 +19,70 @@ function esPropioProfesional(req: AuthedRequest): boolean {
   return req.auth!.rol === 'profesional' && req.auth!.profesional_id === req.params.id;
 }
 
+// MEDIUM-3 (ver 07-seguridad/informe-seguridad.md): esquemas de validación de entrada — se
+// aplican al INICIO de cada handler, antes de tocar la base de datos.
+const profesionalIdParamsSchema = z.object({ id: uuidSchema });
+
+const asociarServicioSchema = z.object({
+  servicio_id: uuidSchema,
+  requiere_sena: z.boolean().optional(),
+  monto_sena: montoPositivoSchema.nullable().optional(),
+});
+
+const disponibilidadSchema = z.object({
+  servicio_id: uuidSchema,
+  dia_semana: diaSemanaSchema,
+  hora_inicio: horaSchema,
+  hora_fin: horaSchema,
+});
+
+const excepcionSchema = z.object({
+  inicio: fechaIsoSchema,
+  fin: fechaIsoSchema,
+  motivo: z.string().nullable().optional(),
+});
+
+// D10 (amenda RN3, ver modelo-datos.md §2quater): entero positivo o `null` EXPLÍCITO (para que
+// el profesional pueda volver a usar la duración del servicio si se arrepiente) — no `.optional()`,
+// el body siempre tiene que traer el campo, aunque sea `null`.
+const configuracionProfesionalSchema = z.object({
+  duracion_cita_min: z
+    .number()
+    .int('duracion_cita_min debe ser un entero')
+    .positive('duracion_cita_min debe ser mayor a 0')
+    .nullable(),
+});
+
 // HU-04 / HU-04b: el profesional asocia un servicio a su agenda y configura si requiere seña.
 profesionalesRouter.post('/:id/servicios', requireAuth('profesional'), (req: AuthedRequest, res) => {
+  const paramsParsed = profesionalIdParamsSchema.safeParse(req.params);
+  if (!paramsParsed.success) return respuestaValidacionFallida(res, paramsParsed.error);
   if (!esPropioProfesional(req)) {
     return res.status(403).json({ error: 'Solo podés configurar tus propios servicios' });
   }
-  const { servicio_id, requiere_sena, monto_sena } = req.body;
-  if (!servicio_id) return res.status(400).json({ error: 'servicio_id es requerido' });
+  const bodyParsed = asociarServicioSchema.safeParse(req.body);
+  if (!bodyParsed.success) return respuestaValidacionFallida(res, bodyParsed.error);
+  const { servicio_id, requiere_sena, monto_sena } = bodyParsed.data;
+
+  const servicio = db.prepare('SELECT negocio_id FROM servicio WHERE id = ?').get(servicio_id) as
+    | { negocio_id: string }
+    | undefined;
+  if (!servicio) {
+    return res.status(404).json({ error: 'Servicio no encontrado' });
+  }
+
+  // Integridad N:M (ver modelo-datos.md §2ter, "recomendación adicional"): antes de esta
+  // generalización era estructuralmente imposible asociar un servicio de un negocio donde el
+  // profesional no trabaja (tenía un único negocio_id posible). Ahora `profesional` no tiene
+  // negocio fijo, así que hay que validarlo a nivel de aplicación antes de insertar.
+  const esMiembroActivo = db
+    .prepare('SELECT 1 FROM negocio_profesional WHERE negocio_id = ? AND profesional_id = ? AND activo = 1')
+    .get(servicio.negocio_id, req.params.id);
+  if (!esMiembroActivo) {
+    return res.status(403).json({
+      error: 'No podés asociarte a un servicio de un negocio del que no sos miembro activo',
+    });
+  }
 
   db.prepare(
     `INSERT INTO profesional_servicio (profesional_id, servicio_id, requiere_sena, monto_sena)
@@ -28,13 +95,16 @@ profesionalesRouter.post('/:id/servicios', requireAuth('profesional'), (req: Aut
 
 // HU-05: el profesional define un bloque de disponibilidad recurrente.
 profesionalesRouter.post('/:id/disponibilidad', requireAuth('profesional'), (req: AuthedRequest, res) => {
+  const paramsParsed = profesionalIdParamsSchema.safeParse(req.params);
+  if (!paramsParsed.success) return respuestaValidacionFallida(res, paramsParsed.error);
   if (!esPropioProfesional(req)) {
     return res.status(403).json({ error: 'Solo podés definir tu propia disponibilidad' });
   }
-  const { servicio_id, dia_semana, hora_inicio, hora_fin } = req.body;
-  if (servicio_id === undefined || dia_semana === undefined || !hora_inicio || !hora_fin) {
-    return res.status(400).json({ error: 'servicio_id, dia_semana, hora_inicio y hora_fin son requeridos' });
-  }
+  // MEDIUM-3 / DEF-04 (ver informe-seguridad.md y reporte-qa.md): valida presencia, UUID y el
+  // rango de dia_semana ACÁ, en vez de dejar que lo rechace el CHECK de la base de datos.
+  const bodyParsed = disponibilidadSchema.safeParse(req.body);
+  if (!bodyParsed.success) return respuestaValidacionFallida(res, bodyParsed.error);
+  const { servicio_id, dia_semana, hora_inicio, hora_fin } = bodyParsed.data;
   const id = uuid();
   db.prepare(
     `INSERT INTO disponibilidad (id, profesional_id, servicio_id, dia_semana, hora_inicio, hora_fin, creado_en)
@@ -45,11 +115,14 @@ profesionalesRouter.post('/:id/disponibilidad', requireAuth('profesional'), (req
 
 // HU-15: excepción puntual (feriado/licencia) — RN5/RN6.
 profesionalesRouter.post('/:id/excepciones', requireAuth('profesional'), (req: AuthedRequest, res) => {
+  const paramsParsed = profesionalIdParamsSchema.safeParse(req.params);
+  if (!paramsParsed.success) return respuestaValidacionFallida(res, paramsParsed.error);
   if (!esPropioProfesional(req)) {
     return res.status(403).json({ error: 'Solo podés bloquear tu propia agenda' });
   }
-  const { inicio, fin, motivo } = req.body;
-  if (!inicio || !fin) return res.status(400).json({ error: 'inicio y fin son requeridos' });
+  const bodyParsed = excepcionSchema.safeParse(req.body);
+  if (!bodyParsed.success) return respuestaValidacionFallida(res, bodyParsed.error);
+  const { inicio, fin, motivo } = bodyParsed.data;
 
   const turnosAfectados = db
     .prepare(
@@ -72,68 +145,56 @@ profesionalesRouter.post('/:id/excepciones', requireAuth('profesional'), (req: A
   });
 });
 
+// D10 (amenda RN3, ver modelo-datos.md §2quater): el profesional configura (o revierte) su
+// propia duración general de cita. Cuando está seteada (no NULL), reemplaza SIEMPRE
+// `servicio.duracion_min` para calcular los turnos de este profesional, en todos sus servicios,
+// sin excepción (aplicado en `src/dominio/disponibilidad.ts` y `src/routes/turnos.ts`, POST /
+// y PATCH /:id/reprogramar). `duracion_cita_min: null` explícito revierte al comportamiento de
+// siempre: usar la duración del servicio.
+profesionalesRouter.patch('/:id/configuracion', requireAuth('profesional'), (req: AuthedRequest, res) => {
+  const paramsParsed = profesionalIdParamsSchema.safeParse(req.params);
+  if (!paramsParsed.success) return respuestaValidacionFallida(res, paramsParsed.error);
+  if (!esPropioProfesional(req)) {
+    return res.status(403).json({ error: 'Solo podés configurar tu propia agenda' });
+  }
+  const bodyParsed = configuracionProfesionalSchema.safeParse(req.body);
+  if (!bodyParsed.success) return respuestaValidacionFallida(res, bodyParsed.error);
+  const { duracion_cita_min } = bodyParsed.data;
+
+  db.prepare('UPDATE profesional SET duracion_cita_min = ? WHERE id = ?').run(
+    duracion_cita_min,
+    req.params.id
+  );
+
+  res.json({ id: req.params.id, duracion_cita_min });
+});
+
 // HU-09: slots disponibles de un profesional para un servicio (motor de disponibilidad — CU1/CU4).
-// Implementación simplificada para este slice: calcula slots de los próximos N días a partir
-// de los bloques de `disponibilidad`, descuenta turnos activos y excepciones, y si no hay nada
-// en el rango pedido devuelve el próximo disponible (D5, sin lista de espera).
+// El cálculo en sí vive en `src/dominio/disponibilidad.ts` (compartido con `POST /turnos`, que
+// lo usa para validar RN1 — ver comentario ahí y en turnos.ts). Acá solo se resuelven los query
+// params y se arma la respuesta pública, incluyendo el "próximo disponible" (D5, sin lista de
+// espera) cuando no hay nada en el rango pedido.
 profesionalesRouter.get('/:id/slots', (req, res) => {
   const { servicio_id, desde, dias } = req.query as { servicio_id?: string; desde?: string; dias?: string };
   if (!servicio_id) return res.status(400).json({ error: 'servicio_id es requerido' });
 
-  const servicio = db.prepare('SELECT duracion_min FROM servicio WHERE id = ?').get(servicio_id) as
-    | { duracion_min: number }
-    | undefined;
-  if (!servicio) return res.status(404).json({ error: 'Servicio no encontrado' });
-
-  const bloques = db
-    .prepare('SELECT * FROM disponibilidad WHERE profesional_id = ? AND servicio_id = ?')
-    .all(req.params.id, servicio_id) as any[];
-
-  const inicioBusqueda = desde ? new Date(desde) : new Date();
-  const ventanaDias = Number(dias ?? 14);
-  const duracionMs = servicio.duracion_min * 60_000;
-
-  const turnosActivos = db
-    .prepare(
-      `SELECT inicio, fin FROM turno WHERE profesional_id = ? AND estado IN ('pendiente_de_pago','confirmado')`
-    )
-    .all(req.params.id) as { inicio: string; fin: string }[];
-
-  const excepciones = db
-    .prepare('SELECT inicio, fin FROM excepcion_disponibilidad WHERE profesional_id = ?')
-    .all(req.params.id) as { inicio: string; fin: string }[];
-
-  const ocupado = (ini: Date, fin: Date) =>
-    [...turnosActivos, ...excepciones].some(
-      (o) => ini < new Date(o.fin) && fin > new Date(o.inicio)
-    );
-
-  const slots: string[] = [];
-  for (let d = 0; d < ventanaDias && slots.length < 20; d++) {
-    const dia = new Date(inicioBusqueda);
-    dia.setDate(dia.getDate() + d);
-    const bloqueDelDia = bloques.find((b) => b.dia_semana === dia.getDay());
-    if (!bloqueDelDia) continue;
-
-    const [hIni, mIni] = bloqueDelDia.hora_inicio.split(':').map(Number);
-    const [hFin, mFin] = bloqueDelDia.hora_fin.split(':').map(Number);
-    let cursor = new Date(dia);
-    cursor.setHours(hIni, mIni, 0, 0);
-    const finBloque = new Date(dia);
-    finBloque.setHours(hFin, mFin, 0, 0);
-
-    while (cursor.getTime() + duracionMs <= finBloque.getTime() && slots.length < 20) {
-      const finSlot = new Date(cursor.getTime() + duracionMs);
-      if (cursor > inicioBusqueda && !ocupado(cursor, finSlot)) {
-        slots.push(cursor.toISOString());
-      }
-      cursor = finSlot;
+  let desdeDate: Date | undefined;
+  if (desde !== undefined) {
+    desdeDate = new Date(desde);
+    if (isNaN(desdeDate.getTime())) {
+      return res.status(400).json({ error: "El parámetro 'desde' no es una fecha válida" });
     }
   }
 
+  const resultado = calcularSlotsDisponibles(req.params.id, servicio_id, {
+    desde: desdeDate,
+    dias: dias !== undefined ? Number(dias) : undefined,
+  });
+  if (!resultado) return res.status(404).json({ error: 'Servicio no encontrado' });
+
   res.json({
-    slots,
-    proximo_disponible: slots[0] ?? null, // D5
+    slots: resultado.slots,
+    proximo_disponible: resultado.slots[0] ?? null, // D5
   });
 });
 

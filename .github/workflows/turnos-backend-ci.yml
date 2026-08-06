@@ -1,0 +1,203 @@
+name: Turnos Profesionales - Backend CI
+
+# CI del backend de TURNOS-2026-001 (proyectos/turnos-profesionales/05-codigo/backend).
+# Fase 6 (DevOps) - ver proyectos/turnos-profesionales/08-despliegue/README.md para el
+# detalle completo de lo que valida este workflow y por que esta dividido en dos jobs.
+
+on:
+  push:
+    paths:
+      - "proyectos/turnos-profesionales/05-codigo/backend/**"
+      - ".github/workflows/turnos-backend-ci.yml"
+  pull_request:
+    paths:
+      - "proyectos/turnos-profesionales/05-codigo/backend/**"
+      - ".github/workflows/turnos-backend-ci.yml"
+
+defaults:
+  run:
+    working-directory: proyectos/turnos-profesionales/05-codigo/backend
+
+env:
+  # src/db.ts usa el modulo built-in `node:sqlite`, disponible recien desde Node >=22.5 (ver
+  # README.md del backend y memory/proyectos/turnos-profesionales/decisiones.md). No bajar
+  # de 22 aca sin revisar tambien el Dockerfile (node:22-slim) - tienen que ir coordinados.
+  NODE_VERSION: "22"
+
+jobs:
+  # ---------------------------------------------------------------------------------------
+  # Job 1: valida el CODIGO FUENTE - tipado estricto + la bateria completa de scripts de
+  # prueba (business logic + regresiones de seguridad ya remediadas, ver
+  # 07-seguridad/informe-seguridad.md). Corre contra ts-node (igual que `npm run dev`,
+  # sin pasar por dist/) para dar feedback rapido sin depender del layout del build.
+  # ---------------------------------------------------------------------------------------
+  build-and-test:
+    name: Build + type-check + bateria de scripts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+          cache-dependency-path: proyectos/turnos-profesionales/05-codigo/backend/package-lock.json
+
+      - name: Instalar dependencias (npm ci)
+        run: npm ci
+
+      - name: Type-check estricto (tsc --noEmit)
+        run: npx tsc --noEmit
+
+      - name: Compilar (npm run build) - detecta errores de build ademas de tipos
+        run: npm run build
+
+      # ── Bateria de scripts/*.mjs (~10 scripts) ──────────────────────────────────────
+      # OJO: no alcanza con UN solo arranque del servidor. scripts/test-rn8-ventana-
+      # cancelacion.mjs esta disenado a proposito contra la ventana de cancelacion
+      # DEFAULT (120 min, ver src/routes/turnos.ts) y FALLA si se lo corre con
+      # VENTANA_CANCELACION_MIN=0 (que es justamente lo que necesitan los otros 9
+      # scripts para no depender de esperar minutos reales) - confirmado en este ciclo
+      # reproduciendo el fallo real antes de escribir este workflow, no es algo teorico.
+      # Por eso este job levanta el servidor DOS veces, tal como documenta el propio
+      # README.md del backend ("Scripts de prueba (actualizado)").
+
+      - name: "Fase 1/2 - arrancar servidor (ventanas en 0, rate limit alto, dev routes on)"
+        env:
+          PORT: "3000"
+          EXPIRACION_PAGO_MIN: "0"
+          VENTANA_CANCELACION_MIN: "0"
+          ENABLE_DEV_ROUTES: "true"
+          RATE_LIMIT_LOGIN_MAX: "1000"
+          RATE_LIMIT_REGISTRO_MAX: "1000"
+        run: |
+          npx ts-node --transpile-only src/index.ts > server-fase1.log 2>&1 &
+          echo $! > server.pid
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:3000/health > /dev/null; then
+              echo "Servidor (fase 1) arriba."
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "El servidor (fase 1) no respondio /health a tiempo."
+          cat server-fase1.log
+          exit 1
+
+      - name: "Fase 1/2 - correr todos los scripts salvo test-rn8-ventana-cancelacion"
+        run: |
+          set -e
+          for f in scripts/*.mjs; do
+            case "$f" in
+              scripts/test-rn8-ventana-cancelacion.mjs) continue ;;
+            esac
+            echo "== Corriendo $f =="
+            node "$f"
+          done
+
+      - name: "Fase 1/2 - logs del servidor (si algo fallo)"
+        if: failure()
+        run: cat server-fase1.log || true
+
+      - name: "Fase 1/2 - detener servidor y limpiar la DB"
+        if: always()
+        run: |
+          if [ -f server.pid ]; then kill "$(cat server.pid)" || true; fi
+          rm -f server.pid dev.sqlite3 dev.sqlite3-*
+
+      - name: "Fase 2/2 - arrancar servidor limpio (ventana de cancelacion DEFAULT = 120 min)"
+        env:
+          PORT: "3000"
+          ENABLE_DEV_ROUTES: "true"
+          RATE_LIMIT_LOGIN_MAX: "1000"
+          RATE_LIMIT_REGISTRO_MAX: "1000"
+        run: |
+          npx ts-node --transpile-only src/index.ts > server-fase2.log 2>&1 &
+          echo $! > server.pid
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:3000/health > /dev/null; then
+              echo "Servidor (fase 2) arriba."
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "El servidor (fase 2) no respondio /health a tiempo."
+          cat server-fase2.log
+          exit 1
+
+      - name: "Fase 2/2 - correr test-rn8-ventana-cancelacion (necesita la ventana default)"
+        run: node scripts/test-rn8-ventana-cancelacion.mjs
+
+      - name: "Fase 2/2 - logs del servidor (si algo fallo)"
+        if: failure()
+        run: cat server-fase2.log || true
+
+      - name: "Fase 2/2 - detener servidor"
+        if: always()
+        run: |
+          if [ -f server.pid ]; then kill "$(cat server.pid)" || true; fi
+          rm -f server.pid dev.sqlite3 dev.sqlite3-*
+
+  # ---------------------------------------------------------------------------------------
+  # Job 2: valida el ARTEFACTO EMPAQUETADO (el Dockerfile de verdad, no el codigo suelto).
+  # Este es el unico lugar donde este proyecto puede validar el Dockerfile con Docker real:
+  # el entorno de desarrollo de DevOps no tiene Docker instalado (ver 08-despliegue/
+  # README.md), pero los runners de GitHub Actions si lo traen preinstalado. Corre en
+  # config "tipo produccion" (NODE_ENV=production del propio Dockerfile, sin
+  # ENABLE_DEV_ROUTES) para que este smoke test sea representativo de un despliegue real.
+  # ---------------------------------------------------------------------------------------
+  docker-build-smoke:
+    name: Build de imagen Docker + smoke test end-to-end
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    # Este job pisa el default de workflow (working-directory: backend/) por la raiz del
+    # repo: `docker build <path>` necesita el path relativo a la raiz, no al backend. El
+    # paso de smoke test de mas abajo vuelve a pisarlo puntualmente hacia backend/ porque
+    # ese si necesita correr `node scripts/smoke-test.mjs` desde ahi.
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build de la imagen (Dockerfile multi-stage)
+        run: |
+          docker build \
+            -t turnos-profesionales-backend:ci \
+            proyectos/turnos-profesionales/05-codigo/backend
+
+      - name: "Levantar el contenedor (config tipo produccion - sin ENABLE_DEV_ROUTES)"
+        run: |
+          docker run -d \
+            --name turnos-backend-ci \
+            -p 3000:3000 \
+            -e JWT_SECRET="ci-smoke-test-secret-nunca-usar-en-produccion" \
+            turnos-profesionales-backend:ci
+
+      - name: Esperar a que el HEALTHCHECK / GET /health responda
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:3000/health > /dev/null; then
+              echo "Contenedor arriba."
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "El contenedor no respondio /health a tiempo."
+          docker logs turnos-backend-ci || true
+          exit 1
+
+      - name: Smoke test end-to-end contra el contenedor real
+        working-directory: proyectos/turnos-profesionales/05-codigo/backend
+        run: node scripts/smoke-test.mjs
+
+      - name: Logs del contenedor (si algo fallo)
+        if: failure()
+        run: docker logs turnos-backend-ci || true
+
+      - name: Apagar y borrar el contenedor
+        if: always()
+        run: docker rm -f turnos-backend-ci || true

@@ -1,7 +1,23 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 
-const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-not-for-production';
+// HIGH-3 (ver 07-seguridad/informe-seguridad.md): el fallback hardcodeado se mantiene SOLO para
+// desarrollo/test (donde nunca hay datos reales en juego); en producción, arrancar sin
+// JWT_SECRET seteado es un error de configuración que debe frenar el proceso, no degradar
+// silenciosamente a un secreto público conocido (visible en este mismo archivo fuente), lo que
+// permitiría forjar JWT arbitrarios de cualquier rol/negocio/profesional.
+function resolveJwtSecret(): string {
+  const secret = process.env.JWT_SECRET;
+  if (secret) return secret;
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error(
+      'JWT_SECRET no está seteado y NODE_ENV=production — el proceso no puede arrancar sin un secreto real (ver informe-seguridad.md HIGH-3).'
+    );
+  }
+  return 'dev-secret-not-for-production';
+}
+
+const JWT_SECRET = resolveJwtSecret();
 
 export type Rol = 'cliente' | 'profesional' | 'administrador';
 

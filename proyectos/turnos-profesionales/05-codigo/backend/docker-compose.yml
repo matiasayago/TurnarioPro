@@ -1,0 +1,51 @@
+# Orquestación de DESARROLLO/STAGING LOCAL para el backend de Turnos Profesionales
+# (TURNOS-2026-001). NO pensada para producción real: no hay servicio de PostgreSQL acá
+# porque el código de la app (src/db.ts y todas las queries de src/routes/*.ts) todavía
+# solo sabe hablar con `node:sqlite` — ver el gap documentado con detalle, y como
+# bloqueante explícito antes de cualquier despliegue real, en
+# ../../08-despliegue/README.md. Tampoco hay orquestación multi-réplica; eso (y un
+# eventual servicio de Postgres) es candidato a infra/kubernetes/ el día que el backend
+# migre de driver.
+#
+# Uso:
+#   1. cp .env.example .env        (completar JWT_SECRET — ver ese archivo, NUNCA commitear .env)
+#   2. docker compose up --build
+#   3. curl http://localhost:3000/health
+#
+# El HEALTHCHECK del contenedor es el que define el propio Dockerfile (una sola fuente de
+# verdad) — no se redefine acá para no arriesgar que se desincronicen.
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: turnos-profesionales-backend:local
+    container_name: turnos-profesionales-backend
+
+    # Sin un archivo `.env` en este directorio, Compose no puede levantar el servicio
+    # (env_file apunta a un archivo que tiene que existir) — es a propósito: obliga a
+    # decidir conscientemente JWT_SECRET antes de arrancar en vez de heredar cualquier
+    # default (ver .env.example y HIGH-3 en ../../07-seguridad/informe-seguridad.md).
+    env_file:
+      - .env
+
+    ports:
+      # Mismo valor en ambos lados a propósito: si PORT se pisa en .env, la app adentro del
+      # contenedor escucha en ese puerto (process.env.PORT, ver src/index.ts) — mapear
+      # siempre "host:contenedor" con el mismo PORT evita que el mapeo quede desalineado
+      # con el puerto real en el que escucha el proceso.
+      - "${PORT:-3000}:${PORT:-3000}"
+
+    volumes:
+      # Volumen NOMBRADO (no bind mount a una ruta del host) para persistir el archivo
+      # sqlite entre reinicios/recreaciones del contenedor. Apunta a /data, que es donde el
+      # Dockerfile ya fija DB_PATH=/data/dev.sqlite3 — no hace falta pisar DB_PATH acá salvo
+      # que se quiera un nombre de archivo distinto dentro de ese mismo directorio.
+      - turnos_backend_data:/data
+
+    restart: unless-stopped
+
+volumes:
+  turnos_backend_data:
+    name: turnos_backend_data

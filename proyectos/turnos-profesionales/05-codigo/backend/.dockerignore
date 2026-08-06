@@ -1,0 +1,37 @@
+# Dependencias — se reinstalan DENTRO del build stage (npm ci). Copiar el node_modules del
+# host podría colar binarios/versiones de otro SO o quedar desincronizado del lockfile.
+node_modules/
+
+# Build output local — se regenera dentro del build stage (npm run build). Copiar un dist/
+# viejo del host podría colar un build desactualizado o compilado en otro SO en la imagen.
+dist/
+
+# Base de datos de desarrollo (node:sqlite) y sus archivos temporales/journal — nunca debe
+# viajar dentro de la imagen; en runtime vive en un volumen nombrado (ver docker-compose.yml).
+dev.sqlite3
+dev.sqlite3-*
+
+# Scripts de prueba manual (smoke tests) — no hacen falta para servir la API en producción.
+# Se siguen ejecutando desde el checkout del repo (local o en CI), nunca desde la imagen.
+scripts/
+
+# Preview web interactiva de desarrollo — solo se sirve si ENABLE_DEV_ROUTES=true, variable
+# que esta imagen NUNCA setea (ver Dockerfile y 07-seguridad/informe-seguridad.md HIGH-4).
+# No copiarla es una capa extra de defensa: si alguien fuerza ENABLE_DEV_ROUTES=true por
+# error de configuración, no hay UI estática que servir (los endpoints /dev/seed y
+# /dev/forzar-expiracion seguirían activos igual — son código, no archivos estáticos; la
+# única barrera real contra ESO es no setear esa variable, ver nota en el Dockerfile).
+web-preview/
+
+# Secretos locales — jamás deben terminar en el contexto de build ni en la imagen.
+.env
+.env.*
+!.env.example
+
+# Control de versiones y artefactos de editor/SO.
+.git/
+.vscode/
+*.log
+npm-debug.log*
+Thumbs.db
+.DS_Store

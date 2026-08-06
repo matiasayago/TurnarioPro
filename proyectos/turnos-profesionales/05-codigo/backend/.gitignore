@@ -3,3 +3,9 @@ dist/
 dev.sqlite3
 dev.sqlite3-*
 *.log
+
+# Secretos locales de Docker/docker-compose (ver .env.example, que sí se commitea como
+# plantilla sin valores reales) — nunca versionar un .env con JWT_SECRET real.
+.env
+.env.*
+!.env.example
