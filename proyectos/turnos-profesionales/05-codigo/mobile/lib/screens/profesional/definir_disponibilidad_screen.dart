@@ -55,7 +55,7 @@ class _DefinirDisponibilidadScreenState extends State<DefinirDisponibilidadScree
             TextField(controller: _servicioIdCtrl, decoration: const InputDecoration(labelText: 'ID del servicio')),
             const SizedBox(height: 16),
             DropdownButtonFormField<int>(
-              value: _diaSemana,
+              initialValue: _diaSemana,
               decoration: const InputDecoration(labelText: 'Día de la semana'),
               items: [for (var i = 0; i < 7; i++) DropdownMenuItem(value: i, child: Text(_dias[i]))],
               onChanged: (v) => setState(() => _diaSemana = v!),
