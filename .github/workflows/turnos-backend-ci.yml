@@ -206,6 +206,21 @@ jobs:
       # GITHUB_TOKEN que Actions provee automaticamente (permiso contents:write otorgado en
       # este job) - ese comentario si se puede leer despues sin login via la API publica (GET
       # /repos/{owner}/{repo}/commits/{sha}/comments).
+      #
+      # OJO (hallazgo de este ciclo, ver memory/proyectos/turnos-profesionales/decisiones.md):
+      # la version anterior envolvia cada log en "<details><summary>...</summary>...
+      # </details>". Eso SI queda en el body como texto plano (no como archivo adjunto - la
+      # API de comentarios de commit no tiene ningun concepto de adjunto), pero <details> se
+      # renderiza COLAPSADO por default: sin hacer click para expandirlo, lo unico que se ve
+      # es el titulo del comentario y el nombre del archivo (el "resumen"), nunca el contenido
+      # real del log. Se saca <details> por completo: el bloque de codigo va SIEMPRE visible,
+      # sin ningun click ni sesion iniciada necesarios. Se agrega ademas truncado por lineas
+      # (ultimas 200, con un tope extra en bytes por archivo) y un tope total del body: la
+      # version anterior podia superar el limite de tamano de un comentario de GitHub si mas
+      # de un archivo llegaba al maximo de 55000 bytes a la vez, lo que hubiera hecho fallar
+      # el POST silenciosamente (sin romper el job, porque este paso no revisa el status code
+      # de curl) - no era el problema de ESTE incidente puntual, pero es la misma clase de
+      # "el mecanismo de diagnostico no muestra lo que necesito" que se esta corrigiendo aca.
       - name: "Publicar logs del job como comentario del commit (si algo fallo)"
         if: failure()
         env:
@@ -216,19 +231,22 @@ jobs:
             echo
             for f in server-fase1.log scripts-fase1.log server-fase2.log scripts-fase2-rn8.log; do
               if [ -s "$f" ]; then
-                echo "<details><summary>$f</summary>"
+                echo "#### $f (ultimas 200 lineas)"
                 echo
                 echo '```'
-                tail -c 55000 "$f"
+                tail -n 200 "$f" | tail -c 20000
                 echo '```'
-                echo "</details>"
                 echo
               fi
             done
           } > /tmp/comment-body.md
           node -e "
             const fs = require('fs');
-            const body = fs.readFileSync('/tmp/comment-body.md', 'utf8');
+            let body = fs.readFileSync('/tmp/comment-body.md', 'utf8');
+            const MAX = 60000;
+            if (body.length > MAX) {
+              body = '_(comentario truncado - se muestran los ultimos ' + MAX + ' caracteres)_\n\n' + body.slice(-MAX);
+            }
             fs.writeFileSync('/tmp/comment-body.json', JSON.stringify({ body }));
           "
           curl -sS -X POST \
@@ -272,19 +290,36 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # OJO (hallazgo de este ciclo): antes este paso no capturaba su propia salida a ningun
+      # archivo. Cuando "docker build" fallaba de verdad (run 31117318338, commit 389fe65 -
+      # ver memory/proyectos/turnos-profesionales/decisiones.md), el paso de diagnostico de
+      # mas abajo no tenia NADA que publicar sobre la causa real: el unico archivo no vacio
+      # terminaba siendo docker-container.log con el ruido de "No such container" (el
+      # contenedor nunca llego a crearse). Se captura aca para que el comentario del commit
+      # muestre el error real de "docker build", no solo ese efecto secundario.
       - name: Build de la imagen (Dockerfile multi-stage)
         run: |
+          set +e
           docker build \
             -t turnos-profesionales-backend:ci \
-            proyectos/turnos-profesionales/05-codigo/backend
+            proyectos/turnos-profesionales/05-codigo/backend \
+            > docker-build.log 2>&1
+          code=$?
+          cat docker-build.log
+          exit $code
 
       - name: "Levantar el contenedor (config tipo produccion - sin ENABLE_DEV_ROUTES)"
         run: |
+          set +e
           docker run -d \
             --name turnos-backend-ci \
             -p 3000:3000 \
             -e JWT_SECRET="ci-smoke-test-secret-nunca-usar-en-produccion" \
-            turnos-profesionales-backend:ci
+            turnos-profesionales-backend:ci \
+            > docker-run.log 2>&1
+          code=$?
+          cat docker-run.log
+          exit $code
 
       - name: Esperar a que el HEALTHCHECK / GET /health responda
         run: |
@@ -320,7 +355,14 @@ jobs:
         run: docker rm -f turnos-backend-ci || true
 
       # Mismo bloqueo de logs de Actions sin login que en el job build-and-test de este mismo
-      # workflow (y en turnos-mobile-ci.yml, commit cb20d12) - mismo workaround.
+      # workflow (y en turnos-mobile-ci.yml, commit cb20d12) - mismo workaround, y misma
+      # correccion de este ciclo (ver el comentario largo en el paso equivalente del job
+      # build-and-test, mas arriba, para el detalle completo de por que se saca <details>).
+      # Se agregan ademas docker-build.log/docker-run.log a la lista de archivos: antes solo
+      # se publicaban docker-container.log y smoke-test.log, asi que si "docker build" o
+      # "docker run" fallaban (en vez del healthcheck o el smoke test), el comentario
+      # quedaba vacio de informacion util - exactamente lo que paso en el run 31117318338
+      # (commit 389fe65), ver memory/proyectos/turnos-profesionales/decisiones.md.
       - name: "Publicar logs del job como comentario del commit (si algo fallo)"
         if: failure()
         env:
@@ -329,21 +371,24 @@ jobs:
           {
             echo "### turnos-backend-ci.yml / docker-build-smoke - run ${{ github.run_id }} (${{ github.event_name }}, commit ${{ github.sha }})"
             echo
-            for f in docker-container.log proyectos/turnos-profesionales/05-codigo/backend/smoke-test.log; do
+            for f in docker-build.log docker-run.log docker-container.log proyectos/turnos-profesionales/05-codigo/backend/smoke-test.log; do
               if [ -s "$f" ]; then
-                echo "<details><summary>$f</summary>"
+                echo "#### $f (ultimas 200 lineas)"
                 echo
                 echo '```'
-                tail -c 55000 "$f"
+                tail -n 200 "$f" | tail -c 20000
                 echo '```'
-                echo "</details>"
                 echo
               fi
             done
           } > /tmp/comment-body.md
           node -e "
             const fs = require('fs');
-            const body = fs.readFileSync('/tmp/comment-body.md', 'utf8');
+            let body = fs.readFileSync('/tmp/comment-body.md', 'utf8');
+            const MAX = 60000;
+            if (body.length > MAX) {
+              body = '_(comentario truncado - se muestran los ultimos ' + MAX + ' caracteres)_\n\n' + body.slice(-MAX);
+            }
             fs.writeFileSync('/tmp/comment-body.json', JSON.stringify({ body }));
           "
           curl -sS -X POST \
