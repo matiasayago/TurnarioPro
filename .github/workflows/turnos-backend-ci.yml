@@ -34,6 +34,10 @@ jobs:
   build-and-test:
     name: Build + type-check + bateria de scripts
     runs-on: ubuntu-latest
+    # `contents: write` habilita el ultimo paso (comentario en el commit con los logs de una
+    # falla) - mismo motivo/patron que turnos-mobile-ci.yml (ver ese workflow, commit cb20d12).
+    permissions:
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -73,7 +77,10 @@ jobs:
           RATE_LIMIT_LOGIN_MAX: "1000"
           RATE_LIMIT_REGISTRO_MAX: "1000"
         run: |
-          npx ts-node --transpile-only src/index.ts > server-fase1.log 2>&1 &
+          # Invocar el binario de node_modules/.bin DIRECTO, no "npx ts-node" (ver el comentario
+          # largo en el paso "detener servidor" de mas abajo para la causa raiz completa) - esto
+          # es lo que hace que "$!" mas abajo capture el PID real del servidor.
+          node_modules/.bin/ts-node --transpile-only src/index.ts > server-fase1.log 2>&1 &
           echo $! > server.pid
           for i in $(seq 1 30); do
             if curl -sf http://localhost:3000/health > /dev/null; then
@@ -88,14 +95,19 @@ jobs:
 
       - name: "Fase 1/2 - correr todos los scripts salvo test-rn8-ventana-cancelacion"
         run: |
-          set -e
-          for f in scripts/*.mjs; do
-            case "$f" in
-              scripts/test-rn8-ventana-cancelacion.mjs) continue ;;
-            esac
-            echo "== Corriendo $f =="
-            node "$f"
-          done
+          set +e
+          {
+            for f in scripts/*.mjs; do
+              case "$f" in
+                scripts/test-rn8-ventana-cancelacion.mjs) continue ;;
+              esac
+              echo "== Corriendo $f =="
+              node "$f" || exit 1
+            done
+          } > scripts-fase1.log 2>&1
+          code=$?
+          cat scripts-fase1.log
+          exit $code
 
       - name: "Fase 1/2 - logs del servidor (si algo fallo)"
         if: failure()
@@ -104,7 +116,33 @@ jobs:
       - name: "Fase 1/2 - detener servidor y limpiar la DB"
         if: always()
         run: |
-          if [ -f server.pid ]; then kill "$(cat server.pid)" || true; fi
+          # CAUSA RAIZ CONFIRMADA del fallo real de este job (run 31108620102 - reproducido en
+          # local antes de este fix, ver memory/proyectos/turnos-profesionales/decisiones.md):
+          # el paso anterior arrancaba el servidor con "npx ts-node ... &" y guardaba "$!" como
+          # el PID a matar acá. Pero "npx" SIEMPRE hace spawn de un proceso hijo real para correr
+          # un binario local (nunca reemplaza su propio proceso vía exec), así que "$!" capturaba
+          # el PID del WRAPPER de npx, no el del proceso de Node que realmente terminaba
+          # bindeando el puerto 3000 — matar solo ese wrapper dejaba el servidor real HUÉRFANO Y
+          # VIVO (confirmado con dos pruebas de control en local: matando el PID de "$!" con
+          # "npx ts-node", el servidor seguía respondiendo 5+ segundos después y quedaban
+          # procesos node.exe vivos; con el binario de node_modules/.bin/ invocado DIRECTO, sin
+          # npx, el mismo kill terminaba el proceso real en ~1s sin huérfanos). Ya arreglado en
+          # la raíz en el paso anterior (binario directo, no "npx") — el `kill -0` de acá abajo
+          # queda como defensa adicional por si el proceso tarda un poco en terminar de verdad,
+          # no como el fix principal.
+          if [ -f server.pid ]; then
+            PID="$(cat server.pid)"
+            kill "$PID" 2>/dev/null || true
+            for i in $(seq 1 20); do
+              if ! kill -0 "$PID" 2>/dev/null; then break; fi
+              sleep 0.5
+            done
+            if kill -0 "$PID" 2>/dev/null; then
+              echo "El servidor (PID $PID) no terminó a tiempo tras SIGTERM, forzando con SIGKILL."
+              kill -9 "$PID" 2>/dev/null || true
+              sleep 1
+            fi
+          fi
           rm -f server.pid dev.sqlite3 dev.sqlite3-*
 
       - name: "Fase 2/2 - arrancar servidor limpio (ventana de cancelacion DEFAULT = 120 min)"
@@ -114,7 +152,8 @@ jobs:
           RATE_LIMIT_LOGIN_MAX: "1000"
           RATE_LIMIT_REGISTRO_MAX: "1000"
         run: |
-          npx ts-node --transpile-only src/index.ts > server-fase2.log 2>&1 &
+          # Mismo motivo que en "Fase 1/2 - arrancar servidor": binario directo, no "npx".
+          node_modules/.bin/ts-node --transpile-only src/index.ts > server-fase2.log 2>&1 &
           echo $! > server.pid
           for i in $(seq 1 30); do
             if curl -sf http://localhost:3000/health > /dev/null; then
@@ -128,7 +167,12 @@ jobs:
           exit 1
 
       - name: "Fase 2/2 - correr test-rn8-ventana-cancelacion (necesita la ventana default)"
-        run: node scripts/test-rn8-ventana-cancelacion.mjs
+        run: |
+          set +e
+          node scripts/test-rn8-ventana-cancelacion.mjs > scripts-fase2-rn8.log 2>&1
+          code=$?
+          cat scripts-fase2-rn8.log
+          exit $code
 
       - name: "Fase 2/2 - logs del servidor (si algo fallo)"
         if: failure()
@@ -137,8 +181,61 @@ jobs:
       - name: "Fase 2/2 - detener servidor"
         if: always()
         run: |
-          if [ -f server.pid ]; then kill "$(cat server.pid)" || true; fi
+          # Mismo criterio que "Fase 1/2 - detener servidor y limpiar la DB" (ver el comentario
+          # largo ahí): esperar a que el proceso realmente termine antes de seguir, en vez de
+          # asumirlo tras el "kill". Acá no hay un tercer arranque en el mismo puerto dentro de
+          # este job, pero se mantiene por consistencia y para no reintroducir el mismo patrón
+          # fragil si en el futuro se agrega una Fase 3.
+          if [ -f server.pid ]; then
+            PID="$(cat server.pid)"
+            kill "$PID" 2>/dev/null || true
+            for i in $(seq 1 20); do
+              if ! kill -0 "$PID" 2>/dev/null; then break; fi
+              sleep 0.5
+            done
+            kill -9 "$PID" 2>/dev/null || true
+          fi
           rm -f server.pid dev.sqlite3 dev.sqlite3-*
+
+      # Este entorno de desarrollo no tiene forma de leer logs de Actions: la API de descarga
+      # de logs devuelve 403 "Must have admin rights to Repository" aun en un repo publico y
+      # sin autenticacion (mismo bloqueo ya documentado en turnos-mobile-ci.yml, commit
+      # cb20d12 - confirmado de nuevo puntualmente para este job al diagnosticar el run
+      # 31108620102). Mismo workaround: publicamos los logs ya capturados en archivo por los
+      # pasos de arriba como comentario en el commit que disparo el run, usando el
+      # GITHUB_TOKEN que Actions provee automaticamente (permiso contents:write otorgado en
+      # este job) - ese comentario si se puede leer despues sin login via la API publica (GET
+      # /repos/{owner}/{repo}/commits/{sha}/comments).
+      - name: "Publicar logs del job como comentario del commit (si algo fallo)"
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          {
+            echo "### turnos-backend-ci.yml / build-and-test - run ${{ github.run_id }} (${{ github.event_name }}, commit ${{ github.sha }})"
+            echo
+            for f in server-fase1.log scripts-fase1.log server-fase2.log scripts-fase2-rn8.log; do
+              if [ -s "$f" ]; then
+                echo "<details><summary>$f</summary>"
+                echo
+                echo '```'
+                tail -c 55000 "$f"
+                echo '```'
+                echo "</details>"
+                echo
+              fi
+            done
+          } > /tmp/comment-body.md
+          node -e "
+            const fs = require('fs');
+            const body = fs.readFileSync('/tmp/comment-body.md', 'utf8');
+            fs.writeFileSync('/tmp/comment-body.json', JSON.stringify({ body }));
+          "
+          curl -sS -X POST \
+            -H "Authorization: token $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/commits/${{ github.sha }}/comments" \
+            -d @/tmp/comment-body.json
 
   # ---------------------------------------------------------------------------------------
   # Job 2: valida el ARTEFACTO EMPAQUETADO (el Dockerfile de verdad, no el codigo suelto).
@@ -152,6 +249,10 @@ jobs:
     name: Build de imagen Docker + smoke test end-to-end
     runs-on: ubuntu-latest
     needs: build-and-test
+    # `contents: write` habilita el ultimo paso (comentario en el commit con los logs de una
+    # falla) - mismo motivo/patron que el job build-and-test de este mismo workflow.
+    permissions:
+      contents: write
     # Este job pisa el default de workflow (working-directory: backend/) por la raiz del
     # repo: `docker build <path>` necesita el path relativo a la raiz, no al backend. El
     # paso de smoke test de mas abajo vuelve a pisarlo puntualmente hacia backend/ porque
@@ -187,17 +288,58 @@ jobs:
             sleep 1
           done
           echo "El contenedor no respondio /health a tiempo."
-          docker logs turnos-backend-ci || true
+          docker logs turnos-backend-ci > docker-container.log 2>&1 || true
+          cat docker-container.log || true
           exit 1
 
       - name: Smoke test end-to-end contra el contenedor real
         working-directory: proyectos/turnos-profesionales/05-codigo/backend
-        run: node scripts/smoke-test.mjs
+        run: |
+          set +e
+          node scripts/smoke-test.mjs > smoke-test.log 2>&1
+          code=$?
+          cat smoke-test.log
+          exit $code
 
       - name: Logs del contenedor (si algo fallo)
         if: failure()
-        run: docker logs turnos-backend-ci || true
+        run: |
+          docker logs turnos-backend-ci > docker-container.log 2>&1 || true
+          cat docker-container.log || true
 
       - name: Apagar y borrar el contenedor
         if: always()
         run: docker rm -f turnos-backend-ci || true
+
+      # Mismo bloqueo de logs de Actions sin login que en el job build-and-test de este mismo
+      # workflow (y en turnos-mobile-ci.yml, commit cb20d12) - mismo workaround.
+      - name: "Publicar logs del job como comentario del commit (si algo fallo)"
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          {
+            echo "### turnos-backend-ci.yml / docker-build-smoke - run ${{ github.run_id }} (${{ github.event_name }}, commit ${{ github.sha }})"
+            echo
+            for f in docker-container.log proyectos/turnos-profesionales/05-codigo/backend/smoke-test.log; do
+              if [ -s "$f" ]; then
+                echo "<details><summary>$f</summary>"
+                echo
+                echo '```'
+                tail -c 55000 "$f"
+                echo '```'
+                echo "</details>"
+                echo
+              fi
+            done
+          } > /tmp/comment-body.md
+          node -e "
+            const fs = require('fs');
+            const body = fs.readFileSync('/tmp/comment-body.md', 'utf8');
+            fs.writeFileSync('/tmp/comment-body.json', JSON.stringify({ body }));
+          "
+          curl -sS -X POST \
+            -H "Authorization: token $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/commits/${{ github.sha }}/comments" \
+            -d @/tmp/comment-body.json
