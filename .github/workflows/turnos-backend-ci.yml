@@ -253,6 +253,14 @@ jobs:
     # falla) - mismo motivo/patron que el job build-and-test de este mismo workflow.
     permissions:
       contents: write
+    # Nota operativa (visto en el run 31115744124): este job puede fallar directo en el paso
+    # interno "Set up job" (lo genera GitHub, no un step de este archivo) con las anotaciones
+    # "Failed to resolve action download info." / "Internal Server Error", sin atarse a ninguna
+    # linea real de este YAML. Es un hiccup transitorio del servicio de Actions al resolver
+    # `actions/checkout@v4`, no un defecto de este workflow - confirmado revisando las
+    # annotations del check-run (GET /repos/.../check-runs/{id}/annotations, sin login) antes de
+    # tocar nada por esa causa. Ante ese patron puntual, reintentar (nuevo push) en vez de
+    # buscar un bug en el codigo.
     # Este job pisa el default de workflow (working-directory: backend/) por la raiz del
     # repo: `docker build <path>` necesita el path relativo a la raiz, no al backend. El
     # paso de smoke test de mas abajo vuelve a pisarlo puntualmente hacia backend/ porque

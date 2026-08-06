@@ -491,3 +491,110 @@ arriba). Resultado: **verde** —
 - La API pública sin autenticar de GitHub tiene un límite bajo (60 req/hora) que un polling
   frecuente agota rápido — para esperar un run de CI, conviene espaciar los chequeos (o
   hacerlos una sola vez tras una espera) en vez de consultar cada pocos segundos.
+
+## Primera corrida real del CI de Backend — falla y fix (Director General IA + Backend, 2026-08-06)
+
+El CI de Backend (`.github/workflows/turnos-backend-ci.yml`) corrió por primera vez de verdad al
+pushear el merge inicial y **falló** en el job `build-and-test`, paso "Fase 2/2 - correr
+test-rn8-ventana-cancelacion" ([run 31108620102](https://github.com/matiasayago/TurnarioPro/actions/runs/31108620102),
+commit `66fccfc`). El Director General IA investigó primero por su cuenta (sin poder reproducir el
+fallo ni acceder a los logs crudos) y planteó una hipótesis de trabajo; delegó en Backend
+confirmarla o refutarla con evidencia y aplicar el fix real.
+
+**Hipótesis inicial (Director General IA) — investigada y REFUTADA con evidencia, no descartada a
+ciegas:** que `scripts/test-rn8-ventana-cancelacion.mjs` pidiera "slots cercanos" con `dias=1`
+(ventana de un solo día calendario, ver `src/dominio/disponibilidad.ts`) y pudiera quedarse con
+menos de 2 slots si el paso corría en la última hora antes de medianoche del huso horario del
+proceso del servidor (los runners de GitHub Actions corren en UTC). Se refutó consultando la
+propia API pública de GitHub **sin necesitar login** (`GET /repos/.../actions/runs/{id}/jobs`,
+que sí expone `started_at`/`completed_at` por step sin autenticación, a diferencia de la descarga
+de logs crudos): el paso que falló corrió a las **14:00 UTC**, pleno día, lejos de cualquier
+medianoche — la hipótesis no podía ser la causa de ESE fallo puntual.
+
+**Causa raíz real, confirmada por reproducción directa y contrastada en local (no por inspección
+de código únicamente):** el paso "Fase 1/2 - arrancar servidor" arrancaba el servidor con
+`npx ts-node --transpile-only src/index.ts &` y guardaba `$!` en `server.pid` para matarlo más
+tarde, en "Fase 1/2 - detener servidor". `npx` **siempre** hace `spawn` de un proceso hijo real
+para correr un binario ya instalado localmente (nunca reemplaza su propio proceso vía `exec`,
+a diferencia del shim `node_modules/.bin/ts-node`, que sí usa `exec` de principio a fin) — así
+que `$!` capturaba el PID del *wrapper* de `npx`, no el del proceso de Node que realmente
+terminaba bindeando el puerto 3000. Matar solo ese wrapper dejaba el servidor real de Fase 1
+(arrancado con `VENTANA_CANCELACION_MIN=0`) **huérfano y vivo**, todavía escuchando en :3000.
+Cuando "Fase 2/2 - arrancar servidor limpio" intentaba arrancar OTRO servidor en el mismo puerto
+milisegundos después, el proceso nuevo (el que debía tener la ventana DEFAULT de 120 min)
+**crasheaba al bindear con `EADDRINUSE`** — pero el healthcheck del mismo paso igual respondía
+`200 OK`, porque en realidad seguía contestando el servidor huérfano de Fase 1. `test-rn8-
+ventana-cancelacion.mjs` terminaba corriendo, sin que nada lo indicara, contra la ventana 0 en
+vez de la default, y sus aserciones de rechazo (409 esperado al cancelar/reprogramar DENTRO de
+la ventana) fallaban con 200 — exactamente el síntoma real observado. Es un bug determinístico
+(no una carrera rara dependiente del timing), consistente con que haya fallado ya en su primera
+corrida y sin necesidad de mala suerte de horario.
+
+Evidencia de confirmación (no solo razonamiento): se reprodujo la secuencia exacta del workflow
+en local dos veces de forma contrastada — (1) arrancando con `npx ts-node ...` y matando el PID
+de `$!`: el servidor seguía respondiendo 5+ segundos después, con procesos `node` huérfanos
+todavía vivos (confirmado con `tasklist`/`Get-CimInstance` inspeccionando línea de comando); (2)
+arrancando con el binario de `node_modules/.bin/ts-node` directo (sin `npx`) y matando el mismo
+`$!`: el servidor moría limpio en ~1 segundo, sin huérfanos. Además, se forzó a propósito que dos
+instancias del servidor compitieran por el puerto 3000 (una viva, otra arrancando encima): la
+instancia nueva crashea con `EADDRINUSE` en su log pero `/health` sigue respondiendo `200 OK` —
+mecanismo confirmado end-to-end, no solo plausible.
+
+**Fix aplicado en `.github/workflows/turnos-backend-ci.yml` (commit `dc44aea`):**
+- Arrancar el servidor invocando `node_modules/.bin/ts-node` **directo**, no `npx ts-node`, en
+  los dos arranques del job `build-and-test` — elimina la causa raíz (el shim de npm usa `exec`,
+  así que `$!` pasa a capturar el PID real del servidor).
+- Al detener el servidor, esperar activamente (poll de `kill -0`, hasta 10s, con `SIGKILL` de
+  respaldo) a que el proceso realmente termine antes de seguir, en vez de asumirlo tras el
+  `kill` — defensa adicional, ya no es el fix principal, pero protege contra cierres lentos.
+- Los tres pasos que corren scripts (`Fase 1/2` batería completa, `Fase 2/2` rn8, y el smoke
+  test del job `docker-build-smoke`) ahora capturan su salida a un archivo (`scripts-fase1.log`,
+  `scripts-fase2-rn8.log`, `smoke-test.log`) y lo vuelcan igual al log del step — no cambia el
+  comportamiento visible, pero deja los logs disponibles como archivo para el paso siguiente.
+- **Nuevo paso de diagnóstico en ambos jobs** (`permissions: contents: write` +
+  `GITHUB_TOKEN`, mismo patrón ya usado en `turnos-mobile-ci.yml`, commit `cb20d12`): si el job
+  falla, publica los logs capturados como comentario del commit — se confirmó activamente que
+  este entorno vuelve a chocar con el mismo bloqueo de siempre (`GET .../actions/jobs/{id}/logs`
+  → 403 sin login, aun en repo público) al intentar diagnosticar el run 31108620102, así que se
+  aplicó el mismo workaround de forma preventiva en vez de esperar a necesitarlo de nuevo.
+- **Adicional, no la causa de este incidente puntual (investigada y descartada como tal, ver
+  arriba) pero sí una fragilidad real por separado:** en
+  `scripts/test-rn8-ventana-cancelacion.mjs`, la consulta de "slots cercanos" pasó de `dias=1` a
+  `dias=2` — con `dias=1` la ventana de disponibilidad consultada no cruza nunca un límite de día
+  calendario, así que en la última hora antes de medianoche (huso del proceso) podía devolver
+  menos de 2 slots. Se revisaron con `grep` los demás `scripts/*.mjs`: **ningún otro script tiene
+  este patrón** — todos usan `dias=14` (explícito o el default de
+  `calcularSlotsDisponibles`) o combinan un `desde` desplazado con `dias=2`, ambos ya robustos
+  ante cualquier hora de corrida.
+
+**Verificación:** batería completa de los 12 `scripts/*.mjs` re-corrida en local simulando la
+secuencia EXACTA del workflow arreglado (dos arranques de servidor sobre el mismo puerto, en
+procesos `bash` separados por step, igual que hace Actions) — limpia, sin fallos.
+[Run 31115744124](https://github.com/matiasayago/TurnarioPro/actions/runs/31115744124) (commit
+`dc44aea`, el primero con el fix): el job `build-and-test` — el que falló originalmente —
+**terminó en verde, incluido el paso de `test-rn8-ventana-cancelacion`**, confirmando el fix en
+el ambiente real de Actions. El job `docker-build-smoke` falló en ese mismo run, pero por una
+causa no relacionada: el paso interno "Set up job" (provisto por GitHub, no por este workflow)
+falló con anotaciones `"Failed to resolve action download info."` / `"Internal Server Error"` —
+un hiccup transitorio de la infraestructura de Actions al resolver `actions/checkout@v4` (la
+anotación ni siquiera ata a una línea real del YAML de este workflow), no un defecto de código.
+
+## Reutilizable para futuros proyectos de la Factory (continuación 2)
+- **En cualquier CI que arranque un proceso en segundo plano con `npx <binario-local> ... &` y
+  necesite matarlo más tarde por PID, usar el binario de `node_modules/.bin/<binario>` directo en
+  su lugar.** `npx` siempre hace `spawn` de un hijo real para ejecutar un binario ya instalado
+  (nunca `exec`), así que `$!` termina apuntando al wrapper de `npx`, no al proceso real — matar
+  ese PID deja el proceso real huérfano y vivo, ocupando el puerto/recurso que el siguiente paso
+  cree que liberó. Los shims que genera npm en `node_modules/.bin/` sí usan `exec` de punta a
+  punta, así que invocarlos directo hace que `$!` sea confiable. Aplica a cualquier lenguaje/CLI
+  empaquetado como paquete npm con un `bin` propio, no solo a `ts-node`.
+- Ante una hipótesis de causa raíz para un fallo de CI, conviene primero buscar evidencia barata
+  que la confirme o refute ANTES de reproducir nada costoso: la API pública de jobs de GitHub
+  Actions expone `started_at`/`completed_at` por step sin necesitar login — alcanza para descartar
+  o confirmar rápido cualquier hipótesis que dependa del horario en que corrió un paso.
+- Un job de un workflow puede fallar en el paso interno "Set up job" (antes de que corra
+  cualquier step propio) por una falla transitoria de la infraestructura de Actions al resolver
+  una action (`"Failed to resolve action download info."` / `"Internal Server Error"`, sin atar a
+  ninguna línea real del YAML) — no confundir con un defecto de configuración: se distingue
+  revisando las annotations del check-run (`GET /repos/.../check-runs/{id}/annotations`, también
+  sin login) antes de tocar nada del workflow por esa causa.
