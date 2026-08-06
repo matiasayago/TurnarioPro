@@ -90,7 +90,19 @@ async function main() {
   assert(cliente.status === 201, 'registro de cliente');
   const clienteToken = cliente.data.token;
 
-  const slotsCercanos = await req('GET', `/profesionales/${profesionalId}/slots?servicio_id=${servicioId}&dias=1`);
+  // `dias=2` (no `dias=1`) a propósito: `calcularSlotsDisponibles` (src/dominio/disponibilidad.ts)
+  // ancla la ventana a `inicioBusqueda` (= ahora) y sólo filtra `cursor > inicioBusqueda` dentro
+  // de esos días — con `dias=1` la ventana cubre nada más que lo que queda del día calendario de
+  // "ahora" en el huso horario del proceso del servidor, así que si este script corriera en los
+  // últimos ~60 minutos antes de la medianoche de ese huso, quedarían menos de 2 slots libres
+  // "hoy" y este assert (de SETUP) fallaría por una cuestión de horario, no de lógica de negocio
+  // (investigado como hipótesis para el fallo real de CI en el run 31108620102 — descartada como
+  // causa de ESE incidente puntual porque el run falló a las 14:00 UTC, lejos de la medianoche;
+  // la causa real fue otra, ver memory/proyectos/turnos-profesionales/decisiones.md — pero la
+  // fragilidad de `dias=1` en sí es real y se corrige acá igual, de forma preventiva). Con
+  // `dias=2` la ventana siempre cruza un límite de día completo sin importar la hora en que
+  // corra el script, en cualquier huso horario razonable.
+  const slotsCercanos = await req('GET', `/profesionales/${profesionalId}/slots?servicio_id=${servicioId}&dias=2`);
   assert(slotsCercanos.status === 200 && slotsCercanos.data.slots.length >= 2, 'hay al menos 2 slots cercanos');
   const [nearSlot1, nearSlot2] = slotsCercanos.data.slots;
 
