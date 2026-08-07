@@ -9,6 +9,15 @@ name: Turnos Profesionales - Backend CI
 # eventos push, no solo la ejecucion de jobs ya encolados. Este comentario es un cambio real
 # (no un commit vacio, que el filtro de paths hubiera ignorado de cualquier forma) para
 # volver a intentar el trigger una vez que GitHub confirmo el servicio restablecido.
+#
+# Nota (2026-08-07): ambos jobs corren ahora contra PostgreSQL real (service container),
+# coordinado con Backend migrando el driver de acceso a datos de `node:sqlite` a `pg` en
+# paralelo a este cambio - no son dos cambios independientes, el primer push que junte ambos
+# es el que da la primera senal real de si la migracion funciona de punta a punta. Ver el
+# bloque "services" + "env: DATABASE_URL" de cada job para las credenciales de test (fijas,
+# no secretas - contenedor efimero del run) y proyectos/turnos-profesionales/08-despliegue/
+# README.md para el detalle completo (incluida la misma DATABASE_URL para docker-compose.yml
+# y para un despliegue real en Render).
 
 on:
   push:
@@ -25,9 +34,12 @@ defaults:
     working-directory: proyectos/turnos-profesionales/05-codigo/backend
 
 env:
-  # src/db.ts usa el modulo built-in `node:sqlite`, disponible recien desde Node >=22.5 (ver
-  # README.md del backend y memory/proyectos/turnos-profesionales/decisiones.md). No bajar
-  # de 22 aca sin revisar tambien el Dockerfile (node:22-slim) - tienen que ir coordinados.
+  # Version de Node fijada a proposito, coordinada con el Dockerfile (node:22-slim) - no
+  # bajar de 22 aca sin revisar los dos archivos juntos. Historicamente este piso salia de
+  # que src/db.ts usaba el modulo built-in `node:sqlite` (exige Node >=22.5) - con Backend
+  # migrando el driver a `pg` (ver "services"/"DATABASE_URL" mas abajo), `pg` en si no exige
+  # ningun piso de Node tan alto, pero se mantiene Node 22 igual por consistencia con el
+  # Dockerfile de produccion, no porque el driver nuevo lo requiera.
   NODE_VERSION: "22"
 
 jobs:
@@ -44,6 +56,48 @@ jobs:
     # falla) - mismo motivo/patron que turnos-mobile-ci.yml (ver ese workflow, commit cb20d12).
     permissions:
       contents: write
+    # Service container de PostgreSQL real (2026-08-07). Actions lo arranca ANTES que
+    # cualquier step de este job y espera a que su healthcheck (--health-cmd de "options" de
+    # abajo - no confundir con el HEALTHCHECK del Dockerfile del backend, son cosas
+    # distintas) este "healthy" antes de dejar correr el primer step: no hace falta un loop
+    # propio de espera como el que si usan mas abajo los pasos "arrancar servidor" para
+    # /health del backend. Credenciales fijas y NO secretas a proposito: este Postgres vive
+    # solo durante este run, en la red interna del job, nunca se expone fuera de el - mismo
+    # criterio que el JWT_SECRET fijo que ya usa el job docker-build-smoke de mas abajo.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: turnos_ci
+          POSTGRES_PASSWORD: turnos_ci_password
+          POSTGRES_DB: turnos_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U turnos_ci -d turnos_test"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+    # DATABASE_URL a nivel de JOB: la heredan todos los steps de abajo, incluidos los que ya
+    # definen su propio "env:" (PORT/EXPIRACION_PAGO_MIN/etc. en los pasos "arrancar
+    # servidor") - el env de un step se COMBINA con el del job, no lo reemplaza entero. Host
+    # "localhost" porque los steps de este job corren directo en la maquina del runner (no
+    # dentro de otro contenedor) y así es como Actions publica el puerto de un service
+    # container en ese caso - ver docker-compose.yml para el equivalente en desarrollo local,
+    # donde el host es el nombre del servicio ("postgres"), no "localhost".
+    #
+    # OJO - esto cambia un supuesto que tenian los dos arranques del servidor de mas abajo:
+    # con node:sqlite, "Fase 1/2 - detener servidor y limpiar la DB" borraba el archivo
+    # dev.sqlite3 entre Fase 1 y Fase 2, asi que Fase 2 arrancaba siempre con una base VACIA.
+    # Este Postgres es el MISMO contenedor para ambas fases (no hay archivo que borrar), asi
+    # que Fase 2 arranca con los datos que dejo Fase 1 todavia presentes. Es seguro porque
+    # scripts/*.mjs ya esta escrito para convivir con datos de otros scripts en la misma
+    # corrida (emails/nombres unicos por timestamp - ver p.ej. el comentario de
+    # scripts/test-rn8-ventana-cancelacion.mjs: "No depende de otros scripts"), pero no se
+    # audito exhaustivamente cada uno de los 10 scripts contra este supuesto especifico: si
+    # alguno asume implicitamente una base vacia, va a fallar recien aca.
+    env:
+      DATABASE_URL: postgresql://turnos_ci:turnos_ci_password@localhost:5432/turnos_test
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -149,6 +203,11 @@ jobs:
               sleep 1
             fi
           fi
+          # dev.sqlite3* ya no se genera (Postgres real via DATABASE_URL, ver "services" mas
+          # arriba) - el "rm -f" se deja igual de inofensivo si algun dia reaparece un
+          # archivo asi por error de configuracion, pero ya no es el mecanismo real de
+          # limpieza entre Fase 1 y Fase 2 (ver la nota larga junto a "services: postgres"
+          # sobre por que Fase 2 ya NO arranca con una base vacia).
           rm -f server.pid dev.sqlite3 dev.sqlite3-*
 
       - name: "Fase 2/2 - arrancar servidor limpio (ventana de cancelacion DEFAULT = 120 min)"
@@ -201,6 +260,11 @@ jobs:
             done
             kill -9 "$PID" 2>/dev/null || true
           fi
+          # dev.sqlite3* ya no se genera (Postgres real via DATABASE_URL, ver "services" mas
+          # arriba) - el "rm -f" se deja igual de inofensivo si algun dia reaparece un
+          # archivo asi por error de configuracion, pero ya no es el mecanismo real de
+          # limpieza entre Fase 1 y Fase 2 (ver la nota larga junto a "services: postgres"
+          # sobre por que Fase 2 ya NO arranca con una base vacia).
           rm -f server.pid dev.sqlite3 dev.sqlite3-*
 
       # Este entorno de desarrollo no tiene forma de leer logs de Actions: la API de descarga
@@ -267,7 +331,9 @@ jobs:
   # el entorno de desarrollo de DevOps no tiene Docker instalado (ver 08-despliegue/
   # README.md), pero los runners de GitHub Actions si lo traen preinstalado. Corre en
   # config "tipo produccion" (NODE_ENV=production del propio Dockerfile, sin
-  # ENABLE_DEV_ROUTES) para que este smoke test sea representativo de un despliegue real.
+  # ENABLE_DEV_ROUTES) para que este smoke test sea representativo de un despliegue real -
+  # incluida una conexion real a su propio Postgres efimero (--network host, ver el paso
+  # "Levantar el contenedor" mas abajo), no un mock ni node:sqlite.
   # ---------------------------------------------------------------------------------------
   docker-build-smoke:
     name: Build de imagen Docker + smoke test end-to-end
@@ -277,6 +343,29 @@ jobs:
     # falla) - mismo motivo/patron que el job build-and-test de este mismo workflow.
     permissions:
       contents: write
+    # Service container de PostgreSQL (2026-08-07) - mismo motivo y mismas credenciales fijas
+    # (no secretas) que el job build-and-test de mas arriba, ver el comentario largo ahi. Este
+    # es un Postgres efimero PROPIO de este job (cada job de Actions corre en su propia
+    # maquina nueva; no hay ningun dato compartido con el Postgres de build-and-test). La
+    # diferencia real con ese otro job: aca la app no corre como step directo del runner sino
+    # DENTRO de un contenedor levantado a mano con "docker run" (ver ese paso mas abajo), asi
+    # que "localhost" adentro de ESE contenedor no ve por defecto el puerto publicado de este
+    # service container - se resuelve con "--network host" en el "docker run", no con un
+    # host/IP distinto en DATABASE_URL.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: turnos_ci
+          POSTGRES_PASSWORD: turnos_ci_password
+          POSTGRES_DB: turnos_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U turnos_ci -d turnos_test"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
     # Nota operativa (visto en el run 31115744124): este job puede fallar directo en el paso
     # interno "Set up job" (lo genera GitHub, no un step de este archivo) con las anotaciones
     # "Failed to resolve action download info." / "Internal Server Error", sin atarse a ninguna
@@ -317,10 +406,19 @@ jobs:
       - name: "Levantar el contenedor (config tipo produccion - sin ENABLE_DEV_ROUTES)"
         run: |
           set +e
+          # --network host (en vez de "-p 3000:3000"): el service container de postgres de
+          # arriba publica su puerto 5432 en el localhost DEL RUNNER, no en una red docker
+          # que este contenedor comparta automaticamente - un "docker run" suelto (no
+          # administrado por Actions, a diferencia de un step normal) no ve ese localhost
+          # salvo que comparta la red del host explicitamente. Con --network host, tanto
+          # "localhost:5432" (Postgres) como el puerto 3000 de la app quedan expuestos
+          # directo en el runner sin mapeo aparte - "-p" se saca del todo (Docker lo ignora
+          # con un warning bajo --network host; mejor no dejarlo de adorno).
           docker run -d \
             --name turnos-backend-ci \
-            -p 3000:3000 \
+            --network host \
             -e JWT_SECRET="ci-smoke-test-secret-nunca-usar-en-produccion" \
+            -e DATABASE_URL="postgresql://turnos_ci:turnos_ci_password@localhost:5432/turnos_test" \
             turnos-profesionales-backend:ci \
             > docker-run.log 2>&1
           code=$?
