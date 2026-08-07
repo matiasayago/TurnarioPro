@@ -1,21 +1,64 @@
 # Orquestación de DESARROLLO/STAGING LOCAL para el backend de Turnos Profesionales
-# (TURNOS-2026-001). NO pensada para producción real: no hay servicio de PostgreSQL acá
-# porque el código de la app (src/db.ts y todas las queries de src/routes/*.ts) todavía
-# solo sabe hablar con `node:sqlite` — ver el gap documentado con detalle, y como
-# bloqueante explícito antes de cualquier despliegue real, en
-# ../../08-despliegue/README.md. Tampoco hay orquestación multi-réplica; eso (y un
-# eventual servicio de Postgres) es candidato a infra/kubernetes/ el día que el backend
-# migre de driver.
+# (TURNOS-2026-001). Incluye un servicio `postgres` real (2026-08-07): el código de la app
+# migró el driver de `node:sqlite` a `pg` (PostgreSQL real, ver ../../08-despliegue/
+# README.md §7) — hasta este ciclo, acá no había servicio de Postgres a propósito, porque
+# agregarlo hubiera sido un espejismo mientras el código todavía no sabía hablar con él; ya
+# no es el caso. Tampoco hay orquestación multi-réplica; eso sigue siendo candidato a
+# infra/kubernetes/ si el volumen de tráfico algún día lo justifica.
 #
 # Uso:
 #   1. cp .env.example .env        (completar JWT_SECRET — ver ese archivo, NUNCA commitear .env)
 #   2. docker compose up --build
 #   3. curl http://localhost:3000/health
 #
-# El HEALTHCHECK del contenedor es el que define el propio Dockerfile (una sola fuente de
-# verdad) — no se redefine acá para no arriesgar que se desincronicen.
+# El HEALTHCHECK del contenedor `backend` es el que define el propio Dockerfile (una sola
+# fuente de verdad) — no se redefine acá para no arriesgar que se desincronicen. El
+# healthcheck de `postgres` sí se define acá (más abajo): no hay ningún otro lugar donde
+# vivir, y `depends_on: condition: service_healthy` lo necesita para no arrancar `backend`
+# contra una base todavía no lista para aceptar conexiones.
 
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: turnos-profesionales-postgres
+
+    # Credenciales fijas de DESARROLLO LOCAL, no secretas a propósito: este contenedor no
+    # publica su puerto al host (ver comentario en "ports" más abajo) — solo es alcanzable
+    # desde dentro de la red interna que arma Compose para este archivo, nunca desde afuera
+    # de la máquina del desarrollador. Mismo criterio que las credenciales fijas del service
+    # container de Postgres en `.github/workflows/turnos-backend-ci.yml` (ver ese archivo),
+    # aunque con valores distintos a propósito, para que un log/error de un entorno nunca se
+    # confunda con el del otro. **Nunca reutilizar estas credenciales en un entorno real** —
+    # producción usa el Postgres gestionado del proveedor de hosting (Render/Railway, ver
+    # ../../08-despliegue/README.md), con su propia `DATABASE_URL` inyectada por ese proveedor.
+    environment:
+      POSTGRES_USER: turnos
+      POSTGRES_PASSWORD: turnos_dev_password
+      POSTGRES_DB: turnos_dev
+
+    volumes:
+      # Volumen NOMBRADO (no bind mount a una ruta del host) para persistir los datos de
+      # Postgres entre reinicios/recreaciones del contenedor — reemplaza al volumen
+      # `turnos_backend_data:/data` que este archivo usaba hasta este ciclo para el archivo
+      # sqlite (ver el Dockerfile: ya no fija ningún DB_PATH ni crea /data, no queda nada
+      # que ese volumen viejo necesitara persistir).
+      - turnos_postgres_data:/var/lib/postgresql/data
+
+    # A propósito SIN publicar el puerto al host (nada de "ports: - 5432:5432"): el
+    # servicio `backend` no lo necesita (se conecta por el nombre de red interno de Compose,
+    # "postgres", no por localhost — ver DATABASE_URL más abajo) y no publicarlo evita choques
+    # con un Postgres nativo que ya pueda estar corriendo en el puerto 5432 de la máquina del
+    # desarrollador. Si necesitás conectar un cliente (psql/DBeaver/etc.) desde el host,
+    # agregar temporalmente "ports: - \"5432:5432\"" acá, o usar
+    # `docker compose exec postgres psql -U turnos -d turnos_dev`.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U turnos -d turnos_dev"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+    restart: unless-stopped
+
   backend:
     build:
       context: .
@@ -30,6 +73,20 @@ services:
     env_file:
       - .env
 
+    # DATABASE_URL fijada ACÁ (no en .env/.env.example) a propósito: tiene que apuntar al
+    # nombre de servicio interno de Compose ("postgres", resuelto por la red que arma
+    # Compose automáticamente), nunca a "localhost" — un valor que ningún desarrollador
+    # debería tener que adivinar ni pisar a mano. Si `.env` definiera además su propio
+    # DATABASE_URL, esta línea de todos modos gana: Compose prioriza `environment:` por
+    # sobre `env_file:` para la misma clave. Mismas credenciales que "environment:" del
+    # servicio `postgres` de acá arriba — un solo lugar para mantenerlas sincronizadas.
+    environment:
+      DATABASE_URL: postgresql://turnos:turnos_dev_password@postgres:5432/turnos_dev
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
     ports:
       # Mismo valor en ambos lados a propósito: si PORT se pisa en .env, la app adentro del
       # contenedor escucha en ese puerto (process.env.PORT, ver src/index.ts) — mapear
@@ -37,15 +94,8 @@ services:
       # con el puerto real en el que escucha el proceso.
       - "${PORT:-3000}:${PORT:-3000}"
 
-    volumes:
-      # Volumen NOMBRADO (no bind mount a una ruta del host) para persistir el archivo
-      # sqlite entre reinicios/recreaciones del contenedor. Apunta a /data, que es donde el
-      # Dockerfile ya fija DB_PATH=/data/dev.sqlite3 — no hace falta pisar DB_PATH acá salvo
-      # que se quiera un nombre de archivo distinto dentro de ese mismo directorio.
-      - turnos_backend_data:/data
-
     restart: unless-stopped
 
 volumes:
-  turnos_backend_data:
-    name: turnos_backend_data
+  turnos_postgres_data:
+    name: turnos_postgres_data

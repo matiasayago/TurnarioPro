@@ -15,7 +15,14 @@
 // reserva duplicada exacta). Si reusáramos siempre el filtro de ocupación para la validación de
 // RN1, una reserva duplicada exacta pasaría de 409 a 400 (regresión detectada al re-correr
 // smoke-test.mjs) porque el slot ocupado directamente no aparecería en la lista.
-import { db } from '../db';
+//
+// Migración a PostgreSQL (ver src/db.ts): recibe un `Queryable` en vez de asumir un objeto `db`
+// síncrono — tanto `pool` (lecturas públicas, ej. GET /profesionales/:id/slots, sin necesidad
+// de contexto RLS gracias a la policy `turno_select_publico` agregada en migrations/001_init.sql,
+// ver esa policy para el porqué) como un `client` ya dentro de una transacción autenticada
+// (POST /turnos reusa el mismo client de su propia transacción para RN1/RN2) cumplen esa
+// interfaz sin duplicar esta función para cada caso.
+import { Queryable } from '../db';
 
 export interface OpcionesCalculoSlots {
   /** Desde qué instante buscar (por defecto: ahora). Para validar RN1 en POST /turnos se pasa
@@ -49,14 +56,14 @@ export interface ResultadoCalculoSlots {
  * Devuelve `null` si el servicio no existe (el caller decide qué responder — 404 en ambos
  * lugares que lo usan hoy).
  */
-export function calcularSlotsDisponibles(
+export async function calcularSlotsDisponibles(
+  db: Queryable,
   profesionalId: string,
   servicioId: string,
   opciones: OpcionesCalculoSlots = {}
-): ResultadoCalculoSlots | null {
-  const servicio = db.prepare('SELECT duracion_min FROM servicio WHERE id = ?').get(servicioId) as
-    | { duracion_min: number }
-    | undefined;
+): Promise<ResultadoCalculoSlots | null> {
+  const servicioResult = await db.query('SELECT duracion_min FROM servicio WHERE id = $1', [servicioId]);
+  const servicio = servicioResult.rows[0] as { duracion_min: number } | undefined;
   if (!servicio) return null;
 
   // D10 (amenda RN3, ver modelo-datos.md §2quater): si el profesional configuró su propia
@@ -66,29 +73,35 @@ export function calcularSlotsDisponibles(
   // usando `servicio.duracion_min`. Único lugar que decide el tamaño del paso de la grilla, así
   // que este fix alcanza para GET /profesionales/:id/slots y POST /turnos, que solo llaman a
   // esta función — no hace falta duplicar la regla en ninguno de los dos.
-  const profesional = db
-    .prepare('SELECT duracion_cita_min FROM profesional WHERE id = ?')
-    .get(profesionalId) as { duracion_cita_min: number | null } | undefined;
+  const profesionalResult = await db.query(
+    'SELECT duracion_cita_min FROM profesional WHERE id = $1',
+    [profesionalId]
+  );
+  const profesional = profesionalResult.rows[0] as { duracion_cita_min: number | null } | undefined;
   const duracionEfectivaMin = profesional?.duracion_cita_min ?? servicio.duracion_min;
 
-  const bloques = db
-    .prepare('SELECT * FROM disponibilidad WHERE profesional_id = ? AND servicio_id = ?')
-    .all(profesionalId, servicioId) as any[];
+  const bloquesResult = await db.query(
+    'SELECT * FROM disponibilidad WHERE profesional_id = $1 AND servicio_id = $2',
+    [profesionalId, servicioId]
+  );
+  const bloques = bloquesResult.rows as any[];
 
   const inicioBusqueda = opciones.desde ?? new Date();
   const ventanaDias = opciones.dias ?? 14;
   const maxSlots = opciones.maxSlots ?? 20;
   const duracionMs = duracionEfectivaMin * 60_000;
 
-  const turnosActivos = db
-    .prepare(
-      `SELECT inicio, fin FROM turno WHERE profesional_id = ? AND estado IN ('pendiente_de_pago','confirmado')`
-    )
-    .all(profesionalId) as { inicio: string; fin: string }[];
+  const turnosActivosResult = await db.query(
+    `SELECT inicio, fin FROM turno WHERE profesional_id = $1 AND estado IN ('pendiente_de_pago','confirmado')`,
+    [profesionalId]
+  );
+  const turnosActivos = turnosActivosResult.rows as { inicio: string; fin: string }[];
 
-  const excepciones = db
-    .prepare('SELECT inicio, fin FROM excepcion_disponibilidad WHERE profesional_id = ?')
-    .all(profesionalId) as { inicio: string; fin: string }[];
+  const excepcionesResult = await db.query(
+    'SELECT inicio, fin FROM excepcion_disponibilidad WHERE profesional_id = $1',
+    [profesionalId]
+  );
+  const excepciones = excepcionesResult.rows as { inicio: string; fin: string }[];
 
   const ocupado = (ini: Date, fin: Date) =>
     [...turnosActivos, ...excepciones].some((o) => ini < new Date(o.fin) && fin > new Date(o.inicio));
@@ -100,6 +113,11 @@ export function calcularSlotsDisponibles(
     const bloqueDelDia = bloques.find((b) => b.dia_semana === dia.getDay());
     if (!bloqueDelDia) continue;
 
+    // `hora_inicio`/`hora_fin` son columnas TIME de Postgres — `pg` las devuelve como string
+    // "HH:MM:SS" (a diferencia del TEXT "HH:MM" de node:sqlite). El destructuring de abajo sigue
+    // funcionando sin cambios: toma los primeros dos elementos (horas, minutos) e ignora el
+    // resto (segundos, siempre "00" acá — `horaSchema` en dominio/validacion.ts solo acepta
+    // HH:MM al cargar disponibilidad).
     const [hIni, mIni] = bloqueDelDia.hora_inicio.split(':').map(Number);
     const [hFin, mFin] = bloqueDelDia.hora_fin.split(':').map(Number);
     let cursor = new Date(dia);

@@ -6,25 +6,23 @@
 # (sin devDependencies, sin scripts/ de prueba manual, sin la preview web de desarrollo).
 #
 # ═══════════════════════════════════════════════════════════════════════════════════════
-# ATENCIÓN — restricción de versión de Node poco común en este proyecto, léase antes de
-# tocar la imagen base:
+# Nota de versión de Node — coordinada con `.github/workflows/turnos-backend-ci.yml`
+# (`NODE_VERSION`, raíz del repo): no bajar de acá sin revisar los dos archivos juntos.
 #
-# El acceso a datos (src/db.ts) usa el módulo built-in `node:sqlite`, disponible recién
-# desde Node >=22.5 (ver README.md de este backend y
-# memory/proyectos/turnos-profesionales/decisiones.md). Se adoptó en desarrollo porque
-# `better-sqlite3` — la elección original — requiere compilar un addon nativo vía
-# node-gyp/Visual Studio Build Tools, no disponibles en el entorno de desarrollo de este
-# proyecto. Por eso esta imagen NO puede bajarse a Node 18/20 LTS como se haría por
-# default en cualquier otro proyecto Node: hace falta Node 22.x (o superior) sí o sí.
-# `node:22-slim` sigue la serie 22 mientras reciba parches (a la fecha de este ciclo,
-# muy por encima de 22.5). Si en algún momento se fija por dígest exacto, confirmar que
-# el patch sea >=22.5.0 antes de considerar bajar la imagen a una versión menor.
+# Históricamente este piso salía de que el acceso a datos (src/db.ts) usaba el módulo
+# built-in `node:sqlite`, disponible recién desde Node >=22.5 — se había adoptado en
+# desarrollo porque `better-sqlite3` (la elección original) requiere compilar un addon
+# nativo vía node-gyp/Visual Studio Build Tools, no disponibles en el entorno de
+# desarrollo de este proyecto (ver README.md de este backend y
+# memory/proyectos/turnos-profesionales/decisiones.md).
 #
-# Producción (fuera de este ciclo) apunta a PostgreSQL, no a node:sqlite — ver el gap
-# documentado en ../../08-despliegue/README.md y ../../03-arquitectura/modelo-datos.md §5
-# (Row Level Security, diseñada pero todavía sin conectar). Esta imagen refleja el backend
-# tal como existe HOY (node:sqlite), no un setup de Postgres que el código todavía no sabe
-# hablar.
+# Producción ya apunta a PostgreSQL real (2026-08-07, driver `pg`, variable de entorno
+# `DATABASE_URL` — ver ../../08-despliegue/README.md y ../../03-arquitectura/modelo-datos.md
+# §5, Row Level Security). Esta imagen se queda en `node:22-slim` por consistencia con el
+# runtime que valida CI, no porque `pg` en sí exija un piso de Node tan alto como el que
+# exigía `node:sqlite` — bajar la versión de Node en el futuro es una decisión válida en
+# principio, pero coordinada (revisar también el workflow de CI), no algo que se deba asumir
+# solo porque el driver cambió.
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
 # ---------------------------------------------------------------------------------------
@@ -105,14 +103,15 @@ COPY package.json ./
 # DENTRO de dist/ y no en la raíz de /app.
 COPY migrations ./dist/migrations
 
-# El archivo sqlite de node:sqlite se guarda en /data (volumen nombrado, ver
-# docker-compose.yml) en vez de depender del default de db.ts, que — por el mismo desfase
-# de __dirname de arriba — resolvería a dist/dev.sqlite3: un lugar frágil y poco intuitivo
-# para un volumen persistente (dentro del propio artefacto de build). DB_PATH ya es una
-# variable soportada por el código (src/db.ts) — fijarla acá no requiere ningún cambio en
-# el backend.
-ENV DB_PATH=/data/dev.sqlite3
-RUN mkdir -p /data && chown node:node /data
+# Con PostgreSQL real (DATABASE_URL, ver ../../08-despliegue/README.md), esta imagen ya NO
+# persiste ningún archivo de base de datos local: no hace falta declarar ningún volumen ni
+# crear ningún directorio de datos acá. La persistencia es responsabilidad del servicio de
+# Postgres — el Postgres gestionado del proveedor de hosting en producción (Render/Railway),
+# o el servicio `postgres` de docker-compose.yml en desarrollo/staging local — nunca de esta
+# imagen. (Hasta este ciclo, acá se fijaba `ENV DB_PATH=/data/dev.sqlite3` y se creaba /data
+# para el volumen nombrado `turnos_backend_data` que usaba docker-compose.yml con
+# node:sqlite; ambos se sacaron junto con la migración de driver — ver
+# memory/proyectos/turnos-profesionales/decisiones.md.)
 
 # NUNCA se setea ENABLE_DEV_ROUTES=true en esta imagen (ver HIGH-4 en
 # ../../07-seguridad/informe-seguridad.md): con la variable ausente, src/app.ts no monta
@@ -132,8 +131,8 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 
 # La imagen oficial de Node ya trae un usuario no-root llamado `node` (uid/gid 1000) —
 # corremos con ese usuario en vez de root, buena práctica estándar de contenedores (no es
-# un requisito puntual de este backend). Va al final para que los pasos anteriores
-# (mkdir/chown de /data) puedan correr como root.
+# un requisito puntual de este backend). Va al final del stage, después de todos los COPY
+# (que si necesitan correr como root para fijar ownership por default).
 USER node
 
 CMD ["node", "dist/src/index.js"]
