@@ -3,6 +3,12 @@ name: Turnos Profesionales - Backend CI
 # CI del backend de TURNOS-2026-001 (proyectos/turnos-profesionales/05-codigo/backend).
 # Fase 6 (DevOps) - ver proyectos/turnos-profesionales/08-despliegue/README.md para el
 # detalle completo de lo que valida este workflow y por que esta dividido en dos jobs.
+#
+# Nota (2026-08-06): 073dc23 no disparo ningun run pese a tocar este archivo (dentro del
+# filtro de paths de abajo) - la caida de Actions de ese dia afecto tambien la entrega de
+# eventos push, no solo la ejecucion de jobs ya encolados. Este comentario es un cambio real
+# (no un commit vacio, que el filtro de paths hubiera ignorado de cualquier forma) para
+# volver a intentar el trigger una vez que GitHub confirmo el servicio restablecido.
 
 on:
   push:
