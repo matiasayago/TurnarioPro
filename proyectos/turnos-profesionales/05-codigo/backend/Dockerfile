@@ -39,13 +39,30 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 
-# tsconfig.json + src/ alcanza para compilar. `scripts/` (los .mjs de prueba manual) NO se
-# copian ni hacen falta acá: son JavaScript suelto que no pasa por tsc (el include
+# tsconfig.json + src/ alcanza para COMPILAR (tsc). `scripts/` (los .mjs de prueba manual)
+# NO se copian ni hacen falta acá: son JavaScript suelto que no pasa por tsc (el include
 # "scripts/**/*.ts" de tsconfig.json no matchea ningún archivo hoy, confirmado en este
 # ciclo) y no se ejecuta en producción, solo en desarrollo/CI (ver
 # .github/workflows/turnos-backend-ci.yml en la raíz del repo).
+#
+# migrations/ SÍ hace falta acá, aunque tsc no la toque (no es .ts, no está en ningún
+# "include" de tsconfig.json): `npm run build` encadena automáticamente el script
+# `postbuild` de package.json ("node -e require('fs').cpSync('migrations',
+# 'dist/migrations',...)"), y ese cpSync corre con cwd /app (WORKDIR de este stage) — sin
+# este COPY, migrations/ no existe todavía dentro de la imagen en construcción en ese punto
+# y el postbuild revienta con ENOENT, tirando abajo todo "RUN npm run build" (bug real
+# encontrado en este ciclo: docker-build-smoke fallaba acá, confirmado en el log de
+# run 31142348973 vía el mecanismo de diagnóstico — ver
+# memory/proyectos/turnos-profesionales/decisiones.md). El resultado de este cpSync dentro
+# del build stage (dist/migrations acá) es redundante con el COPY explícito hacia
+# ./dist/migrations del stage de runtime más abajo — se deja de todos modos: es el mismo
+# postbuild que ya corre standalone en cualquier `npm run build` fuera de Docker (ver
+# memory/proyectos/turnos-profesionales/decisiones.md, "Cierre del hallazgo de
+# package.json"), y hacerlo fallar acá rompería la paridad entre build en Docker y build
+# fuera de Docker.
 COPY tsconfig.json ./
 COPY src ./src
+COPY migrations ./migrations
 RUN npm run build
 
 # Nos quedamos solo con las dependencias de producción — saca ts-node, ts-node-dev,
@@ -69,15 +86,18 @@ COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY package.json ./
 
-# ── Hallazgo de este ciclo, importante para quien toque este Dockerfile ────────────────
+# ── Nota importante para quien toque este Dockerfile ────────────────────────────────────
 # tsconfig.json compila con rootDir "." (ver ese archivo), así que el JS compilado queda
-# en dist/src/*.js, NO en dist/*.js — pese a que package.json ("main"/"start") dice
-# "dist/index.js". Ese campo de package.json está desactualizado y nunca se ejercitó en
-# este proyecto (el flujo de desarrollo usa ts-node-dev, no el build compilado). Verificado
-# en este ciclo: `npm run build && node dist/index.js` falla con "Cannot find module"; `node
-# dist/src/index.js` funciona (smoke test completo pasado contra esa instancia — ver
-# ../../08-despliegue/README.md). Por eso el CMD de esta imagen usa la ruta real y no la
-# que dice package.json — reportado como defecto a corregir en un ciclo de Backend.
+# en dist/src/*.js, NO en dist/*.js. Esto en su momento (hallazgo de un ciclo anterior)
+# generó una inconsistencia real con package.json ("main"/"start" decían "dist/index.js",
+# desactualizado — nunca se había ejercitado porque el flujo de desarrollo usa
+# ts-node-dev, no el build compilado). Ya corregido en package.json (ver
+# memory/proyectos/turnos-profesionales/decisiones.md, "Cierre del hallazgo de
+# package.json"): "main"/"start" apuntan hoy a "dist/src/index.js", igual que el CMD de
+# acá abajo. Este Dockerfile de todos modos sigue usando la ruta explícita en el CMD (en
+# vez de depender de `npm start`) por ser la práctica estándar de contenedores — invocar
+# `node` directo evita la capa de proceso extra de npm y sus quirks de propagación de
+# señales (SIGTERM), no porque package.json siga roto.
 #
 # Por el mismo motivo, __dirname en runtime apunta a dist/src (no a src/), así que
 # runMigrations() (src/db.ts) resuelve "../migrations" como dist/migrations, no como
