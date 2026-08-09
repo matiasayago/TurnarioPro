@@ -331,9 +331,12 @@ elaborada (cards con ícono propio por configuración, más una sección "📋 C
 Citas" que **repite** los mismos 3 valores de "Configuración General" en un formato distinto,
 más abajo en la misma página) mientras que las capturas del 25 y 27 de abril (dos sesiones
 independientes que coinciden entre sí) muestran una versión más compacta y **sin** esa
-repetición. Esta revisión toma la versión compacta (25/27 abril) como más representativa por
-estar corroborada dos veces, pero **se recomienda confirmar con el CEO** cuál de las dos
-versiones es la vigente antes de que Mobile la implemente — no se descarta la elaborada.
+repetición.
+
+**Resuelto — decisión del CEO (2026-08-09): la versión COMPACTA (25/27 abril) es la vigente.**
+La versión elaborada (23 abril, con `SettingCard`/`ResumenCard` individuales) no se implementa
+en Mobile — el wireframe corregido de más abajo (que ya usaba la compacta) queda confirmado
+como definitivo, sin cambios.
 
 **Aparte, existe un modal real y mucho más simple llamado "Agregar Nuevo Horario"** (no
 capturado como parte del scroll de esta pantalla, así que probablemente se accede desde otro
@@ -779,6 +782,11 @@ elija una unilateralmente. La Variante B es la que más se parece a este wirefra
 HU-20; si hay que elegir una sola pantalla de "ver" como definitiva, esta revisión sugiere la B
 como punto de partida, sujeto a confirmación.
 
+**Resuelto — decisión del CEO (2026-08-09): la Variante B (datos personales completos) es la
+pantalla definitiva de "Detalles del Paciente".** La Variante A (header índigo, ID interno +
+historial resumido) no se implementa — queda documentada arriba únicamente como referencia de lo
+observado en la app de origen.
+
 **Nota de privacidad (además de la ya registrada en §6):** que la Variante A muestre el ID
 interno de base de datos como dato de pantalla ("ID: 69dfd29a5782645e0a753114") es,
 probablemente, otro artefacto de desarrollo — de todos modos, se marca para que Security lo
@@ -1154,7 +1162,7 @@ Notas:
 - Login social con Google como opción adicional al email/contraseña — no estaba contemplado en
   ningún documento de este proyecto hasta ahora; a confirmar con Product Manager/Arquitecto si
   Turnos Profesionales debe soportarlo (impacto en Backend/Security: OAuth, no solo
-  email+password).
+  email+password). **Aprobado por el CEO (2026-08-09) — en definición por Product Manager.**
 - Los botones de esta pantalla usan radio moderado (`radius.card`), no píldora — ver
   `sistema-diseno.md` §7.1bis.
 - No se capturó la pantalla de "Crear Cuenta" en sí (solo el botón de acceso desde acá), ni el
@@ -1253,8 +1261,8 @@ Notas:
 | Mi Plan — Suscripción Pro | Profesional (+Administrador) | HU-29 (E11) | Stub de navegación — bloqueada, decisión de negocio pendiente |
 | Configuración de Pagos y Cobros | Administrador | HU-30 (E12) | Stub de navegación |
 | Datos del Consultorio / Negocio | Administrador | HU-31 (E13, extiende HU-00a) | Stub de navegación |
-| Login / Registro | Cliente y Profesional | — | Adición de UX/UI a partir de capturas reales (§5.17), pendiente de HU |
-| Gestión de Autorizaciones Médicas | Profesional (+Administrador) | — | Candidata nueva, evidenciada en capturas reales (§9) — sin HU, sin diseñar en profundidad, a validar con el CEO antes de escribir HU |
+| Login / Registro | Cliente y Profesional | — (HU en definición) | Adición de UX/UI a partir de capturas reales (§5.17); login con Google **aprobado por el CEO (2026-08-09)**, HU en definición por Product Manager |
+| Gestión de Autorizaciones Médicas | Profesional (+Administrador) | — | Candidata nueva, evidenciada en capturas reales (§9) — **diferida por el CEO (2026-08-09)**, sin HU, candidata a fase futura |
 
 ## 8. Pendiente
 
@@ -1313,9 +1321,9 @@ Los cambios de mayor impacto para el equipo, de mayor a menor prioridad:
 
 1. **Gestión de Horarios es una sola página con scroll**, no una pantalla corta con modales
    separados de "Agregar Horario"/"Replicar" — reestructura significativa, ver §5.4bis. Además,
-   las propias capturas muestran dos versiones de esta pantalla en fechas distintas (23 de abril
-   vs. 25/27 de abril) — recomendamos confirmar con el CEO cuál es la vigente antes de que Mobile
-   la construya.
+   las propias capturas mostraban dos versiones de esta pantalla en fechas distintas (23 de abril
+   vs. 25/27 de abril) — **resuelto: el CEO confirmó la versión compacta (25/27 abril) como
+   definitiva (2026-08-09, ver §5.4bis).**
 2. Los controles de "Replicar en semanas/meses" son chips preestablecidos (4/8/12 semanas, ~6
    meses) + 1 switch, no dos steppers + dos radios (§5.6bis).
 3. El modal real de agregar un horario puntual ("Agregar Nuevo Horario") es mucho más simple que
@@ -1344,10 +1352,18 @@ Los cambios de mayor impacto para el equipo, de mayor a menor prioridad:
    Product Manager primero defina qué problema de negocio resuelve y escriba la(s) historia(s)
    correspondiente(s). Se marca como la novedad más importante de esta revisión — recomendamos
    presentarla al CEO antes de invertir tiempo de diseño ahí.
+
+   **Decisión del CEO (2026-08-09): diferido, no entra en el alcance actual.** Queda como
+   candidato para una fase futura — no se escribe historia de usuario todavía, no se diseña en
+   profundidad.
 2. **Pantalla de Login/Registro real** (§5.17) — email/contraseña + login social con Google +
    "Crear Cuenta" + recuperación de contraseña. El login social con Google no estaba contemplado
    en ningún documento del proyecto — impacto potencial en Backend (OAuth) y Security a evaluar
    si se decide incluirlo.
+
+   **Decisión del CEO (2026-08-09): aprobado, se suma al alcance.** Product Manager está
+   escribiendo la historia de usuario correspondiente; Arquitecto/Backend/Security deben definir
+   el flujo OAuth antes de implementar.
 3. **"Configurar Disponibilidad"** como ítem de menú separado de "Gestionar Horarios" — posible
    duplicado, no una pantalla nueva confirmada (§5.11bis).
 4. **"Agendar Cita" como modal separado de "Crear Nueva Cita"** — variante contextual (parte de
@@ -1365,6 +1381,7 @@ Los cambios de mayor impacto para el equipo, de mayor a menor prioridad:
   navegación del sistema Android — no se pudo leer su estilo real (`sistema-diseno.md` §7.5bis).
 - `Screenshot_20260425_043732_Expo Go~2 (1).jpg` tiene además un círculo dibujado a mano en rojo
   sobre el header, aparentemente una anotación del CEO — no se puede inferir qué estaba marcando
-  sin preguntarle directamente.
+  sin preguntarle directamente. **Consultado con el CEO (2026-08-09): no aplica, sin significado
+  específico a documentar.**
 - El resto de las 37 capturas se pudo leer con claridad; no hubo más casos de desenfoque, corte
   o overlay que impidiera la lectura.
