@@ -415,6 +415,16 @@ un Postgres real** — este entorno de desarrollo no tiene `psql`/Docker instala
 `memory/proyectos/turnos-profesionales/decisiones.md`). Antes de aplicarlo en un entorno real,
 correrlo contra una instancia de prueba.
 
+> **Nota (2026-08-09):** esta sección describe el diseño de las *políticas* de RLS, que sigue
+> vigente sin cambios. Pero se descubrió (Backend, al conectar este esquema a un Postgres real por
+> primera vez) que un supuesto estructural de esta sección — "el backend debe ejecutar `SET LOCAL
+> app.usuario_id`... sin eso, las políticas de escritura deniegan" — **no alcanzaba por sí solo**:
+> el rol de conexión de la app resultaba ser owner de las tablas (y, en docker-compose/CI,
+> superusuario), y Postgres ignora RLS por completo para el owner/superusuario salvo un mecanismo
+> adicional (`FORCE ROW LEVEL SECURITY`) que esta sección nunca mencionaba. Ver **§5bis** para el
+> diagnóstico completo, el cierre aplicado en este ciclo, y las 3 policies nuevas que agregó
+> Backend (ratificadas por DBA) para conectar este diseño a los endpoints reales.
+
 Diseño (no es un simple "todo por `negocio_id`" — hay una tensión real que había que resolver).
 **Actualizado (2026-08-06) por la generalización N:M de §2ter** — ver esa sección para el
 motivo del cambio; acá solo se documenta el diseño de RLS resultante.
@@ -476,12 +486,175 @@ motivo del cambio; acá solo se documenta el diseño de RLS resultante.
   escritura deniegan por defecto (fail-closed). **Esto todavía no está conectado en el backend
   actual** (que usa `node:sqlite` para desarrollo, sin RLS) — es trabajo pendiente para cuando
   el backend apunte a Postgres.
+  > **Actualización (2026-08-09):** esto ya se conectó (Backend migró a `pg`/Postgres real,
+  > `withTransaction` en `db.ts` ejecuta exactamente este `SET LOCAL` vía `set_config`) — pero
+  > conectarlo no alcanzó para que RLS tuviera efecto real, por el gap de ownership que describe
+  > **§5bis**. Este párrafo se conserva sin editar porque el diagnóstico original ("sin `SET
+  > LOCAL`, fail-closed") sigue siendo correcto como descripción de las políticas en sí — §5bis
+  > documenta la capa adicional que hacía falta por debajo de esto.
 - Pendiente para una próxima iteración (sin cambios por esta generalización): `disponibilidad`,
   `excepcion_disponibilidad`, `profesional_servicio`, `pago` y `notificacion` no tienen
   `negocio_id` propio (se llega por join a través de `profesional_id`/`turno_id`); necesitarían
   una política basada en subquery, no incluida en este slice. Si en una próxima iteración se
   agregan, deberían seguir el mismo patrón `EXISTS`/`app.usuario_id` de esta sección, no el
   patrón anterior de igualdad contra `app.negocio_id`.
+
+## 5bis. Cierre del gap de ownership + ratificación de las 3 policies de Backend (DBA, 2026-08-09)
+
+**Origen.** Backend conectó el esquema de §5 a un Postgres real por primera vez
+(TURNOS-2026-001, migración `node:sqlite` → `pg`, ver `05-codigo/backend/README.md` y
+`memory/proyectos/turnos-profesionales/decisiones.md`). Encontró y documentó un hallazgo de
+arquitectura, y agregó 3 policies nuevas (marcadas `-- [BACKEND] ... pendiente de ratificación`)
+que necesitaba para que 2 endpoints ya probados siguieran funcionando bajo RLS real. Ambas cosas
+llegaron a DBA para decisión — este apartado documenta esa decisión, verificada de forma
+independiente contra el código real (no solo aceptada del reporte de Backend), y la revisión en
+paralelo de Security sobre el mismo cambio (mismo patrón de doble revisión que ya se usó en
+Fase 5).
+
+### Gap 1 — el rol de conexión es owner de las tablas (y, en 2 de 3 ambientes, superusuario)
+
+`runMigrations()` (`05-codigo/backend/src/db.ts`) corre el DDL completo con el mismo `pool`/rol de
+conexión que sirve **todo** el tráfico de la app — una sola `DATABASE_URL` por ambiente (ver
+`05-codigo/backend/docker-compose.yml`, `.github/workflows/turnos-backend-ci.yml`,
+`05-codigo/backend/render.yaml`). En Postgres, quien ejecuta `CREATE TABLE` se vuelve
+automáticamente **owner** de esa tabla, y Postgres ignora RLS por completo para el owner (y para
+cualquier rol con `BYPASSRLS`/superusuario) salvo que la tabla tenga `FORCE ROW LEVEL SECURITY` —
+mecanismo que §5 nunca mencionaba y que ninguna tabla tenía hasta este ciclo. El propio párrafo de
+§5 ("el rol de conexión... NO debe ser el owner...") ya advertía el riesgo desde la Fase 3
+original, pero nunca se había cerrado con algo ejecutable. Conclusión verificada: **hasta este
+ciclo, todo el trabajo de RLS de este proyecto podía no tener ningún efecto real en ningún
+ambiente** — la autorización real la seguían haciendo únicamente los `WHERE` de cada query + los
+checks de cada handler (ninguno de los dos deja de existir ni se debilita con este cambio: RLS es
+defensa **en profundidad**, adicional a esos checks, nunca el único mecanismo de autorización de
+este proyecto).
+
+**Arreglo en dos capas, aplicado en `05-codigo/database/migrations/001_init.sql`
+(+ copia idéntica en `05-codigo/backend/migrations/001_init.sql`):**
+
+1. **`FORCE ROW LEVEL SECURITY`** en las 5 tablas con RLS habilitada — un comando por tabla,
+   aplicado ya en este ciclo. Corrige que el owner deje de bypassear RLS, **solo si** el rol de
+   conexión no es superusuario ni tiene `BYPASSRLS` explícito.
+2. **Separar un rol de MIGRACIÓN (owner) de un rol de RUNTIME** (sirve `DATABASE_URL` de la app,
+   sin ser owner y sin `BYPASSRLS`) — la separación que el diseño original de §5 ya asumía. Es la
+   **única** capa que garantiza RLS real en los 3 ambientes, por un motivo verificado, no solo
+   teórico: el rol que crean `docker-compose.yml` (`turnos`) y el service container de CI
+   (`turnos_ci`) vía la variable `POSTGRES_USER` de la imagen oficial `postgres:16-alpine` se crea
+   como **superusuario del cluster** (comportamiento documentado de esa imagen oficial: "This
+   variable will create the specified user with superuser power") — y un superusuario bypassea
+   RLS siempre, `FORCE` incluido. Es decir: **en docker-compose y en CI, la capa 1 sola no tiene
+   ningún efecto real hoy**, sin que nada lo indique (`scripts/*.mjs` no puede distinguir "pasó
+   porque RLS filtró correctamente" de "pasó porque RLS nunca se evaluó"). En Render, el rol que
+   provisiona el Blueprint (`turnos_profesionales`) no debería ser superusuario (los proveedores
+   de Postgres gestionado no suelen otorgarlo) — **no verificado contra una cuenta real de
+   Render**, mismo tipo de limitación que ya documenta `08-despliegue/README.md`; diagnóstico
+   exacto para confirmarlo (sugerido por Security):
+   `SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user;`.
+
+**Tarea de seguimiento para DevOps (no ejecutada en este ciclo — fuera del alcance de DBA, que no
+implementa cambios en `docker-compose.yml`/CI/`render.yaml`):** provisionar los 2 roles por
+ambiente y repuntar `DATABASE_URL` de la app al rol de RUNTIME. Instrucciones exactas, GRANTs
+completos y la secuencia de adopción (incluido cómo sigue funcionando `runMigrations()` **sin
+ningún cambio de código**, gracias a que ya está gateada por "¿existe `public.usuario`?") en
+[`05-codigo/database/scripts/provisionar_roles_postgres.sql`](../05-codigo/database/scripts/provisionar_roles_postgres.sql).
+Recomendación adicional para QA/DevOps: la primera vez que RLS tenga efecto real en cualquier
+ambiente (hoy nunca lo tuvo, ni siquiera en CI), re-correr la batería completa de
+`05-codigo/backend/scripts/*.mjs` en ese ambiente antes de confiar en el resultado — pueden
+aparecer fallos que estuvieron enmascarados por el bypass total de RLS, no necesariamente
+introducidos por este cambio.
+
+**Verificación de RLS a nivel de base de datos (pedido explícito de Security — ningún test HTTP
+existente puede detectar este tipo de gap, porque la autorización de aplicación cubre el mismo
+terreno y lo esconde):**
+[`05-codigo/database/scripts/verificar_rls_postgres.sql`](../05-codigo/database/scripts/verificar_rls_postgres.sql) —
+se conecta directo con los roles reales (sin pasar por la app), siembra datos de 2 tenants, y
+verifica con `SET ROLE`/aserciones que el aislamiento cross-tenant y el cierre del gap de
+ownership funcionan de verdad. No ejecutado en este ciclo (este entorno no tiene `psql`/Docker,
+mismo caveat de siempre) — pendiente de correr contra un Postgres real la primera vez que exista
+un ambiente con los roles ya separados.
+
+### Gap 2 (ratificación) — las 3 policies nuevas de Backend
+
+Las 3 quedaban en `05-codigo/backend/migrations/001_init.sql`, marcadas como pendientes de
+ratificación. Verificadas por DBA contra el código real de cada endpoint involucrado (no solo
+aceptadas del razonamiento de Backend) y ya incorporadas a la fuente de verdad
+(`05-codigo/database/migrations/001_init.sql`, con el mismo razonamiento en el comentario junto a
+cada `CREATE POLICY`):
+
+1. **`profesional_update_propio_duracion_cita`** — **ratificada tal cual, sin cambios.** Resuelve
+   un gap que el propio §5 dejaba documentado (2 alternativas evaluadas, sin decidir): el
+   profesional necesita poder actualizar su propia `duracion_cita_min` (D10/RN11,
+   `PATCH /profesionales/:id/configuracion`), y la única policy de `UPDATE` existente sobre
+   `profesional` solo habilitaba a un administrador. Se eligió la alternativa (a) — policy
+   acotada a `usuario_id` propio — sobre la (b) (función `SECURITY DEFINER`) porque, verificado
+   contra `05-codigo/backend/src/routes/profesionales.ts`, ese endpoint es HOY el único call site
+   de todo el código que ejecuta `UPDATE profesional ...` con el `usuario_id` del propio
+   profesional en su contexto RLS, con un statement hardcodeado (sin nombres de columna dinámicos)
+   que solo toca `duracion_cita_min` — no hay hoy ningún camino para que un profesional autenticado
+   toque otra columna de su propia fila (ej. `eliminado_en`) a través de esta policy. Si se agrega
+   un segundo endpoint de auto-servicio sobre `profesional`, hay que re-verificar esto explícitamente.
+
+2. **`turno_select_publico`** — **ratificada CON RESERVA, explícitamente TRANSITORIA.** La más
+   sensible de las 3: hace público (`USING (true)`, sin ningún chequeo) el `SELECT` completo de
+   `turno`. Necesaria para 2 cosas verificadas contra el código real:
+   - `GET /profesionales/:id/slots` (público, HU-09/CU1) — y, hallazgo **adicional** de esta
+     revisión que Backend no había señalado: la validación interna RN1/RN2 de `POST /turnos`
+     (`calcularSlotsDisponibles(pool, ...)`, invocada dos veces desde
+     `05-codigo/backend/src/routes/turnos.ts`) lee `turno` por `pool` DIRECTO — igual que el
+     endpoint público, sin contexto RLS, incluso cuando quien reserva SÍ está autenticado. Sin
+     esta policy, `POST /turnos` podría aceptar una reserva solapada con otra existente si no
+     coincide exactamente con el `(profesional_id, inicio)` que protege `uq_turno_slot_activo` —
+     una regresión de RN2, no solo de privacidad.
+   - La distinción 403/404 que exige `scripts/test-autorizacion-cruzada.mjs` al
+     cancelar/reprogramar el turno de otro cliente (`SELECT * FROM turno WHERE id = $1` sin
+     filtrar por `cliente_id`, ver `turnos.ts`).
+
+   **Por qué queda como transitoria, no permanente (coincidencia con Security):** es una policy
+   PERMISIVA de `SELECT` — se combina por OR con `turno_acceso_negocio_o_cliente`, así que mientras
+   exista, esa otra policy queda irrelevante para lectura sin importar qué tan bien diseñada esté.
+   Security, en su revisión independiente, coincidió en que hace falta hoy pero recomendó no
+   dejarla como diseño permanente, y sugirió reemplazarla por funciones `SECURITY DEFINER`
+   acotadas por caso de uso. **Se agregaron en este mismo ciclo** (`turno_ocupacion_publica` y
+   `turno_propio_para_gestion`, al final de `001_init.sql`) pero **no se adoptaron todavía**:
+   adoptarlas requiere que Backend deje de leer `turno` por `pool`/`SELECT *` suelto en
+   `disponibilidad.ts`/`turnos.ts` y llame a las funciones en su lugar — cambio de código de
+   Backend, fuera del alcance de este ciclo (instrucción explícita de no tocar rutas/`db.ts`).
+   Retirar `turno_select_publico` sin que Backend adoptara las funciones en el mismo cambio
+   habría reproducido exactamente el riesgo que señaló Security (dos cambios que se pisan) — así
+   que se prioriza no romper nada por sobre cerrar el hallazgo del todo en este ciclo.
+
+   **Secuencia de adopción recomendada para el próximo ciclo (conjunto Backend+DBA):**
+   1. Backend reemplaza las 3 lecturas sueltas de `turno` (`disponibilidad.ts:94-97` y los 2 call
+      sites de `calcularSlotsDisponibles(pool, ...)` en `turnos.ts`, más
+      `turnos.ts:225`/`turnos.ts:294`, los `SELECT * FROM turno WHERE id = $1` de
+      `cancelar`/`reprogramar`) por llamadas a `turno_ocupacion_publica`/`turno_propio_para_gestion`.
+   2. DBA (o quien ejecute el cambio) resuelve la advertencia ya documentada en el comentario de
+      esas funciones en `001_init.sql`: con `FORCE ROW LEVEL SECURITY` activo, una función
+      `SECURITY DEFINER` propiedad del rol de MIGRACIÓN **no** bypassea RLS por sí sola (FORCE
+      aplica las políticas al owner incluso dentro de una función que ese owner posee) — hace
+      falta, en el mismo cambio, un tercer rol `NOLOGIN` con `BYPASSRLS` explícito, dueño
+      ÚNICAMENTE de esas 2 funciones (recomendado), o aceptar conscientemente el trade-off de
+      otorgarle `BYPASSRLS` al rol de migración (no recomendado). Detalle completo en el
+      comentario de las funciones, `001_init.sql`.
+   3. Recién ahí, `DROP POLICY turno_select_publico ON turno;` (reversible por diseño: una única
+      sentencia) + re-correr `scripts/*.mjs` y `verificar_rls_postgres.sql`.
+
+   **Si la conclusión de Security sobre esta policy en particular no hubiera coincidido con la de
+   DBA, decide el Director General IA — no se resuelve unilateralmente entre DBA y Security.**
+
+3. **`turno_acceso_job_expiracion`** — **ratificada tal cual, sin cambios.** La menos
+   controvertida: acotada exclusivamente a `app.job_sistema = 'true'` (solo lo setea
+   `expirarPagosPendientesVencidos()`, `05-codigo/backend/src/jobs/expirarPagosPendientes.ts`), y
+   solo agrega `UPDATE` — el `SELECT` del propio job ya queda cubierto por `turno_select_publico`.
+   Ya estaba anticipada por el comentario de `ContextoRls.jobSistema` en `db.ts` (código ya
+   aprobado, sin cambios).
+
+### Qué no se tocó en este ciclo
+
+Código de Backend (`src/routes/`, `src/dominio/`, `db.ts`) — instrucción explícita. `pago` y
+`notificacion` siguen sin RLS habilitada (gap preexistente, ya documentado en §5 como "pendiente
+para una próxima iteración", no ampliado acá). `docker-compose.yml`, `.github/workflows/
+turnos-backend-ci.yml`, `05-codigo/backend/render.yaml` — son tarea de seguimiento de DevOps, no
+implementados por DBA (ver script de aprovisionamiento).
 
 ## 6. Índices críticos
 

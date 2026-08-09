@@ -18,10 +18,20 @@
 //
 // Migración a PostgreSQL (ver src/db.ts): recibe un `Queryable` en vez de asumir un objeto `db`
 // síncrono — tanto `pool` (lecturas públicas, ej. GET /profesionales/:id/slots, sin necesidad
-// de contexto RLS gracias a la policy `turno_select_publico` agregada en migrations/001_init.sql,
-// ver esa policy para el porqué) como un `client` ya dentro de una transacción autenticada
-// (POST /turnos reusa el mismo client de su propia transacción para RN1/RN2) cumplen esa
-// interfaz sin duplicar esta función para cada caso.
+// de contexto RLS) como un `client` ya dentro de una transacción autenticada (POST /turnos reusa
+// el mismo client de su propia transacción para RN1/RN2) cumplen esa interfaz sin duplicar esta
+// función para cada caso.
+//
+// Adopción DBA (2026-08-09, ver migrations/001_init.sql, "Funciones SECURITY DEFINER" al final
+// del archivo, caso de uso (a)): la lectura de `turno` de más abajo pasa por la función
+// `turno_ocupacion_publica(profesional_id)` en vez de un SELECT directo sobre la tabla — expone
+// solo inicio/fin de turnos activos de ESE profesional, ni cliente_id ni ninguna otra columna.
+// SECURITY DEFINER no depende de `app.usuario_id`, así que sigue funcionando igual sin importar
+// si `db` es `pool` (GET /profesionales/:id/slots, sin contexto RLS) o un `client` dentro de la
+// transacción de POST /turnos (que sí tiene `app.usuario_id` seteado, pero esta lectura no lo
+// necesita) — ninguno de los dos callers cambia de comportamiento por este reemplazo, ambos
+// seguían leyendo sin contexto RLS antes también (ver reserva documentada junto a
+// `turno_select_publico`, que se mantiene activa como red de seguridad transitoria).
 import { Queryable } from '../db';
 
 export interface OpcionesCalculoSlots {
@@ -91,10 +101,14 @@ export async function calcularSlotsDisponibles(
   const maxSlots = opciones.maxSlots ?? 20;
   const duracionMs = duracionEfectivaMin * 60_000;
 
-  const turnosActivosResult = await db.query(
-    `SELECT inicio, fin FROM turno WHERE profesional_id = $1 AND estado IN ('pendiente_de_pago','confirmado')`,
-    [profesionalId]
-  );
+  // Antes: `SELECT inicio, fin FROM turno WHERE profesional_id = $1 AND estado IN
+  // ('pendiente_de_pago','confirmado')` directo sobre la tabla. Ahora vía la función
+  // `turno_ocupacion_publica` (ver comentario de archivo, arriba) — mismo filtro
+  // (profesional_id + estado activo), aplicado del lado de la base dentro de la función en vez
+  // de repetido acá.
+  const turnosActivosResult = await db.query('SELECT inicio, fin FROM turno_ocupacion_publica($1)', [
+    profesionalId,
+  ]);
   const turnosActivos = turnosActivosResult.rows as { inicio: string; fin: string }[];
 
   const excepcionesResult = await db.query(
