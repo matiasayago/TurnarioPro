@@ -546,6 +546,10 @@ para el detalle de esta diferencia entre capturas de distinta fecha. Se document
 `SettingCard` por ser un patrón real y reutilizable, pero el equipo debe confirmar con el CEO
 cuál de las dos versiones es la vigente antes de que Mobile la implemente.
 
+**Resuelto (2026-08-09): el CEO eligió la versión compacta — `SettingCard` NO se implementa en
+v1.** Se conserva esta documentación como referencia histórica del patrón observado, no como
+componente a construir.
+
 ### 7.13 Card de resumen calculado (`ResumenCard` / `SummaryCallout`) — nuevo, confirmado en capturas (2026-08-07)
 
 Card con fondo tintado (celeste/azul muy claro, distinto de `primaryContainer`) y borde sutil del
@@ -558,6 +562,9 @@ celeste, distinto de los 4 estados de §3.3) — se deja sin hex hasta poder hac
 color más preciso; por ahora usar un azul/celeste claramente distinguible de `primary` y
 `primaryContainer`. Misma nota de vigencia que §7.12: observado en la versión elaborada del 23 de
 abril, no confirmado en las capturas más recientes del mismo flujo.
+
+**Resuelto (2026-08-09): mismo motivo que §7.12 — el CEO eligió la versión compacta,
+`ResumenCard`/`SummaryCallout` NO se implementa en v1.**
 
 ### 7.14 Barra de pestañas (`SegmentedTabBar`) — nuevo, confirmado en capturas (2026-08-07)
 
@@ -721,15 +728,18 @@ distintas de la sección "Configuración General" / "Tiempo de Descanso" de Gest
 Dado que dos sesiones independientes y posteriores coinciden en la versión "compacta", esta
 revisión trató esa versión como la más representativa del estado actual de la app de referencia,
 pero **no se descarta la versión "elaborada"** — se documenta igual (`SettingCard`, `ResumenCard`
-en §7.12/§7.13) por si es la dirección que el CEO prefiere. Recomendación: confirmar
-explícitamente con el CEO cuál de las dos versiones debe tomarse como base antes de que Mobile
-implemente esta pantalla, en vez de que el equipo asuma una de las dos.
+en §7.12/§7.13) por si es la dirección que el CEO prefiere.
+
+**Resuelto — el CEO confirmó (2026-08-09) la versión compacta como definitiva.** `SettingCard` y
+`ResumenCard` (§7.12/§7.13) quedan documentados como referencia histórica, sin implementarse en
+v1.
 
 ### 12.4 Ambigüedades a resolver con el CEO antes de avanzar
 
 - **Dos pantallas "Detalles del Paciente" distintas** (header índigo con ID crudo/Historial de
   Visitas/Notas vs. header blanco con datos personales completos/Contacto de Emergencia) — ver
-  detalle en `mapa-pantallas.md` §5.9bis.
+  detalle en `mapa-pantallas.md` §5.9bis. **Resuelto (2026-08-09): CEO eligió la Variante B
+  (datos personales) — ver mapa-pantallas.md §5.9bis.**
 - **Posible duplicación de navegación:** "Configurar Disponibilidad" (menú Cuenta) y "Gestionar
   Horarios" (menú Panel Profesional) podrían llevar al mismo lugar o ser flujos distintos — no se
   puede determinar con capturas estáticas.
@@ -744,7 +754,8 @@ implemente esta pantalla, en vez de que el equipo asuma una de las dos.
 - Una de las 37 capturas (`Screenshot_20260425_043732_Expo Go~2 (1).jpg`) tiene un **círculo
   dibujado a mano en rojo** sobre el header (ícono, título y subtítulo "Gestión de Horarios /
   Primera de Abril") — parece una anotación del propio CEO marcando algo de interés, pero no se
-  puede inferir qué específicamente sin preguntarle directamente.
+  puede inferir qué específicamente sin preguntarle directamente. **Consultado con el CEO
+  (2026-08-09): no aplica.**
 
 ### 12.5 Capturas parcialmente ilegibles
 
