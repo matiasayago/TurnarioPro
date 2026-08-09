@@ -1261,7 +1261,7 @@ Notas:
 | Mi Plan — Suscripción Pro | Profesional (+Administrador) | HU-29 (E11) | Stub de navegación — bloqueada, decisión de negocio pendiente |
 | Configuración de Pagos y Cobros | Administrador | HU-30 (E12) | Stub de navegación |
 | Datos del Consultorio / Negocio | Administrador | HU-31 (E13, extiende HU-00a) | Stub de navegación |
-| Login / Registro | Cliente y Profesional | — (HU en definición) | Adición de UX/UI a partir de capturas reales (§5.17); login con Google **aprobado por el CEO (2026-08-09)**, HU en definición por Product Manager |
+| Login / Registro | Cliente y Profesional | HU-35 (login con Google) | Adición de UX/UI a partir de capturas reales (§5.17); login con Google aprobado por el CEO (2026-08-09), ya formalizado como HU-35 por Product Manager |
 | Gestión de Autorizaciones Médicas | Profesional (+Administrador) | — | Candidata nueva, evidenciada en capturas reales (§9) — **diferida por el CEO (2026-08-09)**, sin HU, candidata a fase futura |
 
 ## 8. Pendiente
