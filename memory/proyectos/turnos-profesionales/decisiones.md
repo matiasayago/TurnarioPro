@@ -579,6 +579,71 @@ falló con anotaciones `"Failed to resolve action download info."` / `"Internal 
 un hiccup transitorio de la infraestructura de Actions al resolver `actions/checkout@v4` (la
 anotación ni siquiera ata a una línea real del YAML de este workflow), no un defecto de código.
 
+## Cierre del gap de ownership de RLS + ratificación de 3 policies de Backend — DBA (2026-08-09)
+
+Detalle completo, razonamiento columna por columna y secuencia de adopción en
+`03-arquitectura/modelo-datos.md` §5bis (sección nueva). Resumen para reutilizar:
+
+- **Contexto:** Backend migró el driver de `node:sqlite` a `pg` (PostgreSQL real) y, al conectar
+  RLS a un Postgres real por primera vez, encontró que `runMigrations()` (`src/db.ts`) corre el
+  DDL con el mismo rol/`pool` que sirve todo el tráfico de la app — ese rol se vuelve owner de las
+  tablas (por correr `CREATE TABLE`), y Postgres ignora RLS para el owner salvo
+  `FORCE ROW LEVEL SECURITY` (mecanismo que el diseño original de RLS, Fase 3, nunca implementó).
+  Backend también agregó 3 policies nuevas (marcadas pendientes de ratificación) para que 2
+  endpoints ya probados (`PATCH /profesionales/:id/configuracion`, `GET /profesionales/:id/slots`
+  + la distinción 403/404 de cancelar/reprogramar) siguieran funcionando bajo RLS real.
+- **Hallazgo propio de DBA, verificado contra el código real, no solo aceptado del reporte de
+  Backend:** el gap de ownership es más grave de lo reportado — en `docker-compose.yml` y en el
+  service container de CI, el rol de conexión (creado vía `POSTGRES_USER` de la imagen oficial
+  `postgres:16-alpine`) es **superusuario del cluster**, y un superusuario bypassea RLS siempre,
+  `FORCE ROW LEVEL SECURITY` incluido — agregar solo `FORCE` no cierra el gap en esos 2 de los 3
+  ambientes del proyecto. Además, `calcularSlotsDisponibles` lee `turno` por `pool` directo (sin
+  contexto RLS) en **dos** call sites, no solo en el endpoint público de slots — también dentro de
+  la propia validación RN1/RN2 de `POST /turnos` — así que sin la policy pública de `turno`, el
+  propio flujo de reserva (no solo la navegación anónima) quedaría en riesgo de aceptar
+  solapamientos.
+- **Arreglo aplicado (en `05-codigo/database/migrations/001_init.sql`, con copia idéntica en
+  `05-codigo/backend/migrations/001_init.sql`):** `FORCE ROW LEVEL SECURITY` en las 5 tablas con
+  RLS habilitada (cierra el gap donde el rol de conexión no sea superusuario/BYPASSRLS — a
+  confirmar en Render, no verificado contra una cuenta real) + documentación exacta para DevOps de
+  cómo separar un rol de MIGRACIÓN de uno de RUNTIME (única capa que garantiza RLS real en los 3
+  ambientes) sin necesitar ningún cambio de código en `runMigrations()`.
+- **Las 3 policies de Backend:** `profesional_update_propio_duracion_cita` y
+  `turno_acceso_job_expiracion` ratificadas tal cual, sin cambios, verificadas contra el código
+  real de cada endpoint. `turno_select_publico` (la más sensible — SELECT público sin ninguna
+  restricción sobre `turno`) ratificada **con reserva, explícitamente transitoria**: necesaria hoy
+  (confirmado, incluido el hallazgo adicional sobre `POST /turnos` de arriba), pero no debe quedar
+  como diseño permanente — se agregaron 2 funciones `SECURITY DEFINER` de reemplazo
+  (`turno_ocupacion_publica`, `turno_propio_para_gestion`) preparadas pero NO adoptadas todavía
+  (requiere que Backend deje de leer `turno` por `pool`/`SELECT *` suelto, fuera del alcance de
+  este ciclo) — la policy se retira recién cuando Backend adopte esas funciones, en el mismo
+  cambio, para no romper nada por una secuencia mal coordinada.
+- **Revisión en paralelo de Security (mismo patrón que Fase 5):** coincidió de forma independiente
+  en el hallazgo de superusuario en docker-compose/CI, confirmó que el gap de ownership y
+  `turno_select_publico` están acoplados (arreglar uno sin el otro en el mismo cambio rompe
+  `GET /profesionales/:id/slots` y `scripts/test-autorizacion-cruzada.mjs`), coincidió en no dejar
+  esa policy como diseño permanente, y pidió un test de RLS a nivel de base de datos (ningún test
+  HTTP existente puede detectar este tipo de gap, porque la autorización de aplicación cubre el
+  mismo terreno y lo esconde). Las 2 primeras correcciones (Security terminó su revisión antes que
+  DBA) se incorporaron a la propuesta ANTES de cerrarla, no como un parche separado posterior —
+  quedó como pauta reutilizable: cuando dos revisiones independientes (DBA/Security) tocan el
+  mismo archivo en la misma ventana, coordinar en un único cambio, no en cambios secuenciales que
+  puedan pisarse.
+- **2 scripts nuevos en `05-codigo/database/scripts/` (no existía el directorio antes de este
+  ciclo):**
+  - `provisionar_roles_postgres.sql` — GRANTs exactos y secuencia completa para que DevOps separe
+    los 2 roles en los 3 ambientes (docker-compose.yml/turnos-backend-ci.yml/render.yaml —
+    ninguno de los 3 tocado por DBA en este ciclo, tarea de seguimiento explícita).
+  - `verificar_rls_postgres.sql` — test de RLS a nivel de base de datos pedido por Security:
+    siembra 2 tenants y verifica con `SET ROLE`/aserciones que el aislamiento cross-tenant y el
+    cierre del gap de ownership funcionan de verdad, sin pasar por la app.
+  - Ninguno de los 2 se ejecutó en este ciclo (este entorno sigue sin `psql`/Docker, mismo caveat
+    de siempre) — quedan listos para la primera vez que exista un ambiente con Postgres real.
+- **Fuera de alcance en este ciclo (no tocado):** código de Backend (`src/routes/`, `src/dominio/`,
+  `db.ts`) — instrucción explícita del Director General IA de no tocar rutas/`db.ts`, solo
+  migraciones SQL y documentación. `docker-compose.yml`/CI/`render.yaml` — tarea de DevOps.
+  `pago`/`notificacion` sin RLS — gap preexistente ya documentado en §5, no ampliado.
+
 ## Reutilizable para futuros proyectos de la Factory (continuación 2)
 - **En cualquier CI que arranque un proceso en segundo plano con `npx <binario-local> ... &` y
   necesite matarlo más tarde por PID, usar el binario de `node_modules/.bin/<binario>` directo en

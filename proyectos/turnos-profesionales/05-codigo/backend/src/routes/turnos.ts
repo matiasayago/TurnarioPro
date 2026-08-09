@@ -36,13 +36,16 @@ function dentroDeVentanaMinima(inicioTurno: string): boolean {
 // Postgres solo deja pasar un INSERT; el segundo lanza el error de unicidad 23505.
 //
 // Las lecturas de validación (profesional/servicio/membresía/RN4/grilla RN1-RN2) corren vía
-// `pool` directo, sin transacción: todas las tablas que tocan (`profesional`, `servicio`,
-// `negocio_profesional`, `profesional_servicio`, y `turno` gracias a la policy pública agregada
-// `turno_select_publico`) son legibles sin contexto RLS — mismo criterio que ya usaba esta
-// función antes de la migración (chequeos previos sueltos, la garantía real es el índice único).
-// El INSERT final (turno + pago + notificación) SÍ corre en una única transacción con contexto
-// RLS (`usuarioId`), sobre el MISMO client para las 3 sentencias — necesario porque `turno`
-// tiene RLS de escritura (WITH CHECK exige `cliente_id = app.usuario_id`).
+// `pool` directo, sin transacción: `profesional`, `servicio`, `negocio_profesional` y
+// `profesional_servicio` son legibles sin contexto RLS (policies públicas de SELECT); la
+// ocupación de `turno` que usa la grilla RN1-RN2 (calcularSlotsDisponibles, ver
+// dominio/disponibilidad.ts) pasa por la función SECURITY DEFINER `turno_ocupacion_publica` en
+// vez de un SELECT directo (adopción DBA 2026-08-09, ver migrations/001_init.sql) — mismo
+// criterio que ya usaba esta función antes de la migración (chequeos previos sueltos, la
+// garantía real es el índice único). El INSERT final (turno + pago + notificación) SÍ corre en
+// una única transacción con contexto RLS (`usuarioId`), sobre el MISMO client para las 3
+// sentencias — necesario porque `turno` tiene RLS de escritura (WITH CHECK exige
+// `cliente_id = app.usuario_id`).
 turnosRouter.post(
   '/',
   requireAuth('cliente'),
@@ -222,7 +225,14 @@ turnosRouter.patch(
 
     const resultado = await withTransaction(
       async (client) => {
-        const turnoResult = await client.query('SELECT * FROM turno WHERE id = $1', [req.params.id]);
+        // Adopción DBA (2026-08-09, ver migrations/001_init.sql, caso de uso (b)): antes un SELECT
+        // directo sobre `turno` (cubierto por la policy pública `turno_select_publico`, que se
+        // mantiene activa como red de seguridad transitoria). La función `turno_propio_para_gestion`
+        // lee SIN filtrar por cliente_id (a propósito — hace falta distinguir 403 de 404 más abajo)
+        // y expone solo las columnas que este handler usa (no creado_en/modificado_en).
+        const turnoResult = await client.query('SELECT * FROM turno_propio_para_gestion($1)', [
+          req.params.id,
+        ]);
         const turno = turnoResult.rows[0];
         if (!turno) return { tipo: 'no_encontrado' as const };
         if (turno.cliente_id !== req.auth!.sub) return { tipo: 'prohibido' as const };
@@ -291,7 +301,12 @@ turnosRouter.patch(
     try {
       resultado = await withTransaction(
         async (client) => {
-          const turnoResult = await client.query('SELECT * FROM turno WHERE id = $1', [req.params.id]);
+          // Misma función SECURITY DEFINER que /:id/cancelar (ver comentario ahí). Este handler
+          // además usa profesional_id/servicio_id/negocio_id/estado del turno leído acá, todos
+          // presentes en turno_propio_para_gestion (no así creado_en/modificado_en, sin uso acá).
+          const turnoResult = await client.query('SELECT * FROM turno_propio_para_gestion($1)', [
+            req.params.id,
+          ]);
           const turno = turnoResult.rows[0];
           if (!turno) return { tipo: 'no_encontrado' as const };
           if (turno.cliente_id !== req.auth!.sub) return { tipo: 'prohibido' as const };
