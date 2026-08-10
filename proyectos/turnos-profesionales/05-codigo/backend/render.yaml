@@ -68,7 +68,16 @@ databases:
   - name: turnos-profesionales-db
     databaseName: turnos_profesionales
     user: turnos_profesionales
-    plan: starter # VERIFICAR nombre de plan vigente en render.com/pricing (no usar "free": expira a los 30 días, ver 03-arquitectura/plan-produccion.md §6)
+    # CORRECCIÓN (2026-08-10, confirmado al aplicar el Blueprint contra una cuenta real de Render
+    # — la primera vez que se pudo verificar esto): "starter" ya no es un plan válido para bases
+    # NUEVAS ("Legacy Postgres plans, including 'starter', are no longer supported for new
+    # databases" — Render migró a "Flexible plans": Basic/Pro/Accelerated en vez de
+    # Starter/Standard/Pro/Pro Plus, ver render.com/docs/postgresql-refresh). "basic-256mb" es el
+    # plan pago más chico de la familia nueva — mismo espíritu que el "starter" original (evitar
+    # el free tier, que expira a los 30 días, ver 03-arquitectura/plan-produccion.md §6), costo
+    # más bajo disponible. El plan del servicio web de más abajo (`starter`) NO se ve afectado por
+    # este cambio — ese nombre sigue vigente para servicios (solo cambió para bases Postgres).
+    plan: basic-256mb
     postgresMajorVersion: "16" # coherente con `postgres:16-alpine` usado en CI y docker-compose.yml
 
 services:
