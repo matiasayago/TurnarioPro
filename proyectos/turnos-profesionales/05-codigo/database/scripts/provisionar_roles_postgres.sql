@@ -132,6 +132,18 @@
 -- ../migrations/001_init.sql para por qué esto es justamente la propiedad que se busca.
 CREATE ROLE :"migrador_rol" LOGIN PASSWORD :'migrador_password';
 
+-- CORRECCIÓN (2026-08-10, confirmado en el primer run real de CI): el rol de MIGRACIÓN necesita
+-- privilegio de CREATE tanto sobre el esquema "public" (para CREATE TABLE/TYPE de
+-- ../migrations/001_init.sql) como sobre la BASE DE DATOS misma (para CREATE EXTENSION
+-- "pgcrypto", la primera sentencia de esa migración) — ninguno de los 2 se hereda solo por ser
+-- LOGIN, y desde Postgres 15 ninguno de los 2 se otorga a PUBLIC por defecto. Sin el segundo
+-- GRANT, "CREATE EXTENSION pgcrypto" falla con "permission denied ... Must have CREATE privilege
+-- on current database" incluso teniendo ya CREATE sobre el esquema (confirmado empíricamente,
+-- no una suposición). :"nombre_db" ya tiene que estar seteada acá arriba (Parte 0) para poder
+-- resolver este GRANT.
+GRANT CREATE ON SCHEMA public TO :"migrador_rol";
+GRANT CREATE ON DATABASE :"nombre_db" TO :"migrador_rol";
+
 -- Rol de RUNTIME: LOGIN, sin ningún atributo especial (NOSUPERUSER/NOCREATEDB/NOCREATEROLE/
 -- NOBYPASSRLS son los defaults de `CREATE ROLE` — se dejan explícitos igual, más abajo con ALTER
 -- ROLE, para no depender de que el default no cambie nunca sin que se note). Este es el rol que
