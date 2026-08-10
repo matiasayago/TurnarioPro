@@ -80,12 +80,40 @@
 --     -f provisionar_roles_postgres.sql
 -- Los defaults de acá abajo son placeholders que fallan a propósito si no se pisan (nombres poco
 -- probables de colisionar por accidente con un rol real).
+--
+-- CORRECCIÓN (2026-08-10, tras el primer run real de CI — ver commit de este cambio): un `\set`
+-- plano acá SIEMPRE pisa el valor que haya llegado por `-v`, sin importar el orden de la línea de
+-- comandos — no existe una semántica de "-v gana si está presente" para `\set` simple en psql. La
+-- versión anterior de este bloque usaba `\set` sin condición, así que TODAS las corridas
+-- terminaban usando los placeholders "CAMBIAR_*" literales sin importar qué `-v` se hubiera
+-- pasado — confirmado en el primer run real de turnos-backend-ci.yml (que nadie pudo probar antes
+-- por no tener Docker/psql en el entorno de desarrollo de DBA ni de DevOps): creó roles llamados
+-- literalmente "CAMBIAR_migrador_rol"/"CAMBIAR_app_rol" y falló al referenciar "turnos_ci_migrador"
+-- más abajo (paso agregado por DevOps en turnos-backend-ci.yml/docker/postgres-initdb/, que sí
+-- pasaba los `-v` correctos). Se reemplaza por `\if :{?variable} ... \endif` (test de existencia
+-- de variable de psql, soportado desde psql 10) — ahora el placeholder solo se aplica si la
+-- variable NO llegó seteada por `-v`, que era la intención original documentada arriba.
 -- ============================================================================
-\set migrador_rol 'CAMBIAR_migrador_rol'
-\set migrador_password 'CAMBIAR_migrador_password'
-\set app_rol 'CAMBIAR_app_rol'
-\set app_password 'CAMBIAR_app_password'
-\set nombre_db 'CAMBIAR_nombre_db'
+\if :{?migrador_rol}
+\else
+  \set migrador_rol 'CAMBIAR_migrador_rol'
+\endif
+\if :{?migrador_password}
+\else
+  \set migrador_password 'CAMBIAR_migrador_password'
+\endif
+\if :{?app_rol}
+\else
+  \set app_rol 'CAMBIAR_app_rol'
+\endif
+\if :{?app_password}
+\else
+  \set app_password 'CAMBIAR_app_password'
+\endif
+\if :{?nombre_db}
+\else
+  \set nombre_db 'CAMBIAR_nombre_db'
+\endif
 
 -- ============================================================================
 -- Parte 1 — crear los 2 roles. Correr UNA sola vez por ambiente (conectado con un rol que tenga
