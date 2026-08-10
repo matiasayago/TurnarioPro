@@ -31,6 +31,60 @@ de Postgres). Este ciclo actualiza la infraestructura para reflejar ese cambio:
   primera conexión del repo, no para aplicarse a ciegas sin revisar.
 - Este documento (§1, §3, §6, §7, §8, §9, §10).
 
+**Ciclo 3 (2026-08-09/10) — separación de roles de Postgres (cierre de gap CRITICAL,
+TURNOS-2026-001), coordinado con DBA y Security.** DBA cerró la mayor parte de un hallazgo
+Critical: el rol único de conexión a Postgres de cada ambiente es owner de las tablas y, en
+docker-compose/CI, además superusuario del cluster (así lo crea la imagen oficial
+`postgres:16-alpine` vía `POSTGRES_USER`) — un superusuario bypassea Row Level Security
+siempre, incluso con `FORCE ROW LEVEL SECURITY` (capa 1, ya aplicada por DBA a las 5 tablas con
+RLS en `../05-codigo/database/migrations/001_init.sql`). La capa 2 —separar un rol de
+MIGRACIÓN (owner, corre el DDL una sola vez) de un rol de RUNTIME (sirve el tráfico de la app,
+sin ser owner y sin BYPASSRLS)— es la tarea de este ciclo, ejecutada con
+`../05-codigo/database/scripts/provisionar_roles_postgres.sql` (DBA):
+
+- `../05-codigo/backend/docker-compose.yml` — el servicio `postgres` provisiona ambos roles
+  automáticamente la primera vez que su volumen está vacío (2 scripts nuevos en
+  `../05-codigo/backend/docker/postgres-initdb/`, vía el mecanismo estándar
+  `docker-entrypoint-initdb.d/` de la imagen oficial) y migra el esquema con el rol de
+  MIGRACIÓN antes de que `backend` pueda arrancar (`depends_on: condition: service_healthy`
+  se cumple recién después). `DATABASE_URL` del servicio `backend` pasa a apuntar al rol de
+  RUNTIME.
+- `../../../.github/workflows/turnos-backend-ci.yml` — mismo patrón en los dos jobs
+  (`build-and-test` y `docker-build-smoke`, cada uno con su propio service container de
+  Postgres efímero): 5 pasos nuevos justo después de `Checkout` ("Roles Postgres 0/4"-"4/4" —
+  asegurar `psql`, provisionar roles, migrar como el rol de MIGRACIÓN, completar GRANTs, y
+  correr `../05-codigo/database/scripts/verificar_rls_postgres.sql` contra el service
+  container real) antes de que el resto del job use `DATABASE_URL`/`docker run -e
+  DATABASE_URL`, que también pasan a apuntar al rol de RUNTIME. Ver §6 para el detalle.
+- `../05-codigo/backend/render.yaml` — sin cambio funcional (no se puede verificar ni aplicar
+  contra una cuenta real de Render desde este entorno, misma limitación de siempre, ver §0/§5);
+  se agregó documentación de qué chequear antes de asumir que ese ambiente necesita la misma
+  separación — ver §10.
+- Este documento (§1, §3, §6, §8, §9, §10).
+
+**No se tocó código de Backend** (`src/`, incluido `db.ts`) — instrucción explícita del
+Director General IA. `runMigrations()` sigue funcionando sin ningún cambio de código: ya
+estaba gateada por "¿existe la tabla `usuario`?" (`SELECT to_regclass('public.usuario')`), así
+que cuando el proceso de `backend` arranca (con `DATABASE_URL` ya apuntando al rol de RUNTIME)
+el esquema ya fue migrado por el paso separado correspondiente (docker-entrypoint-initdb.d en
+docker-compose, o los pasos "Roles Postgres */4" en CI) y ese chequeo da `true` — no vuelve a
+intentar el DDL, que de todos modos fallaría con el rol de RUNTIME (sin privilegios de
+`CREATE`). Detalle completo de esta tensión (y de por qué no se resolvió tocando `db.ts`) en
+`../03-arquitectura/modelo-datos.md` §5bis y en los comentarios de
+`../05-codigo/database/migrations/001_init.sql`.
+
+**No verificado con un run real de GitHub Actions todavía** (mismo tipo de limitación que el
+resto de este documento, ver §5) — sí se revisó línea por línea contra la documentación de
+Postgres/psql/Docker (semántica de `docker-entrypoint-initdb.d/`, de `SET ROLE`, de
+`ON_ERROR_STOP`, de `ALTER DEFAULT PRIVILEGES`, de por qué `CREATE EXTENSION pgcrypto` no
+necesita superusuario desde Postgres 13 al estar marcada `trusted`), y el YAML de los 3
+archivos tocados (`docker-compose.yml`, `turnos-backend-ci.yml`, `render.yaml`) y la sintaxis
+`sh`/`bash` de los 4 scripts nuevos se validaron con parsers reales (`js-yaml`, `sh -n`/
+`bash -n`) — no solo a simple vista. La primera confirmación real es el próximo run de GitHub
+Actions en verde, en particular el paso "Roles Postgres 4/4" (`verificar_rls_postgres.sql`) de
+cada job — si sale rojo, es información real (puede revelar algo enmascarado hasta ahora por el
+bypass total de RLS, ver el comentario de ese script), no se debe ocultar ni forzar en verde.
+
 **Sigue sin publicar ningún entorno real.** Nadie de la Factory tiene todavía credenciales
 de Render/Railway ni aprovisionó un servicio real — este ciclo deja la infraestructura y el
 instructivo listos para cuando el CEO/DevOps lo hagan, no ejecuta ese paso (ningún agente de
@@ -82,6 +136,18 @@ ya viene fijada en el propio `docker-compose.yml` (apunta al servicio por su nom
 interno de Compose, no a `localhost` — no hace falta, y no corresponde, completarla en
 `.env`). El resto de la configuración se sigue leyendo desde `.env` (nunca commiteado — ver
 `.gitignore`/`.dockerignore` del backend).
+
+**Separación de roles de Postgres (2026-08-09/10, ver §0 "Ciclo 3").** La primera vez que
+`docker compose up` corre contra el volumen `turnos_postgres_data` vacío, el servicio
+`postgres` provisiona automáticamente un rol de MIGRACIÓN y un rol de RUNTIME (2 scripts en
+`docker/postgres-initdb/`, vía `docker-entrypoint-initdb.d/`) y migra el esquema con el rol de
+MIGRACIÓN — todo esto termina ANTES de que el healthcheck de `postgres` pueda pasar, así que
+`backend` nunca arranca contra una base a medio provisionar. No hace falta ningún paso manual
+adicional: `docker compose up --build` sigue siendo el único comando. Si algo sale mal en este
+proceso (ej. se corrige un typo en los scripts de provisión después de un primer intento
+fallido), hay que recrear el volumen para que vuelva a correr desde cero — `docker compose down
+-v` (**borra los datos**, aceptable en desarrollo local) seguido de `docker compose up --build`
+de nuevo; `docker-entrypoint-initdb.d/` no se re-ejecuta sobre un volumen que ya tiene datos.
 
 ## 2. Build multi-stage (resumen del Dockerfile)
 
@@ -141,7 +207,7 @@ Ver también `../05-codigo/backend/.env.example` (plantilla completa y comentada
 
 | Variable | Requerida | Default de la app | Notas |
 |---|---|---|---|
-| `DATABASE_URL` | **Sí** | — (sin default; `src/db.ts` necesita un Postgres real) | Formato `postgresql://usuario:password@host:puerto/basededatos`. **En Render, la provee el proveedor solo** al conectar su addon de Postgres — nunca se arma a mano ahí (ver §10). **En docker-compose, ya viene fijada en `docker-compose.yml`** apuntando al servicio `postgres` por su nombre de red interno de Compose — no hace falta (ni corresponde) completarla en `.env` para ese flujo. Solo se completa a mano en `.env`/`docker run` para el modo standalone (§1) o para apuntar a un Postgres externo. |
+| `DATABASE_URL` | **Sí** | — (sin default; `src/db.ts` necesita un Postgres real) | Formato `postgresql://usuario:password@host:puerto/basededatos`. **En Render, la provee el proveedor solo** al conectar su addon de Postgres — nunca se arma a mano ahí (ver §10; pendiente de verificar ahí si ese rol necesita la separación de roles del párrafo siguiente, ver `render.yaml`). **En docker-compose, ya viene fijada en `docker-compose.yml`** apuntando al servicio `postgres` por su nombre de red interno de Compose — no hace falta (ni corresponde) completarla en `.env` para ese flujo. Solo se completa a mano en `.env`/`docker run` para el modo standalone (§1) o para apuntar a un Postgres externo. **Debe apuntar al rol de RUNTIME, nunca al de MIGRACIÓN ni a un superusuario** (separación de roles 2026-08-09/10, ver §0 "Ciclo 3" y §1) — necesario para que Row Level Security (`../03-arquitectura/modelo-datos.md` §5/§5bis) tenga efecto real. |
 | `JWT_SECRET` | **Sí, en producción** (`NODE_ENV=production`, ya fijado por el Dockerfile) | `dev-secret-not-for-production` (solo fuera de `NODE_ENV=production`) | El proceso **no arranca** en producción sin esto seteado (hallazgo HIGH-3, ya remediado en código). Nunca commitear el valor real — generarlo aparte (ej. `openssl rand -base64 48`, o dejar que Render lo genere solo vía `generateValue: true` en `render.yaml`, ver §10) y gestionarlo vía secretos del entorno real. |
 | `PORT` | No | `3000` | También la usa `docker-compose.yml` para el mapeo de puertos host:contenedor. |
 | `ENABLE_DEV_ROUTES` | No — **nunca en producción** | ausente (equivale a `false`) | Monta `/dev/seed` y `/dev/forzar-expiracion`, sin autenticación propia (hallazgo HIGH-4). La imagen nunca la setea; tampoco incluye `web-preview/` (defensa en profundidad). |
@@ -226,13 +292,10 @@ service container vía `--network host`, ver §6) — mismo criterio, mismo job.
    completa de `scripts/*.mjs` contra `ts-node` (feedback rápido sobre tipos y lógica de
    negocio/seguridad, en los dos arranques de servidor que describe §5). Usa Node 22
    (`actions/setup-node@v4`), coherente con el `Dockerfile`. Corre contra un **service
-   container `postgres:16-alpine`** (credenciales de test fijas, no secretas —
-   `DATABASE_URL=postgresql://turnos_ci:turnos_ci_password@localhost:5432/turnos_test`,
-   ver comentarios del propio workflow) — GitHub Actions espera a que su healthcheck
-   (`pg_isready`) esté en verde antes de dejar correr el primer step, así que no hace falta
-   ningún paso propio de espera. No hay un paso separado que corra
-   `database/migrations/001_init.sql` a mano: se apoya en que `runMigrations()` (Backend)
-   corre automáticamente al arrancar el servidor, igual que ya hacía contra `node:sqlite`.
+   container `postgres:16-alpine`** (credenciales de test fijas, no secretas — el rol de
+   bootstrap `turnos_ci`, ver comentarios del propio workflow) — GitHub Actions espera a que
+   su healthcheck (`pg_isready`) esté en verde antes de dejar correr el primer step, así que
+   no hace falta ningún paso propio de espera.
 2. **`docker-build-smoke`** (corre después de que el anterior pase) — construye la imagen
    Docker real a partir de este mismo `Dockerfile` y corre `scripts/smoke-test.mjs` contra
    un contenedor levantado en config "tipo producción" (`NODE_ENV=production`, el default
@@ -245,6 +308,25 @@ service container vía `--network host`, ver §6) — mismo criterio, mismo job.
    `--network host` para poder alcanzar el `localhost:5432` del Postgres del job — un
    `docker run` suelto no comparte por defecto la red donde Actions publica los service
    containers.
+
+**Separación de roles de Postgres + verificación de RLS (2026-08-09/10, ver §0 "Ciclo 3").**
+`POSTGRES_USER=turnos_ci` de cada service container es superusuario del cluster (mismo motivo
+que en docker-compose, ver §1) — ambos jobs agregan ahora, apenas después de `Checkout`, los
+pasos **"Roles Postgres 0/4"–"4/4"**: aseguran que `psql` esté disponible en el runner
+(`ubuntu-latest` ya lo trae; el paso instala `postgresql-client` solo si faltara), provisionan
+un rol de MIGRACIÓN y un rol de RUNTIME (`../05-codigo/database/scripts/
+provisionar_roles_postgres.sql`, DBA) conectándose por TCP a `localhost:5432` (a diferencia de
+docker-compose, un service container de Actions no tiene el repo disponible cuando arranca, así
+que el mecanismo `docker-entrypoint-initdb.d/` que usa `docker-compose.yml` no aplica acá),
+migran el esquema con el rol de MIGRACIÓN (`../05-codigo/database/migrations/001_init.sql`), y
+por último corren **`../05-codigo/database/scripts/verificar_rls_postgres.sql`** (Security)
+contra el service container real
+— la única forma de confirmar que Row Level Security filtra de verdad, no solo que el DDL
+compila. Recién después de esos 5 pasos, `DATABASE_URL` (job `build-and-test`) y `docker run -e
+DATABASE_URL` (job `docker-build-smoke`) apuntan al rol de RUNTIME ya provisionado. Si el paso
+"Roles Postgres 4/4" sale rojo, es información real y valiosa — puede revelar algo que estuvo
+enmascarado hasta ahora por el bypass total de RLS (ver el comentario de ese script) — no se
+debe ocultar ni forzar en verde sin entender la causa.
 
 ## 7. Gap `node:sqlite` → PostgreSQL: bloqueante desde el ciclo 1, cerrado en código en el ciclo 2 (pendiente de confirmar con CI en verde)
 
@@ -369,6 +451,69 @@ asumir ninguna de las dos respuestas.
   - Ningún rollback, igual que ningún forward-deploy, ocurre sin aprobación previa (ver
     reglas de actuación del rol DevOps y `docs/04-manual-operativo.md`).
 
+### Ciclo 3 (2026-08-09/10) — separación de roles de Postgres (cierre de gap CRITICAL, TURNOS-2026-001)
+
+- **Motivo:** DBA cerró la mayor parte de un hallazgo Critical de seguridad (confirmado de
+  forma independiente por Security): el rol único de conexión a Postgres de cada ambiente es
+  owner de las tablas que crea `runMigrations()` y, en docker-compose/CI, además superusuario
+  del cluster — un superusuario bypassea Row Level Security siempre, incluso con `FORCE ROW
+  LEVEL SECURITY` (que DBA ya aplicó, capa 1 del arreglo). La capa 2 —separar un rol de
+  MIGRACIÓN de un rol de RUNTIME— es la única forma de que RLS tenga efecto real en
+  docker-compose y en CI, y correspondía a DevOps ejecutarla (infraestructura/CI/CD).
+- **Cambios incluidos:** `../05-codigo/backend/docker-compose.yml` (env vars/volumes nuevos del
+  servicio `postgres`, `DATABASE_URL` de `backend` repuntada al rol de RUNTIME),
+  `../05-codigo/backend/docker/postgres-initdb/01-provisionar-roles.sh` y
+  `02-migrar-y-grants-finales.sh` (nuevos), `../../../.github/workflows/turnos-backend-ci.yml`
+  (5 pasos nuevos por job, `DATABASE_URL`/`docker run -e DATABASE_URL` repuntados),
+  `../05-codigo/backend/render.yaml` (solo documentación, sin cambio funcional), y este
+  documento (§0, §1, §3, §6, §8, §9, §10).
+- **No se modificó ningún entregable de código de Backend** — ni `src/`, ni `db.ts`, ni
+  `package.json`. Tampoco se modificó ningún archivo de DBA
+  (`../05-codigo/database/migrations/001_init.sql`,
+  `../05-codigo/database/scripts/provisionar_roles_postgres.sql`,
+  `../05-codigo/database/scripts/verificar_rls_postgres.sql`) — todos se invocan tal cual desde los
+  scripts/pasos nuevos de este ciclo, sin editarlos.
+- **Hallazgo propio de este ciclo, no atribuible a DBA:** el ejemplo de invocación del
+  encabezado de `provisionar_roles_postgres.sql` (`-v migrador_password="'CAMBIAR_1'"`)
+  duplicaría la cita SQL si se usa literal junto con `:'migrador_password'` del cuerpo del
+  script (que ya cita/escapa el valor) — guardaría una contraseña con comillas literales de
+  más, rompiendo la reconexión posterior con el valor limpio. Los scripts/pasos de este ciclo
+  pasan las contraseñas crudas (sin comillas extra) — ver el comentario en
+  `../05-codigo/backend/docker/postgres-initdb/01-provisionar-roles.sh` para el detalle. No se
+  modificó el archivo de DBA (es solo un comentario de ejemplo, no afecta el SQL ejecutable) —
+  reportado acá para
+  que quien lo use manualmente en el futuro (ver la "SECUENCIA COMPLETA DE ADOPCIÓN" de ese
+  script) no repita la doble cita.
+- **Tampoco tenía `CREATE` sobre el esquema `public` el rol de MIGRACIÓN** en
+  `provisionar_roles_postgres.sql` tal cual — desde Postgres 15, ese privilegio ya no se le
+  otorga a PUBLIC por defecto, y no se hereda a un rol nuevo por ser owner de la base. Sin él,
+  el rol de MIGRACIÓN no podría correr `CREATE TABLE`/`CREATE TYPE`/`CREATE EXTENSION` de
+  `001_init.sql`. Resuelto con un `GRANT CREATE ON SCHEMA public TO <rol de MIGRACIÓN>;`
+  adicional, propio de este ciclo (no de DBA), en el primer paso de provisión de roles de cada
+  ambiente — ver el mismo comentario referenciado arriba.
+- **No verificado con Docker/GitHub Actions real** (mismo tipo de limitación que el resto de
+  este documento, ver §0/§5) — verificación de este ciclo: revisión línea por línea contra la
+  documentación de Postgres/psql/Docker, y validación sintáctica con parsers reales (`js-yaml`
+  para los 3 YAML tocados, `sh -n`/`bash -n` para los 4 scripts nuevos). La confirmación real es
+  el próximo run de GitHub Actions en verde — en particular el paso "Roles Postgres 4/4" de
+  cada job, que corre `verificar_rls_postgres.sql` (Security) contra el service container real.
+- **Forma de rollback:** este ciclo tampoco publica ningún entorno real (ver §0). Si el próximo
+  run de CI queda en rojo por estos cambios:
+  - Revertir es seguro y de bajo riesgo: son cambios de configuración/infraestructura más 2
+    scripts nuevos, sin ningún dato de producción en juego (ningún servicio de Render/Railway
+    aprovisionado aún) y sin tocar código de aplicación.
+  - El estado anterior a este ciclo (rol único `turnos`/`turnos_ci`, sin separación de roles)
+    sigue siendo funcionalmente equivalente para todo lo que no sea RLS — `runMigrations()`
+    seguía corriendo igual, solo que sin que `FORCE ROW LEVEL SECURITY` tuviera efecto real (ver
+    el motivo de este ciclo, arriba). Volver a ese estado es tan simple como revertir
+    `docker-compose.yml`/`turnos-backend-ci.yml` a la revisión anterior — no requiere ningún
+    cambio de datos ni de esquema.
+  - Una vez que exista un despliegue real en Render, mismo criterio de rollback documentado en
+    el Ciclo 2 (volver a desplegar la revisión anterior conocida-buena desde el dashboard, nunca
+    editar en caliente).
+  - Ningún rollback, igual que ningún forward-deploy, ocurre sin aprobación previa (ver reglas
+    de actuación del rol DevOps y `docs/04-manual-operativo.md`).
+
 ## 9. Checklist antes de un despliegue real a producción
 
 - [x] Corregir el desajuste de `package.json` (`main`/`start` → `dist/src/index.js`, §2) —
@@ -389,6 +534,19 @@ asumir ninguna de las dos respuestas.
   - [x] Revisar/actualizar `Dockerfile`/`docker-compose.yml`/CI para el nuevo driver
         (servicio `postgres:`, `DATABASE_URL`, quitar el volumen sqlite) — hecho en este
         ciclo (2026-08-07).
+- [x] **Separar un rol de MIGRACIÓN de un rol de RUNTIME en docker-compose.yml y en CI**
+      (2026-08-09/10, ver §0 "Ciclo 3") — cierra que `FORCE ROW LEVEL SECURITY` (ya aplicado en
+      `../05-codigo/database/migrations/001_init.sql`) no tenía ningún efecto real en esos 2
+      ambientes porque el único rol existente ahí es superusuario del cluster. Ver §1/§6 para
+      el detalle.
+  - [ ] **Verificar separación de roles de Postgres en Render antes de confiar en RLS ahí** —
+        conectado con el rol que usaría `DATABASE_URL` en ese ambiente, correr `SELECT
+        rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user;` (ver el comentario
+        grande al principio de `render.yaml`, §10, y `../05-codigo/database/scripts/
+        provisionar_roles_postgres.sql`, DBA). Si alguna de las 2 columnas da `true`, aplicar
+        ahí la misma separación de roles antes de considerar cerrado el gap de RLS en
+        producción — no asumir que alcanza con `FORCE ROW LEVEL SECURITY` solo. No verificable
+        desde este entorno de desarrollo (sin cuenta real de Render, ver §0/§5).
 - [ ] Aprovisionar de verdad el servicio en Render (o Railway) — hoy solo existe
       `render.yaml` como Blueprint sin aplicar (§10); ningún agente de IA puede crear la
       cuenta ni cargar el método de pago, requiere al CEO.
@@ -451,13 +609,38 @@ aprobación previa.
    conectada), `JWT_SECRET` (generado solo, valor oculto), `PORT=3000`,
    `ENABLE_DEV_ROUTES=false`. Si se quiere un valor no-default para
    `EXPIRACION_PAGO_MIN`/`VENTANA_CANCELACION_MIN`/`RATE_LIMIT_*` (§3), agregarlo a mano acá.
-6. Recién con eso revisado y con aprobación explícita del Director General IA/CEO, disparar
+6. **Verificar separación de roles de Postgres antes de confiar en Row Level Security acá**
+   (2026-08-09/10 — ver el comentario grande al principio de `render.yaml` y §0 "Ciclo 3").
+   Con la "Internal/External Database URL" que Render ya provee para la base creada en el
+   paso 4 (el rol único `turnos_profesionales` que declara `databases:` en `render.yaml`),
+   conectarse (`psql`) y correr:
+
+   ```sql
+   SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user;
+   ```
+
+   - Si **ambas** columnas dan `false`: `FORCE ROW LEVEL SECURITY` (ya aplicado en
+     `../05-codigo/database/migrations/001_init.sql`) alcanza solo en este ambiente — es el
+     resultado esperado para un Postgres gestionado, pero no se debe asumir sin correr la
+     query. No hace falta ningún cambio más para RLS acá.
+   - Si **cualquiera** de las 2 da `true`: aplicar la misma separación de roles que
+     `docker-compose.yml`/CI antes de dar por cerrado el gap de RLS en producción — ver
+     `../05-codigo/database/scripts/provisionar_roles_postgres.sql` (DBA) para los GRANTs
+     exactos y la
+     sección "Nota para Render específicamente" de ese mismo script para por qué esto
+     requiere conectarse a mano (el Blueprint solo provisiona un rol por base) y reemplazar
+     cómo se resuelve `DATABASE_URL` del paso 5 (deja de poder usar
+     `fromDatabase: { property: connectionString }`).
+7. Recién con eso revisado y con aprobación explícita del Director General IA/CEO, disparar
    el primer deploy manual desde el dashboard.
-7. Verificar `GET https://<url-de-render>/health` y correr
+8. Verificar `GET https://<url-de-render>/health` y correr
    `BASE_URL=https://<url-de-render> node scripts/smoke-test.mjs` (ajustar el script si
    `BASE` sigue hardcodeado a `localhost`, ver la recomendación de CTO IA en
    `../03-arquitectura/plan-produccion.md` §7, paso 5) antes de considerar el despliegue
-   verificado.
+   verificado. Considerar además correr
+   `../05-codigo/database/scripts/verificar_rls_postgres.sql`
+   (Security) contra esta base — la única forma de confirmar que RLS filtra de verdad en
+   producción, no solo que el DDL compiló.
 
 ### Opción B — a mano, sin Blueprint (si se prefiere no usar `render.yaml` todavía)
 
@@ -483,5 +666,8 @@ aprobación previa.
 5. **Desactivar auto-deploy** en la configuración del servicio (equivalente manual del
    `autoDeploy: false` del Blueprint) — ningún cambio llega a producción sin aprobación
    previa (`docs/04-manual-operativo.md`).
-6. Con todo revisado y aprobado, disparar el primer deploy manual. Verificar igual que en
-   la Opción A, paso 7.
+6. **Verificar separación de roles de Postgres** — mismo chequeo que la Opción A, paso 6
+   (`SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user;`, conectado con
+   el rol que generó el paso 1 de acá), antes de confiar en Row Level Security en este ambiente.
+7. Con todo revisado y aprobado, disparar el primer deploy manual. Verificar igual que en
+   la Opción A, paso 8.
