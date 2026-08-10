@@ -246,6 +246,26 @@ CREATE INDEX idx_notificacion_turno ON notificacion (turno_id);
 -- ============================================================================
 
 -- ============================================================================
+-- CORRECCIÓN (2026-08-10, confirmado con una consulta de diagnóstico real, con ROLLBACK, contra
+-- Postgres real): el comentario de arriba ("Sin esa variable seteada, current_setting(..., true)
+-- devuelve NULL") es cierto solo para una variable que NUNCA se seteó en la sesión — pero un
+-- `RESET nombre_variable` explícito sobre una variable custom (no declarada en postgresql.conf),
+-- después de haberla seteado con `set_config`, la deja en STRING VACÍO (''), no en NULL —
+-- comportamiento real de Postgres, verificado empíricamente (no en la documentación general).
+-- `''::uuid` lanza una excepción ("invalid input syntax for type uuid") en vez de evaluar la
+-- policy a `false` como sí hace `NULL::uuid` — un `RESET` explícito de `app.usuario_id` a mitad
+-- de una transacción (no el patrón normal de `withTransaction`, backend/src/db.ts, que usa
+-- `SET LOCAL`/`set_config(..., true)` y deja que ese valor expire solo al terminar la
+-- transacción — eso sí revierte a NULL limpio) podría hacer que una policy explote en vez de
+-- denegar. Encontrado por ../scripts/verificar_rls_postgres.sql (Security), que sí ejercita ese
+-- camino a propósito para simular "sin contexto" dentro de una misma transacción larga.
+-- Todas las políticas de abajo que casteaban `current_setting('app.usuario_id', true)` directo a
+-- `::uuid` ahora lo envuelven en `NULLIF(..., '')` antes del cast — convierte tanto NULL como ''
+-- en NULL, así que el resultado (denegar, no romper) es el mismo sin importar cuál de los dos
+-- devuelva `current_setting` en cada caso.
+-- ============================================================================
+
+-- ============================================================================
 -- Separación owner/runtime y FORCE ROW LEVEL SECURITY — cierre de gap crítico (DBA, 2026-08-09)
 -- ============================================================================
 -- Hallazgo (reportado por Backend al conectar este DDL a un Postgres real por primera vez,
@@ -350,7 +370,7 @@ CREATE POLICY profesional_insert_por_administrador ON profesional
   FOR INSERT WITH CHECK (
     EXISTS (
       SELECT 1 FROM negocio_administrador na
-      WHERE na.usuario_id = current_setting('app.usuario_id', true)::uuid
+      WHERE na.usuario_id = NULLIF(current_setting('app.usuario_id', true), '')::uuid
     )
   );
 CREATE POLICY profesional_update_admin_de_su_negocio ON profesional
@@ -359,7 +379,7 @@ CREATE POLICY profesional_update_admin_de_su_negocio ON profesional
       SELECT 1 FROM negocio_profesional np
       JOIN negocio_administrador na ON na.negocio_id = np.negocio_id
       WHERE np.profesional_id = profesional.id
-        AND na.usuario_id = current_setting('app.usuario_id', true)::uuid
+        AND na.usuario_id = NULLIF(current_setting('app.usuario_id', true), '')::uuid
     )
   );
 
@@ -389,7 +409,7 @@ CREATE POLICY profesional_update_admin_de_su_negocio ON profesional
 -- transitividad con esta revisión.
 CREATE POLICY profesional_update_propio_duracion_cita ON profesional
   FOR UPDATE USING (
-    profesional.usuario_id = current_setting('app.usuario_id', true)::uuid
+    profesional.usuario_id = NULLIF(current_setting('app.usuario_id', true), '')::uuid
   );
 
 -- negocio_administrador: cada usuario ve únicamente sus propias membresías de administrador
@@ -404,9 +424,9 @@ CREATE POLICY profesional_update_propio_duracion_cita ON profesional
 ALTER TABLE negocio_administrador ENABLE ROW LEVEL SECURITY;
 ALTER TABLE negocio_administrador FORCE ROW LEVEL SECURITY; -- ver nota junto a `profesional` arriba
 CREATE POLICY negocio_administrador_select_propio ON negocio_administrador
-  FOR SELECT USING (usuario_id = current_setting('app.usuario_id', true)::uuid);
+  FOR SELECT USING (usuario_id = NULLIF(current_setting('app.usuario_id', true), '')::uuid);
 CREATE POLICY negocio_administrador_insert_propio ON negocio_administrador
-  FOR INSERT WITH CHECK (usuario_id = current_setting('app.usuario_id', true)::uuid);
+  FOR INSERT WITH CHECK (usuario_id = NULLIF(current_setting('app.usuario_id', true), '')::uuid);
 
 -- negocio_profesional: SELECT público — igual que profesional/servicio, hace falta para que
 -- HU-08 (GET /negocios/:id/servicios/:servicioId/profesionales) pueda resolver qué
@@ -424,7 +444,7 @@ CREATE POLICY negocio_profesional_insert_admin_del_negocio ON negocio_profesiona
     EXISTS (
       SELECT 1 FROM negocio_administrador na
       WHERE na.negocio_id = negocio_profesional.negocio_id
-        AND na.usuario_id = current_setting('app.usuario_id', true)::uuid
+        AND na.usuario_id = NULLIF(current_setting('app.usuario_id', true), '')::uuid
     )
   );
 CREATE POLICY negocio_profesional_update_admin_del_negocio ON negocio_profesional
@@ -432,7 +452,7 @@ CREATE POLICY negocio_profesional_update_admin_del_negocio ON negocio_profesiona
     EXISTS (
       SELECT 1 FROM negocio_administrador na
       WHERE na.negocio_id = negocio_profesional.negocio_id
-        AND na.usuario_id = current_setting('app.usuario_id', true)::uuid
+        AND na.usuario_id = NULLIF(current_setting('app.usuario_id', true), '')::uuid
     )
   );
 
@@ -445,7 +465,7 @@ CREATE POLICY servicio_insert_admin_del_negocio ON servicio
     EXISTS (
       SELECT 1 FROM negocio_administrador na
       WHERE na.negocio_id = servicio.negocio_id
-        AND na.usuario_id = current_setting('app.usuario_id', true)::uuid
+        AND na.usuario_id = NULLIF(current_setting('app.usuario_id', true), '')::uuid
     )
   );
 CREATE POLICY servicio_update_admin_del_negocio ON servicio
@@ -453,7 +473,7 @@ CREATE POLICY servicio_update_admin_del_negocio ON servicio
     EXISTS (
       SELECT 1 FROM negocio_administrador na
       WHERE na.negocio_id = servicio.negocio_id
-        AND na.usuario_id = current_setting('app.usuario_id', true)::uuid
+        AND na.usuario_id = NULLIF(current_setting('app.usuario_id', true), '')::uuid
     )
   );
 
@@ -476,31 +496,31 @@ ALTER TABLE turno ENABLE ROW LEVEL SECURITY;
 ALTER TABLE turno FORCE ROW LEVEL SECURITY; -- ver nota junto a `profesional` arriba
 CREATE POLICY turno_acceso_negocio_o_cliente ON turno
   USING (
-    cliente_id = current_setting('app.usuario_id', true)::uuid
+    cliente_id = NULLIF(current_setting('app.usuario_id', true), '')::uuid
     OR EXISTS (
       SELECT 1 FROM negocio_administrador na
       WHERE na.negocio_id = turno.negocio_id
-        AND na.usuario_id = current_setting('app.usuario_id', true)::uuid
+        AND na.usuario_id = NULLIF(current_setting('app.usuario_id', true), '')::uuid
     )
     OR EXISTS (
       SELECT 1 FROM negocio_profesional np
       JOIN profesional p ON p.id = np.profesional_id
       WHERE np.negocio_id = turno.negocio_id
-        AND p.usuario_id = current_setting('app.usuario_id', true)::uuid
+        AND p.usuario_id = NULLIF(current_setting('app.usuario_id', true), '')::uuid
     )
   )
   WITH CHECK (
-    cliente_id = current_setting('app.usuario_id', true)::uuid
+    cliente_id = NULLIF(current_setting('app.usuario_id', true), '')::uuid
     OR EXISTS (
       SELECT 1 FROM negocio_administrador na
       WHERE na.negocio_id = turno.negocio_id
-        AND na.usuario_id = current_setting('app.usuario_id', true)::uuid
+        AND na.usuario_id = NULLIF(current_setting('app.usuario_id', true), '')::uuid
     )
     OR EXISTS (
       SELECT 1 FROM negocio_profesional np
       JOIN profesional p ON p.id = np.profesional_id
       WHERE np.negocio_id = turno.negocio_id
-        AND p.usuario_id = current_setting('app.usuario_id', true)::uuid
+        AND p.usuario_id = NULLIF(current_setting('app.usuario_id', true), '')::uuid
     )
   );
 
