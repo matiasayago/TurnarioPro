@@ -1,0 +1,9 @@
+# Fuerza LF en los scripts de este directorio, sin importar core.autocrlf del checkout local
+# (este repo lo tiene en `true`, convención típica de Windows) — DevOps, 2026-08-09/10,
+# TURNOS-2026-001. Los .sh de postgres-initdb/ corren DENTRO de un contenedor Linux
+# (postgres:16-alpine) vía docker-entrypoint-initdb.d/; un shebang con CRLF ("#!/bin/sh\r")
+# rompe la ejecución ahí (interpretado como "/bin/sh<CR>: bad interpreter" o similar). Sin este
+# archivo, un checkout futuro en una máquina con autocrlf=true podría convertir estos scripts a
+# CRLF y romper docker-compose.yml en silencio. Ver ../docker-compose.yml y
+# postgres-initdb/*.sh para el contexto completo de por qué existen estos scripts.
+*.sh text eol=lf

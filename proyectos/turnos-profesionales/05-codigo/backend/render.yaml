@@ -25,6 +25,45 @@
 # (no asumir que Render lo va a encontrar solo por convención de raíz) — VERIFICAR el flujo
 # exacto vigente en el dashboard al momento de conectarlo.
 
+# ⚠️ SEPARACIÓN DE ROLES DE POSTGRES — VERIFICAR ANTES DE ASUMIR QUE HACE FALTA ACÁ (DevOps,
+# 2026-08-09/10, TURNOS-2026-001, cierre de gap CRITICAL). docker-compose.yml y
+# ../../../../.github/workflows/turnos-backend-ci.yml ya separan un rol de MIGRACIÓN (owner, corre
+# ../database/migrations/001_init.sql una sola vez) de un rol de RUNTIME (sirve DATABASE_URL
+# de la app, sin privilegios de owner, sin BYPASSRLS) — hace falta ahí porque el único rol que
+# existe en esos 2 ambientes (creado vía POSTGRES_USER de la imagen oficial postgres:16-alpine)
+# es SUPERUSUARIO DEL CLUSTER, y un superusuario bypassea Row Level Security siempre, incluso
+# con FORCE ROW LEVEL SECURITY (ver ../database/migrations/001_init.sql, bloque "Separación
+# owner/runtime y FORCE ROW LEVEL SECURITY").
+#
+# NO VERIFICADO todavía si el rol que provisiona el bloque "databases:" de abajo
+# (`turnos_profesionales`, el que termina resuelto en DATABASE_URL de "envVars:" más abajo vía
+# fromDatabase) tiene el mismo problema acá — este entorno de desarrollo no tiene acceso a una
+# cuenta real de Render (misma limitación documentada en ../../08-despliegue/README.md §0/§5).
+# Antes de asumir que hace falta la misma separación de roles en este ambiente, conectarse con
+# ESE rol (la "Internal/External Database URL" que Render provee para la base de abajo) y correr:
+#
+#   SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user;
+#
+# - Si AMBAS columnas dan `false`: FORCE ROW LEVEL SECURITY (ya aplicado en
+#   ../database/migrations/001_init.sql) alcanza solo en este ambiente, sin hacer falta
+#   ningún cambio más acá — los proveedores de Postgres gestionado normalmente NO le dan
+#   superusuario de cluster a su rol de aplicación por defecto (a diferencia de la imagen
+#   oficial de Docker usada en desarrollo/CI). Es el resultado esperado, pero NO se debe dar por
+#   sentado sin correr la query primero.
+# - Si CUALQUIERA de las 2 columnas da `true`: aplica la misma separación de roles que
+#   docker-compose.yml/CI. Ver ../database/scripts/provisionar_roles_postgres.sql (DBA) para
+#   los GRANTs exactos — la sección "Nota para Render específicamente" de ese script explica por
+#   qué acá no se puede resolver solo editando este YAML (el mecanismo "databases:" de este
+#   Blueprint solo provisiona UN rol/usuario por base — no hay forma de declarar un segundo rol
+#   ahí) y requiere conectarse a mano con psql para crear el rol de RUNTIME, más reemplazar cómo
+#   se resuelve DATABASE_URL de "envVars:" más abajo: dejaría de poder usar
+#   `fromDatabase: { property: connectionString }` (eso siempre apunta al rol único que crea este
+#   Blueprint) y pasaría a ser un valor manual con la connection string del rol de RUNTIME nuevo,
+#   gestionado como secreto en el dashboard de Render, no en este archivo.
+#
+# Ver también ../../08-despliegue/README.md (checklist de §9 y §10) para este mismo pendiente
+# documentado junto al resto de los pasos previos a un despliegue real.
+
 databases:
   - name: turnos-profesionales-db
     databaseName: turnos_profesionales
@@ -53,7 +92,10 @@ services:
     envVars:
       # DATABASE_URL: Render la arma y la inyecta solo, a partir de la base declarada arriba
       # — nunca se escribe a mano ni en este archivo ni en el dashboard (ver
-      # ../../08-despliegue/README.md).
+      # ../../08-despliegue/README.md). Apunta al rol único que crea "databases:" arriba
+      # (`turnos_profesionales`) — VER el comentario grande al principio de este archivo
+      # ("SEPARACIÓN DE ROLES DE POSTGRES") antes de asumir que este valor puede usarse tal
+      # cual para Row Level Security: pendiente de verificar si ese rol es superusuario acá.
       - key: DATABASE_URL
         fromDatabase:
           name: turnos-profesionales-db
