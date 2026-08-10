@@ -2,13 +2,16 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 import '../../state/sesion.dart';
-import 'definir_disponibilidad_screen.dart';
+import '../../theme/app_colors.dart';
+import '../../widgets/widgets.dart';
 import 'excepciones_screen.dart';
-import 'mis_clientes_screen.dart';
-import 'configuracion_servicios_screen.dart';
 
-/// HU-06: agenda del profesional (turnos + acceso a disponibilidad/excepciones/clientes) —
-/// ver wireframe en docs/04-diseno/mapa-pantallas.md §5.
+/// HU-06: agenda semanal del profesional. Ya no es una pestaña raíz del bottom nav — se accede
+/// desde el botón "Ver agenda >" del Dashboard (`mapa-pantallas.md` §4/§5.3/§5.2bis). La
+/// navegación a Disponibilidad/Clientes/Servicios que antes vivía acá como bottom nav propio se
+/// reemplazó por el `AppBottomNavigationBar` de 6 ítems del `ProfesionalShell` — esta pantalla
+/// conserva únicamente la acción "Bloquear rango" (§5.3), que abre Excepciones (HU-15) tal como
+/// ya describía el wireframe.
 class AgendaScreen extends StatefulWidget {
   const AgendaScreen({super.key});
 
@@ -29,8 +32,18 @@ class _AgendaScreenState extends State<AgendaScreen> {
   @override
   Widget build(BuildContext context) {
     final formato = DateFormat('EEE d MMM · HH:mm', 'es');
+    final onPrimary = AppColors.of(context).onPrimary;
     return Scaffold(
-      appBar: AppBar(title: const Text('Mi agenda')),
+      appBar: AppHeader(
+        title: 'Agenda semanal',
+        showBackButton: true,
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const ExcepcionesScreen())),
+            child: Text('Bloquear rango', style: TextStyle(color: onPrimary)),
+          ),
+        ],
+      ),
       body: FutureBuilder<List<dynamic>>(
         future: _turnos,
         builder: (context, snapshot) {
@@ -49,23 +62,6 @@ class _AgendaScreenState extends State<AgendaScreen> {
               );
             },
           );
-        },
-      ),
-      bottomNavigationBar: NavigationBar(
-        destinations: const [
-          NavigationDestination(icon: Icon(Icons.schedule), label: 'Disponibilidad'),
-          NavigationDestination(icon: Icon(Icons.block), label: 'Excepciones'),
-          NavigationDestination(icon: Icon(Icons.people), label: 'Clientes'),
-          NavigationDestination(icon: Icon(Icons.settings), label: 'Servicios'),
-        ],
-        onDestinationSelected: (i) {
-          final destinos = [
-            const DefinirDisponibilidadScreen(),
-            const ExcepcionesScreen(),
-            const MisClientesScreen(),
-            const ConfiguracionServiciosScreen(),
-          ];
-          Navigator.push(context, MaterialPageRoute(builder: (_) => destinos[i]));
         },
       ),
     );
