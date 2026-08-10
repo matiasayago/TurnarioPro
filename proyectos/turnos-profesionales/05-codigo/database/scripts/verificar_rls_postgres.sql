@@ -45,6 +45,19 @@
 \set ON_ERROR_STOP on
 BEGIN;
 
+-- CORRECCIÓN (2026-08-10, confirmado en el primer run real de CI): dentro de un bloque
+-- `DO $$ ... $$` (o el cuerpo de cualquier función PL/pgSQL), psql NO sustituye `:'variable'`/
+-- `:"variable"` — el $$ existe justamente para que su contenido viaje literal al servidor sin
+-- que psql lo toque, así que cada referencia quedaba como el carácter ":" crudo y el parser de
+-- PL/pgSQL la rechazaba ("syntax error at or near ':'"). Fuera de un bloque $$ (sentencias SQL
+-- sueltas, como los `SET ROLE :"migrador_rol";` de más abajo) la sustitución de psql sí aplica
+-- normalmente — no se tocan esos casos. Para los usos DENTRO de un bloque $$, se resuelve
+-- guardando los valores como variables de sesión de Postgres ANTES (con `set_config`, en una
+-- sentencia suelta) y leyéndolas DENTRO de cada bloque con `current_setting`, en vez de la
+-- sustitución de texto de psql.
+SELECT set_config('verificar_rls.migrador_rol', :'migrador_rol', true);
+SELECT set_config('verificar_rls.app_rol', :'app_rol', true);
+
 -- ============================================================================
 -- Parte 0 — chequeos de metadata (no necesitan datos de prueba)
 -- ============================================================================
@@ -73,15 +86,15 @@ DECLARE
   bypassea_rls BOOLEAN;
 BEGIN
   SELECT rolsuper, rolbypassrls INTO es_super, bypassea_rls
-  FROM pg_roles WHERE rolname = :'app_rol';
+  FROM pg_roles WHERE rolname = current_setting('verificar_rls.app_rol');
 
   IF NOT FOUND THEN
-    RAISE EXCEPTION 'FALLA Parte 0: el rol de runtime % no existe — correr provisionar_roles_postgres.sql primero.', :'app_rol';
+    RAISE EXCEPTION 'FALLA Parte 0: el rol de runtime % no existe — correr provisionar_roles_postgres.sql primero.', current_setting('verificar_rls.app_rol');
   END IF;
   IF es_super OR bypassea_rls THEN
-    RAISE EXCEPTION 'FALLA Parte 0: el rol de runtime % tiene rolsuper=% / rolbypassrls=% — RLS NO puede tener efecto real con este rol.', :'app_rol', es_super, bypassea_rls;
+    RAISE EXCEPTION 'FALLA Parte 0: el rol de runtime % tiene rolsuper=% / rolbypassrls=% — RLS NO puede tener efecto real con este rol.', current_setting('verificar_rls.app_rol'), es_super, bypassea_rls;
   END IF;
-  RAISE NOTICE 'OK Parte 0: el rol de runtime % no es superusuario ni BYPASSRLS.', :'app_rol';
+  RAISE NOTICE 'OK Parte 0: el rol de runtime % no es superusuario ni BYPASSRLS.', current_setting('verificar_rls.app_rol');
 END $$;
 
 DO $$
@@ -95,14 +108,14 @@ BEGIN
   -- rol único de hoy como migrador_rol Y como app_rol), es esperable. La Parte 3, más abajo, es
   -- la que realmente prueba si esto importa en la práctica para este rol puntual.
   SELECT rolsuper, rolbypassrls INTO es_super, bypassea_rls
-  FROM pg_roles WHERE rolname = :'migrador_rol';
+  FROM pg_roles WHERE rolname = current_setting('verificar_rls.migrador_rol');
   IF NOT FOUND THEN
-    RAISE EXCEPTION 'FALLA Parte 0: el rol de migración % no existe — correr provisionar_roles_postgres.sql primero.', :'migrador_rol';
+    RAISE EXCEPTION 'FALLA Parte 0: el rol de migración % no existe — correr provisionar_roles_postgres.sql primero.', current_setting('verificar_rls.migrador_rol');
   END IF;
   IF es_super OR bypassea_rls THEN
-    RAISE NOTICE 'INFO Parte 0: el rol de migración % tiene rolsuper=% / rolbypassrls=% — la Parte 3 de este script va a mostrar si FORCE ROW LEVEL SECURITY alcanza igual para este rol puntual (spoiler: no, si cualquiera de los dos es true).', :'migrador_rol', es_super, bypassea_rls;
+    RAISE NOTICE 'INFO Parte 0: el rol de migración % tiene rolsuper=% / rolbypassrls=% — la Parte 3 de este script va a mostrar si FORCE ROW LEVEL SECURITY alcanza igual para este rol puntual (spoiler: no, si cualquiera de los dos es true).', current_setting('verificar_rls.migrador_rol'), es_super, bypassea_rls;
   ELSE
-    RAISE NOTICE 'OK Parte 0: el rol de migración % no es superusuario ni BYPASSRLS (FORCE ROW LEVEL SECURITY puede tener efecto real sobre él).', :'migrador_rol';
+    RAISE NOTICE 'OK Parte 0: el rol de migración % no es superusuario ni BYPASSRLS (FORCE ROW LEVEL SECURITY puede tener efecto real sobre él).', current_setting('verificar_rls.migrador_rol');
   END IF;
 END $$;
 
@@ -262,9 +275,9 @@ BEGIN
     WHERE id = '00000000-0000-4000-8000-0000000000a3';
   GET DIAGNOSTICS afectadas = ROW_COUNT;
   IF afectadas <> 0 THEN
-    RAISE EXCEPTION 'FALLA CRÍTICA Parte 3: el rol OWNER (%) pudo escribir sin ningún contexto de RLS seteado (esperado 0 filas afectadas, obtuvo %) — FORCE ROW LEVEL SECURITY NO está teniendo efecto para este rol. Si este rol es superusuario o tiene BYPASSRLS, esto es esperable (ver Parte 0 y el diagnóstico de Security en ../migrations/001_init.sql) — si NO lo es, es el gap original sin cerrar.', :'migrador_rol', afectadas;
+    RAISE EXCEPTION 'FALLA CRÍTICA Parte 3: el rol OWNER (%) pudo escribir sin ningún contexto de RLS seteado (esperado 0 filas afectadas, obtuvo %) — FORCE ROW LEVEL SECURITY NO está teniendo efecto para este rol. Si este rol es superusuario o tiene BYPASSRLS, esto es esperable (ver Parte 0 y el diagnóstico de Security en ../migrations/001_init.sql) — si NO lo es, es el gap original sin cerrar.', current_setting('verificar_rls.migrador_rol'), afectadas;
   END IF;
-  RAISE NOTICE 'OK Parte 3 (LA ASERCIÓN CLAVE): el rol OWNER (%) NO puede escribir sin contexto de RLS — el gap de ownership está cerrado para este rol.', :'migrador_rol';
+  RAISE NOTICE 'OK Parte 3 (LA ASERCIÓN CLAVE): el rol OWNER (%) NO puede escribir sin contexto de RLS — el gap de ownership está cerrado para este rol.', current_setting('verificar_rls.migrador_rol');
 END $$;
 
 RESET ROLE;
