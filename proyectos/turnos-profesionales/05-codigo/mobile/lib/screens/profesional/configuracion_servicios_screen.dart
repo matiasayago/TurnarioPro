@@ -3,8 +3,9 @@ import 'package:provider/provider.dart';
 import '../../state/sesion.dart';
 
 /// HU-04b: el profesional configura, por servicio, si requiere seña para reservar (D2/RN10).
-/// (El selector de servicio_id se simplifica a un campo de texto en este slice — ver nota en
-/// definir_disponibilidad_screen.dart.)
+/// (El selector de servicio_id se simplifica a un campo de texto en este slice — misma
+/// simplificación deliberada que `gestion_horarios_screen.dart`, que reemplazó a la antigua
+/// `definir_disponibilidad_screen.dart`.)
 class ConfiguracionServiciosScreen extends StatefulWidget {
   const ConfiguracionServiciosScreen({super.key});
 
