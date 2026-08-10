@@ -38,7 +38,13 @@ enum _PillKind { success, warning, danger, neutral }
 /// punto de color antes del texto — ningún estado se comunica solo por color (§9): siempre hay
 /// texto.
 class StatusPill extends StatelessWidget {
-  const StatusPill.turno(TurnoEstado estado, {super.key})
+  // CORRECCIÓN (2026-08-10, confirmado en el primer run real de CI): no puede ser `const` — un
+  // `switch` usado como expresión (Dart 3 pattern matching) todavía no es una "expresión
+  // constante" válida para el analizador de Dart, a diferencia del operador ternario `?:` que sí
+  // lo es. `flutter analyze` lo rechazaba con "Invalid constant value" en las 4 ramas de abajo.
+  // Sin impacto real: el único call site (`dashboard_screen.dart`) ya invocaba este constructor
+  // sin `const`.
+  StatusPill.turno(TurnoEstado estado, {super.key})
       : _label = switch (estado) {
           TurnoEstado.porConfirmar => 'Por confirmar',
           TurnoEstado.programada => 'Programada',
@@ -54,7 +60,8 @@ class StatusPill extends StatelessWidget {
           TurnoEstado.completada => _PillKind.neutral,
         };
 
-  const StatusPill.paciente(PacienteEstado estado, {super.key})
+  // Mismo motivo que StatusPill.turno de arriba — no puede ser `const` por el switch-expression.
+  StatusPill.paciente(PacienteEstado estado, {super.key})
       : _label = switch (estado) {
           PacienteEstado.activo => 'Activo',
           PacienteEstado.inactivo => 'Inactivo',
