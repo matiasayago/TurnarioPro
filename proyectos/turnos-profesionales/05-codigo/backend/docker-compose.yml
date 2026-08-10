@@ -1,21 +1,107 @@
 # Orquestación de DESARROLLO/STAGING LOCAL para el backend de Turnos Profesionales
-# (TURNOS-2026-001). NO pensada para producción real: no hay servicio de PostgreSQL acá
-# porque el código de la app (src/db.ts y todas las queries de src/routes/*.ts) todavía
-# solo sabe hablar con `node:sqlite` — ver el gap documentado con detalle, y como
-# bloqueante explícito antes de cualquier despliegue real, en
-# ../../08-despliegue/README.md. Tampoco hay orquestación multi-réplica; eso (y un
-# eventual servicio de Postgres) es candidato a infra/kubernetes/ el día que el backend
-# migre de driver.
+# (TURNOS-2026-001). Incluye un servicio `postgres` real (2026-08-07): el código de la app
+# migró el driver de `node:sqlite` a `pg` (PostgreSQL real, ver ../../08-despliegue/
+# README.md §7) — hasta este ciclo, acá no había servicio de Postgres a propósito, porque
+# agregarlo hubiera sido un espejismo mientras el código todavía no sabía hablar con él; ya
+# no es el caso. Tampoco hay orquestación multi-réplica; eso sigue siendo candidato a
+# infra/kubernetes/ si el volumen de tráfico algún día lo justifica.
 #
 # Uso:
 #   1. cp .env.example .env        (completar JWT_SECRET — ver ese archivo, NUNCA commitear .env)
 #   2. docker compose up --build
 #   3. curl http://localhost:3000/health
 #
-# El HEALTHCHECK del contenedor es el que define el propio Dockerfile (una sola fuente de
-# verdad) — no se redefine acá para no arriesgar que se desincronicen.
+# El HEALTHCHECK del contenedor `backend` es el que define el propio Dockerfile (una sola
+# fuente de verdad) — no se redefine acá para no arriesgar que se desincronicen. El
+# healthcheck de `postgres` sí se define acá (más abajo): no hay ningún otro lugar donde
+# vivir, y `depends_on: condition: service_healthy` lo necesita para no arrancar `backend`
+# contra una base todavía no lista para aceptar conexiones.
+#
+# Separación de roles de Postgres (2026-08-09/10, DevOps — cierre de gap CRITICAL de
+# TURNOS-2026-001, ver ../database/migrations/001_init.sql "Separación owner/runtime y FORCE
+# ROW LEVEL SECURITY" y ../database/scripts/provisionar_roles_postgres.sql, DBA). La primera
+# vez que "docker compose up" corre contra un volumen vacío, el servicio `postgres` provisiona
+# automáticamente 2 roles NO superusuario (MIGRACIÓN y RUNTIME) vía
+# `docker/postgres-initdb/*.sh` y corre la migración con el rol de MIGRACIÓN — `backend` se
+# conecta con el rol de RUNTIME, nunca con el superusuario de bootstrap (`turnos`) ni con el de
+# MIGRACIÓN. Ver los comentarios junto a cada `environment:`/`volumes:` más abajo para el
+# detalle.
 
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: turnos-profesionales-postgres
+
+    # Credenciales fijas de DESARROLLO LOCAL, no secretas a propósito: este contenedor no
+    # publica su puerto al host (ver comentario en "ports" más abajo) — solo es alcanzable
+    # desde dentro de la red interna que arma Compose para este archivo, nunca desde afuera
+    # de la máquina del desarrollador. Mismo criterio que las credenciales fijas del service
+    # container de Postgres en `.github/workflows/turnos-backend-ci.yml` (ver ese archivo),
+    # aunque con valores distintos a propósito, para que un log/error de un entorno nunca se
+    # confunda con el del otro. **Nunca reutilizar estas credenciales en un entorno real** —
+    # producción usa el Postgres gestionado del proveedor de hosting (Render/Railway, ver
+    # ../../08-despliegue/README.md), con su propia `DATABASE_URL` inyectada por ese proveedor.
+    #
+    # POSTGRES_USER/POSTGRES_PASSWORD (`turnos`) — a partir de la separación de roles
+    # (2026-08-09/10) este rol deja de servir tráfico de la app. La imagen oficial lo crea como
+    # SUPERUSUARIO DEL CLUSTER (documentado así por la propia imagen vía `POSTGRES_USER`), y un
+    # superusuario bypassea Row Level Security siempre, FORCE incluido — por eso queda acotado a
+    # bootstrapear el volumen vacío la primera vez (provisiona los 2 roles de abajo y corre la
+    # migración con el rol de MIGRACIÓN, ver "volumes:" más abajo) y nunca aparece en ningún
+    # `DATABASE_URL`.
+    #
+    # TURNOS_MIGRADOR_*/TURNOS_APP_* — los 2 roles reales de este esquema (ninguno superusuario):
+    # MIGRADOR (owner de las tablas, corre database/migrations/001_init.sql una sola vez) y APP
+    # (el que usa `backend` vía `DATABASE_URL` más abajo — sin privilegios de owner, sin
+    # BYPASSRLS). GRANTs exactos en ../database/scripts/provisionar_roles_postgres.sql (DBA).
+    # Contraseñas fijas de desarrollo local, mismo criterio "no secretas" que arriba.
+    environment:
+      POSTGRES_USER: turnos
+      POSTGRES_PASSWORD: turnos_dev_password
+      POSTGRES_DB: turnos_dev
+      TURNOS_MIGRADOR_ROL: turnos_migrador
+      TURNOS_MIGRADOR_PASSWORD: turnos_migrador_dev_password
+      TURNOS_APP_ROL: turnos_app
+      TURNOS_APP_PASSWORD: turnos_app_dev_password
+
+    volumes:
+      # Volumen NOMBRADO (no bind mount a una ruta del host) para persistir los datos de
+      # Postgres entre reinicios/recreaciones del contenedor — reemplaza al volumen
+      # `turnos_backend_data:/data` que este archivo usaba hasta este ciclo para el archivo
+      # sqlite (ver el Dockerfile: ya no fija ningún DB_PATH ni crea /data, no queda nada
+      # que ese volumen viejo necesitara persistir).
+      - turnos_postgres_data:/var/lib/postgresql/data
+
+      # Separación de roles (2026-08-09/10, DevOps) — 2 scripts propios en
+      # docker-entrypoint-initdb.d/: la imagen oficial los corre automáticamente, en orden
+      # alfabético, SOLO la primera vez que el volumen de arriba está vacío, antes de que este
+      # contenedor acepte conexiones normales — por eso "backend" (depends_on: condition:
+      # service_healthy) nunca arranca antes de que esto termine. Ver
+      # docker/postgres-initdb/*.sh para el detalle completo de cada paso.
+      - ./docker/postgres-initdb/01-provisionar-roles.sh:/docker-entrypoint-initdb.d/01-provisionar-roles.sh:ro
+      - ./docker/postgres-initdb/02-migrar-y-grants-finales.sh:/docker-entrypoint-initdb.d/02-migrar-y-grants-finales.sh:ro
+      # Los 2 scripts de arriba invocan estos archivos por ruta absoluta — montados FUERA de
+      # docker-entrypoint-initdb.d/ (esa carpeta solo auto-corre lo que vive directo en ella)
+      # para que no haya ninguna ambigüedad sobre si la imagen los va a procesar por su cuenta.
+      # Solo lectura, tal cual los dejó DBA — este archivo nunca los modifica.
+      - ../database/scripts/provisionar_roles_postgres.sql:/opt/turnos/provisionar_roles_postgres.sql:ro
+      - ../database/migrations/001_init.sql:/opt/turnos/001_init.sql:ro
+
+    # A propósito SIN publicar el puerto al host (nada de "ports: - 5432:5432"): el
+    # servicio `backend` no lo necesita (se conecta por el nombre de red interno de Compose,
+    # "postgres", no por localhost — ver DATABASE_URL más abajo) y no publicarlo evita choques
+    # con un Postgres nativo que ya pueda estar corriendo en el puerto 5432 de la máquina del
+    # desarrollador. Si necesitás conectar un cliente (psql/DBeaver/etc.) desde el host,
+    # agregar temporalmente "ports: - \"5432:5432\"" acá, o usar
+    # `docker compose exec postgres psql -U turnos -d turnos_dev`.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U turnos -d turnos_dev"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+    restart: unless-stopped
+
   backend:
     build:
       context: .
@@ -30,6 +116,32 @@ services:
     env_file:
       - .env
 
+    # DATABASE_URL fijada ACÁ (no en .env/.env.example) a propósito: tiene que apuntar al
+    # nombre de servicio interno de Compose ("postgres", resuelto por la red que arma
+    # Compose automáticamente), nunca a "localhost" — un valor que ningún desarrollador
+    # debería tener que adivinar ni pisar a mano. Si `.env` definiera además su propio
+    # DATABASE_URL, esta línea de todos modos gana: Compose prioriza `environment:` por
+    # sobre `env_file:` para la misma clave. Credenciales: deben coincidir con
+    # TURNOS_APP_ROL/TURNOS_APP_PASSWORD de "environment:" del servicio `postgres` de acá
+    # arriba — un solo lugar para mantenerlas sincronizadas.
+    #
+    # Apunta al rol de RUNTIME (`turnos_app`), NUNCA al superusuario de bootstrap (`turnos`) ni
+    # al rol de MIGRACIÓN — separación de roles 2026-08-09/10, ver el comentario junto a
+    # "environment:" del servicio `postgres` de arriba y el bloque "Separación owner/runtime y
+    # FORCE ROW LEVEL SECURITY" en ../database/migrations/001_init.sql. `runMigrations()`
+    # (backend/src/db.ts, sin cambios en este ciclo) sigue funcionando sin ningún ajuste de
+    # código: para cuando este servicio arranca, el esquema ya fue migrado por
+    # docker-entrypoint-initdb.d/02-migrar-y-grants-finales.sh (con el rol de MIGRACIÓN), así
+    # que su chequeo "¿ya existe la tabla usuario?" da true y no reintenta el DDL — que de
+    # todos modos fallaría con este rol, sin privilegios de CREATE (a propósito, ver el mismo
+    # bloque de 001_init.sql).
+    environment:
+      DATABASE_URL: postgresql://turnos_app:turnos_app_dev_password@postgres:5432/turnos_dev
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
     ports:
       # Mismo valor en ambos lados a propósito: si PORT se pisa en .env, la app adentro del
       # contenedor escucha en ese puerto (process.env.PORT, ver src/index.ts) — mapear
@@ -37,15 +149,8 @@ services:
       # con el puerto real en el que escucha el proceso.
       - "${PORT:-3000}:${PORT:-3000}"
 
-    volumes:
-      # Volumen NOMBRADO (no bind mount a una ruta del host) para persistir el archivo
-      # sqlite entre reinicios/recreaciones del contenedor. Apunta a /data, que es donde el
-      # Dockerfile ya fija DB_PATH=/data/dev.sqlite3 — no hace falta pisar DB_PATH acá salvo
-      # que se quiera un nombre de archivo distinto dentro de ese mismo directorio.
-      - turnos_backend_data:/data
-
     restart: unless-stopped
 
 volumes:
-  turnos_backend_data:
-    name: turnos_backend_data
+  turnos_postgres_data:
+    name: turnos_postgres_data

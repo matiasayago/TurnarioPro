@@ -1,0 +1,135 @@
+# Render Blueprint — Turnos Profesionales (TURNOS-2026-001), backend.
+#
+# QUÉ ES ESTO: una plantilla declarativa para que Render cree de una vez el Web Service
+# (Docker) + la base PostgreSQL gestionada, con la mayoría del cableado (DATABASE_URL,
+# JWT_SECRET) ya resuelto — en vez de armar cada recurso a mano en el dashboard. Ver
+# ../../08-despliegue/README.md, sección "Desplegar en Render", para el paso a paso completo
+# de cómo aplicar este archivo y qué queda pendiente de configurar manualmente igual.
+#
+# ⚠️ NO VERIFICADO CONTRA UNA CUENTA DE RENDER REAL — este entorno de desarrollo no tiene
+# acceso a un navegador ni a credenciales de Render (mismo tipo de limitación ya documentado
+# para Docker en ../../08-despliegue/README.md §5). Este archivo se escribió siguiendo el
+# formato público del "Blueprint Spec" de Render tal como se conocía al momento de este
+# ciclo (2026-08-07); Render puede haber renombrado algún campo o plan desde entonces (los
+# candidatos más probables están marcados abajo con "VERIFICAR"). Tratarlo como un punto de
+# partida sólido para acelerar la primera conexión del repo, no como algo que se aplica a
+# ciegas sin revisar contra https://render.com/docs/blueprint-spec vigente al momento de usarlo.
+#
+# MONOREPO: este repo Git no es exclusivo de este proyecto (alberga toda la AI Software
+# Factory, ver CLAUDE.md de la raíz) — este render.yaml vive junto al backend
+# (proyectos/turnos-profesionales/05-codigo/backend/), no en la raíz del repo. `rootDir` de
+# más abajo es lo que le dice a Render dónde está realmente el código de este servicio
+# dentro del repo completo; `dockerfilePath`/`dockerContext` quedan relativos a ESE
+# `rootDir`, no a la raíz del repo. Al crear el "Blueprint Instance" en el dashboard de
+# Render, puede hacer falta indicar explícitamente la ruta a este archivo dentro del repo
+# (no asumir que Render lo va a encontrar solo por convención de raíz) — VERIFICAR el flujo
+# exacto vigente en el dashboard al momento de conectarlo.
+
+# ⚠️ SEPARACIÓN DE ROLES DE POSTGRES — VERIFICAR ANTES DE ASUMIR QUE HACE FALTA ACÁ (DevOps,
+# 2026-08-09/10, TURNOS-2026-001, cierre de gap CRITICAL). docker-compose.yml y
+# ../../../../.github/workflows/turnos-backend-ci.yml ya separan un rol de MIGRACIÓN (owner, corre
+# ../database/migrations/001_init.sql una sola vez) de un rol de RUNTIME (sirve DATABASE_URL
+# de la app, sin privilegios de owner, sin BYPASSRLS) — hace falta ahí porque el único rol que
+# existe en esos 2 ambientes (creado vía POSTGRES_USER de la imagen oficial postgres:16-alpine)
+# es SUPERUSUARIO DEL CLUSTER, y un superusuario bypassea Row Level Security siempre, incluso
+# con FORCE ROW LEVEL SECURITY (ver ../database/migrations/001_init.sql, bloque "Separación
+# owner/runtime y FORCE ROW LEVEL SECURITY").
+#
+# NO VERIFICADO todavía si el rol que provisiona el bloque "databases:" de abajo
+# (`turnos_profesionales`, el que termina resuelto en DATABASE_URL de "envVars:" más abajo vía
+# fromDatabase) tiene el mismo problema acá — este entorno de desarrollo no tiene acceso a una
+# cuenta real de Render (misma limitación documentada en ../../08-despliegue/README.md §0/§5).
+# Antes de asumir que hace falta la misma separación de roles en este ambiente, conectarse con
+# ESE rol (la "Internal/External Database URL" que Render provee para la base de abajo) y correr:
+#
+#   SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user;
+#
+# - Si AMBAS columnas dan `false`: FORCE ROW LEVEL SECURITY (ya aplicado en
+#   ../database/migrations/001_init.sql) alcanza solo en este ambiente, sin hacer falta
+#   ningún cambio más acá — los proveedores de Postgres gestionado normalmente NO le dan
+#   superusuario de cluster a su rol de aplicación por defecto (a diferencia de la imagen
+#   oficial de Docker usada en desarrollo/CI). Es el resultado esperado, pero NO se debe dar por
+#   sentado sin correr la query primero.
+# - Si CUALQUIERA de las 2 columnas da `true`: aplica la misma separación de roles que
+#   docker-compose.yml/CI. Ver ../database/scripts/provisionar_roles_postgres.sql (DBA) para
+#   los GRANTs exactos — la sección "Nota para Render específicamente" de ese script explica por
+#   qué acá no se puede resolver solo editando este YAML (el mecanismo "databases:" de este
+#   Blueprint solo provisiona UN rol/usuario por base — no hay forma de declarar un segundo rol
+#   ahí) y requiere conectarse a mano con psql para crear el rol de RUNTIME, más reemplazar cómo
+#   se resuelve DATABASE_URL de "envVars:" más abajo: dejaría de poder usar
+#   `fromDatabase: { property: connectionString }` (eso siempre apunta al rol único que crea este
+#   Blueprint) y pasaría a ser un valor manual con la connection string del rol de RUNTIME nuevo,
+#   gestionado como secreto en el dashboard de Render, no en este archivo.
+#
+# Ver también ../../08-despliegue/README.md (checklist de §9 y §10) para este mismo pendiente
+# documentado junto al resto de los pasos previos a un despliegue real.
+
+databases:
+  - name: turnos-profesionales-db
+    databaseName: turnos_profesionales
+    user: turnos_profesionales
+    # CORRECCIÓN (2026-08-10, confirmado al aplicar el Blueprint contra una cuenta real de Render
+    # — la primera vez que se pudo verificar esto): "starter" ya no es un plan válido para bases
+    # NUEVAS ("Legacy Postgres plans, including 'starter', are no longer supported for new
+    # databases" — Render migró a "Flexible plans": Basic/Pro/Accelerated en vez de
+    # Starter/Standard/Pro/Pro Plus, ver render.com/docs/postgresql-refresh). "basic-256mb" es el
+    # plan pago más chico de la familia nueva — mismo espíritu que el "starter" original (evitar
+    # el free tier, que expira a los 30 días, ver 03-arquitectura/plan-produccion.md §6), costo
+    # más bajo disponible. El plan del servicio web de más abajo (`starter`) NO se ve afectado por
+    # este cambio — ese nombre sigue vigente para servicios (solo cambió para bases Postgres).
+    plan: basic-256mb
+    postgresMajorVersion: "16" # coherente con `postgres:16-alpine` usado en CI y docker-compose.yml
+
+services:
+  - type: web
+    name: turnos-profesionales-backend
+    runtime: docker # VERIFICAR: versiones más viejas del Blueprint Spec usan la clave "env: docker" en vez de "runtime: docker" para el mismo significado — si Render rechaza este campo, probar con "env: docker".
+    rootDir: proyectos/turnos-profesionales/05-codigo/backend
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: starter # VERIFICAR nombre de plan vigente en render.com/pricing — ver 03-arquitectura/plan-produccion.md §6 (~USD 7/mes al momento de ese análisis)
+    healthCheckPath: /health
+
+    # Gobierno de la Factory: "ningún cambio llega a producción sin aprobación previa" (ver
+    # docs/04-manual-operativo.md y las reglas de actuación de DevOps) — autoDeploy en true
+    # (el default de un Blueprint de Render) redeployaría automáticamente con cada push a la
+    # rama conectada, saltando ese gate. Se deja explícitamente en false: cada despliegue a
+    # este servicio se dispara a mano desde el dashboard de Render (o vía su API/CLI), una
+    # vez aprobado.
+    autoDeploy: false
+
+    envVars:
+      # DATABASE_URL: Render la arma y la inyecta solo, a partir de la base declarada arriba
+      # — nunca se escribe a mano ni en este archivo ni en el dashboard (ver
+      # ../../08-despliegue/README.md). Apunta al rol único que crea "databases:" arriba
+      # (`turnos_profesionales`) — VER el comentario grande al principio de este archivo
+      # ("SEPARACIÓN DE ROLES DE POSTGRES") antes de asumir que este valor puede usarse tal
+      # cual para Row Level Security: pendiente de verificar si ese rol es superusuario acá.
+      - key: DATABASE_URL
+        fromDatabase:
+          name: turnos-profesionales-db
+          property: connectionString
+
+      # JWT_SECRET: Render genera un valor aleatorio fuerte una sola vez (al crear el
+      # servicio desde este Blueprint) y lo guarda como variable de entorno del servicio -
+      # nunca queda escrito en este archivo ni en ningún commit. No se regenera en cada
+      # deploy (persiste), así que los JWT ya emitidos no se invalidan solos en cada release.
+      - key: JWT_SECRET
+        generateValue: true
+
+      # Puerto explícito — coherente con el Dockerfile (ENV PORT=3000 / EXPOSE 3000) y con
+      # src/index.ts (lee process.env.PORT). No depender del default que asuma Render.
+      - key: PORT
+        value: "3000"
+
+      # NUNCA en "true" en un entorno accesible públicamente (ver HIGH-4,
+      # ../../07-seguridad/informe-seguridad.md) — expone /dev/seed y /dev/forzar-expiracion
+      # sin autenticación propia. Se deja explícito (en vez de simplemente omitir la
+      # variable) para que sea una decisión visible en el dashboard, no un olvido.
+      - key: ENABLE_DEV_ROUTES
+        value: "false"
+
+      # No se listan acá EXPIRACION_PAGO_MIN / VENTANA_CANCELACION_MIN / RATE_LIMIT_* —
+      # tienen defaults de aplicación ya pensados para producción (15 min, 120 min, 10
+      # intentos/15 min, ver ../../08-despliegue/README.md §3). Agregarlas acá (o a mano en
+      # el dashboard) solo si conscientemente se necesita otro valor.
