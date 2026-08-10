@@ -6,8 +6,11 @@ node_modules/
 # viejo del host podría colar un build desactualizado o compilado en otro SO en la imagen.
 dist/
 
-# Base de datos de desarrollo (node:sqlite) y sus archivos temporales/journal — nunca debe
-# viajar dentro de la imagen; en runtime vive en un volumen nombrado (ver docker-compose.yml).
+# Archivo de la base de datos de desarrollo anterior a la migración a PostgreSQL
+# (node:sqlite, ver memory/proyectos/turnos-profesionales/decisiones.md) — ya no se genera
+# (la app usa DATABASE_URL/Postgres real, ver ../../08-despliegue/README.md), pero se deja
+# este patrón por si algún checkout viejo todavía tiene el archivo tirado en el directorio:
+# nunca debe viajar dentro de la imagen en ningún caso.
 dev.sqlite3
 dev.sqlite3-*
 

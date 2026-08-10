@@ -15,7 +15,24 @@
 // reserva duplicada exacta). Si reusáramos siempre el filtro de ocupación para la validación de
 // RN1, una reserva duplicada exacta pasaría de 409 a 400 (regresión detectada al re-correr
 // smoke-test.mjs) porque el slot ocupado directamente no aparecería en la lista.
-import { db } from '../db';
+//
+// Migración a PostgreSQL (ver src/db.ts): recibe un `Queryable` en vez de asumir un objeto `db`
+// síncrono — tanto `pool` (lecturas públicas, ej. GET /profesionales/:id/slots, sin necesidad
+// de contexto RLS) como un `client` ya dentro de una transacción autenticada (POST /turnos reusa
+// el mismo client de su propia transacción para RN1/RN2) cumplen esa interfaz sin duplicar esta
+// función para cada caso.
+//
+// Adopción DBA (2026-08-09, ver migrations/001_init.sql, "Funciones SECURITY DEFINER" al final
+// del archivo, caso de uso (a)): la lectura de `turno` de más abajo pasa por la función
+// `turno_ocupacion_publica(profesional_id)` en vez de un SELECT directo sobre la tabla — expone
+// solo inicio/fin de turnos activos de ESE profesional, ni cliente_id ni ninguna otra columna.
+// SECURITY DEFINER no depende de `app.usuario_id`, así que sigue funcionando igual sin importar
+// si `db` es `pool` (GET /profesionales/:id/slots, sin contexto RLS) o un `client` dentro de la
+// transacción de POST /turnos (que sí tiene `app.usuario_id` seteado, pero esta lectura no lo
+// necesita) — ninguno de los dos callers cambia de comportamiento por este reemplazo, ambos
+// seguían leyendo sin contexto RLS antes también (ver reserva documentada junto a
+// `turno_select_publico`, que se mantiene activa como red de seguridad transitoria).
+import { Queryable } from '../db';
 
 export interface OpcionesCalculoSlots {
   /** Desde qué instante buscar (por defecto: ahora). Para validar RN1 en POST /turnos se pasa
@@ -49,14 +66,14 @@ export interface ResultadoCalculoSlots {
  * Devuelve `null` si el servicio no existe (el caller decide qué responder — 404 en ambos
  * lugares que lo usan hoy).
  */
-export function calcularSlotsDisponibles(
+export async function calcularSlotsDisponibles(
+  db: Queryable,
   profesionalId: string,
   servicioId: string,
   opciones: OpcionesCalculoSlots = {}
-): ResultadoCalculoSlots | null {
-  const servicio = db.prepare('SELECT duracion_min FROM servicio WHERE id = ?').get(servicioId) as
-    | { duracion_min: number }
-    | undefined;
+): Promise<ResultadoCalculoSlots | null> {
+  const servicioResult = await db.query('SELECT duracion_min FROM servicio WHERE id = $1', [servicioId]);
+  const servicio = servicioResult.rows[0] as { duracion_min: number } | undefined;
   if (!servicio) return null;
 
   // D10 (amenda RN3, ver modelo-datos.md §2quater): si el profesional configuró su propia
@@ -66,29 +83,39 @@ export function calcularSlotsDisponibles(
   // usando `servicio.duracion_min`. Único lugar que decide el tamaño del paso de la grilla, así
   // que este fix alcanza para GET /profesionales/:id/slots y POST /turnos, que solo llaman a
   // esta función — no hace falta duplicar la regla en ninguno de los dos.
-  const profesional = db
-    .prepare('SELECT duracion_cita_min FROM profesional WHERE id = ?')
-    .get(profesionalId) as { duracion_cita_min: number | null } | undefined;
+  const profesionalResult = await db.query(
+    'SELECT duracion_cita_min FROM profesional WHERE id = $1',
+    [profesionalId]
+  );
+  const profesional = profesionalResult.rows[0] as { duracion_cita_min: number | null } | undefined;
   const duracionEfectivaMin = profesional?.duracion_cita_min ?? servicio.duracion_min;
 
-  const bloques = db
-    .prepare('SELECT * FROM disponibilidad WHERE profesional_id = ? AND servicio_id = ?')
-    .all(profesionalId, servicioId) as any[];
+  const bloquesResult = await db.query(
+    'SELECT * FROM disponibilidad WHERE profesional_id = $1 AND servicio_id = $2',
+    [profesionalId, servicioId]
+  );
+  const bloques = bloquesResult.rows as any[];
 
   const inicioBusqueda = opciones.desde ?? new Date();
   const ventanaDias = opciones.dias ?? 14;
   const maxSlots = opciones.maxSlots ?? 20;
   const duracionMs = duracionEfectivaMin * 60_000;
 
-  const turnosActivos = db
-    .prepare(
-      `SELECT inicio, fin FROM turno WHERE profesional_id = ? AND estado IN ('pendiente_de_pago','confirmado')`
-    )
-    .all(profesionalId) as { inicio: string; fin: string }[];
+  // Antes: `SELECT inicio, fin FROM turno WHERE profesional_id = $1 AND estado IN
+  // ('pendiente_de_pago','confirmado')` directo sobre la tabla. Ahora vía la función
+  // `turno_ocupacion_publica` (ver comentario de archivo, arriba) — mismo filtro
+  // (profesional_id + estado activo), aplicado del lado de la base dentro de la función en vez
+  // de repetido acá.
+  const turnosActivosResult = await db.query('SELECT inicio, fin FROM turno_ocupacion_publica($1)', [
+    profesionalId,
+  ]);
+  const turnosActivos = turnosActivosResult.rows as { inicio: string; fin: string }[];
 
-  const excepciones = db
-    .prepare('SELECT inicio, fin FROM excepcion_disponibilidad WHERE profesional_id = ?')
-    .all(profesionalId) as { inicio: string; fin: string }[];
+  const excepcionesResult = await db.query(
+    'SELECT inicio, fin FROM excepcion_disponibilidad WHERE profesional_id = $1',
+    [profesionalId]
+  );
+  const excepciones = excepcionesResult.rows as { inicio: string; fin: string }[];
 
   const ocupado = (ini: Date, fin: Date) =>
     [...turnosActivos, ...excepciones].some((o) => ini < new Date(o.fin) && fin > new Date(o.inicio));
@@ -100,6 +127,11 @@ export function calcularSlotsDisponibles(
     const bloqueDelDia = bloques.find((b) => b.dia_semana === dia.getDay());
     if (!bloqueDelDia) continue;
 
+    // `hora_inicio`/`hora_fin` son columnas TIME de Postgres — `pg` las devuelve como string
+    // "HH:MM:SS" (a diferencia del TEXT "HH:MM" de node:sqlite). El destructuring de abajo sigue
+    // funcionando sin cambios: toma los primeros dos elementos (horas, minutos) e ignora el
+    // resto (segundos, siempre "00" acá — `horaSchema` en dominio/validacion.ts solo acepta
+    // HH:MM al cargar disponibilidad).
     const [hIni, mIni] = bloqueDelDia.hora_inicio.split(':').map(Number);
     const [hFin, mFin] = bloqueDelDia.hora_fin.split(':').map(Number);
     let cursor = new Date(dia);

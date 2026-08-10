@@ -9,6 +9,34 @@ name: Turnos Profesionales - Backend CI
 # eventos push, no solo la ejecucion de jobs ya encolados. Este comentario es un cambio real
 # (no un commit vacio, que el filtro de paths hubiera ignorado de cualquier forma) para
 # volver a intentar el trigger una vez que GitHub confirmo el servicio restablecido.
+#
+# Nota (2026-08-07): ambos jobs corren ahora contra PostgreSQL real (service container),
+# coordinado con Backend migrando el driver de acceso a datos de `node:sqlite` a `pg` en
+# paralelo a este cambio - no son dos cambios independientes, el primer push que junte ambos
+# es el que da la primera senal real de si la migracion funciona de punta a punta. Ver el
+# bloque "services" + "env: DATABASE_URL" de cada job para las credenciales de test (fijas,
+# no secretas - contenedor efimero del run) y proyectos/turnos-profesionales/08-despliegue/
+# README.md para el detalle completo (incluida la misma DATABASE_URL para docker-compose.yml
+# y para un despliegue real en Render).
+#
+# Nota (2026-08-09/10, DevOps) - separacion de roles de Postgres (cierre de gap CRITICAL de
+# TURNOS-2026-001). POSTGRES_USER=turnos_ci (ver "services" de cada job) es SUPERUSUARIO DEL
+# CLUSTER - asi lo crea la imagen oficial postgres:16-alpine via esa variable - y un
+# superusuario bypassea Row Level Security siempre, FORCE ROW LEVEL SECURITY incluido (ver
+# proyectos/turnos-profesionales/05-codigo/database/migrations/001_init.sql, bloque
+# "Separacion owner/runtime y FORCE ROW LEVEL SECURITY"). Ambos jobs agregan ahora, apenas
+# despues de "Checkout", los pasos "Roles Postgres 0/4"-"4/4": aseguran que psql este
+# disponible en el runner, provisionan un rol de MIGRACION (owner, corre
+# database/migrations/001_init.sql una sola vez) y un rol de RUNTIME (sin privilegios de owner,
+# sin BYPASSRLS - el que usa DATABASE_URL/`docker run -e DATABASE_URL` de ahi en adelante) via
+# database/scripts/provisionar_roles_postgres.sql (DBA), y por ultimo corren
+# database/scripts/verificar_rls_postgres.sql (Security) para confirmar contra el service
+# container real que Row Level Security filtra de verdad - no solo que el DDL compila. Mismo
+# patron que docker-compose.yml (ver ese archivo y
+# proyectos/turnos-profesionales/05-codigo/backend/docker/postgres-initdb/*.sh), adaptado a que
+# estos pasos corren en el runner por TCP a localhost, no dentro del contenedor de Postgres
+# (un service container de Actions no tiene el repo disponible todavia cuando arranca, asi que
+# el mecanismo docker-entrypoint-initdb.d que usa docker-compose.yml no aplica aca).
 
 on:
   push:
@@ -25,9 +53,12 @@ defaults:
     working-directory: proyectos/turnos-profesionales/05-codigo/backend
 
 env:
-  # src/db.ts usa el modulo built-in `node:sqlite`, disponible recien desde Node >=22.5 (ver
-  # README.md del backend y memory/proyectos/turnos-profesionales/decisiones.md). No bajar
-  # de 22 aca sin revisar tambien el Dockerfile (node:22-slim) - tienen que ir coordinados.
+  # Version de Node fijada a proposito, coordinada con el Dockerfile (node:22-slim) - no
+  # bajar de 22 aca sin revisar los dos archivos juntos. Historicamente este piso salia de
+  # que src/db.ts usaba el modulo built-in `node:sqlite` (exige Node >=22.5) - con Backend
+  # migrando el driver a `pg` (ver "services"/"DATABASE_URL" mas abajo), `pg` en si no exige
+  # ningun piso de Node tan alto, pero se mantiene Node 22 igual por consistencia con el
+  # Dockerfile de produccion, no porque el driver nuevo lo requiera.
   NODE_VERSION: "22"
 
 jobs:
@@ -44,9 +75,169 @@ jobs:
     # falla) - mismo motivo/patron que turnos-mobile-ci.yml (ver ese workflow, commit cb20d12).
     permissions:
       contents: write
+    # Service container de PostgreSQL real (2026-08-07). Actions lo arranca ANTES que
+    # cualquier step de este job y espera a que su healthcheck (--health-cmd de "options" de
+    # abajo - no confundir con el HEALTHCHECK del Dockerfile del backend, son cosas
+    # distintas) este "healthy" antes de dejar correr el primer step: no hace falta un loop
+    # propio de espera como el que si usan mas abajo los pasos "arrancar servidor" para
+    # /health del backend. Credenciales fijas y NO secretas a proposito: este Postgres vive
+    # solo durante este run, en la red interna del job, nunca se expone fuera de el - mismo
+    # criterio que el JWT_SECRET fijo que ya usa el job docker-build-smoke de mas abajo.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: turnos_ci
+          POSTGRES_PASSWORD: turnos_ci_password
+          POSTGRES_DB: turnos_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U turnos_ci -d turnos_test"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+    # DATABASE_URL a nivel de JOB: la heredan todos los steps de abajo, incluidos los que ya
+    # definen su propio "env:" (PORT/EXPIRACION_PAGO_MIN/etc. en los pasos "arrancar
+    # servidor") - el env de un step se COMBINA con el del job, no lo reemplaza entero. Host
+    # "localhost" porque los steps de este job corren directo en la maquina del runner (no
+    # dentro de otro contenedor) y así es como Actions publica el puerto de un service
+    # container en ese caso - ver docker-compose.yml para el equivalente en desarrollo local,
+    # donde el host es el nombre del servicio ("postgres"), no "localhost".
+    #
+    # OJO - esto cambia un supuesto que tenian los dos arranques del servidor de mas abajo:
+    # con node:sqlite, "Fase 1/2 - detener servidor y limpiar la DB" borraba el archivo
+    # dev.sqlite3 entre Fase 1 y Fase 2, asi que Fase 2 arrancaba siempre con una base VACIA.
+    # Este Postgres es el MISMO contenedor para ambas fases (no hay archivo que borrar), asi
+    # que Fase 2 arranca con los datos que dejo Fase 1 todavia presentes. Es seguro porque
+    # scripts/*.mjs ya esta escrito para convivir con datos de otros scripts en la misma
+    # corrida (emails/nombres unicos por timestamp - ver p.ej. el comentario de
+    # scripts/test-rn8-ventana-cancelacion.mjs: "No depende de otros scripts"), pero no se
+    # audito exhaustivamente cada uno de los 10 scripts contra este supuesto especifico: si
+    # alguno asume implicitamente una base vacia, va a fallar recien aca.
+    # DATABASE_URL apunta al rol de RUNTIME (turnos_ci_app), NUNCA al superusuario de bootstrap
+    # (turnos_ci, ver "services" arriba) ni al rol de MIGRACION - separacion de roles
+    # 2026-08-09/10, ver la nota grande del encabezado de este archivo. Ese rol todavia no
+    # existe en este punto del archivo (lo crea el paso "Roles Postgres 1/4" mas abajo, ANTES
+    # de que ningun otro paso use esta variable) - resolver DATABASE_URL con este valor desde
+    # ahora es seguro porque ningun step anterior a los pasos "Roles Postgres */4" toca la base
+    # de datos.
+    env:
+      DATABASE_URL: postgresql://turnos_ci_app:turnos_ci_app_password@localhost:5432/turnos_test
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: "Roles Postgres 0/4 - psql en el runner (ubuntu-latest ya lo trae; instalar si faltara)"
+        run: |
+          if ! command -v psql > /dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install --yes postgresql-client
+          fi
+          psql --version
+
+      - name: "Roles Postgres 1/4 - provisionar rol de MIGRACION y rol de RUNTIME"
+        env:
+          PGPASSWORD: turnos_ci_password
+        run: |
+          set +e
+          {
+            # Corre TODO database/scripts/provisionar_roles_postgres.sql (Parte 1 + Parte 2, sin
+            # modificarlo) conectado como el superusuario de bootstrap (turnos_ci). A PROPOSITO
+            # SIN "-v ON_ERROR_STOP=1": corriendo ANTES de la migracion, ninguna tabla/funcion
+            # existe todavia, asi que los 2 GRANT EXECUTE ON FUNCTION finales de la Parte 2 van a
+            # fallar aca A PROPOSITO ("function ... does not exist" - se completan en el paso
+            # 3/4). Sin ON_ERROR_STOP, psql no aborta por eso (imprime el error y sigue) - mismo
+            # comportamiento que anticipa el propio comentario de ese script sobre por que es
+            # seguro ignorar el error puntual de "CREATE ROLE ... already exists" al re-correrlo.
+            #
+            # OJO con las contrasenas: se pasan CRUDAS (sin comillas extra), a diferencia del
+            # ejemplo del header de ese script (-v migrador_password="'CAMBIAR_1'") - el SQL ya
+            # usa :'migrador_password' (sustitucion YA entre comillas); duplicar la cita
+            # guardaria una contrasena con comillas literales de mas. Mismo criterio que
+            # proyectos/turnos-profesionales/05-codigo/backend/docker/postgres-initdb/01-provisionar-roles.sh.
+            psql --host localhost --port 5432 --username turnos_ci --dbname turnos_test \
+              -v migrador_rol=turnos_ci_migrador -v migrador_password=turnos_ci_migrador_password \
+              -v app_rol=turnos_ci_app -v app_password=turnos_ci_app_password \
+              -v nombre_db=turnos_test \
+              -f ../database/scripts/provisionar_roles_postgres.sql
+
+            # GRANT adicional, no incluido en provisionar_roles_postgres.sql a proposito (ese
+            # script deja expresamente afuera de su alcance el CREATE sobre el esquema para el
+            # rol de RUNTIME). El rol de MIGRACION si necesita CREATE sobre "public" para poder
+            # correr 001_init.sql (CREATE EXTENSION/TYPE/TABLE) en el paso 2/4 - desde Postgres
+            # 15, "public" ya no le otorga CREATE a PUBLIC por defecto, y no se hereda a un rol
+            # nuevo sin este GRANT explicito.
+            psql -v ON_ERROR_STOP=1 --host localhost --port 5432 --username turnos_ci --dbname turnos_test \
+              -c 'GRANT CREATE ON SCHEMA public TO turnos_ci_migrador;'
+          } > roles-paso1.log 2>&1
+          code=$?
+          cat roles-paso1.log
+          exit $code
+
+      - name: "Roles Postgres 2/4 - migrar el esquema como el rol de MIGRACION"
+        env:
+          PGPASSWORD: turnos_ci_migrador_password
+        run: |
+          set +e
+          {
+            # Conectado COMO el rol de MIGRACION (no turnos_ci) - asi ese rol, no el
+            # superusuario de bootstrap, queda como OWNER de las tablas/tipos/funciones. Con
+            # ON_ERROR_STOP=1: sobre una base recien provisionada esto no tiene ningun motivo
+            # esperable para fallar.
+            psql -v ON_ERROR_STOP=1 --host localhost --port 5432 --username turnos_ci_migrador --dbname turnos_test \
+              -f ../database/migrations/001_init.sql
+          } > roles-paso2.log 2>&1
+          code=$?
+          cat roles-paso2.log
+          exit $code
+
+      - name: "Roles Postgres 3/4 - completar GRANTs (funciones SECURITY DEFINER, ya existen)"
+        env:
+          PGPASSWORD: turnos_ci_password
+        run: |
+          set +e
+          {
+            # Re-correr provisionar_roles_postgres.sql completo - hace falta repetirlo para que
+            # corran de verdad los 2 GRANT EXECUTE ON FUNCTION que fallaron a proposito en el
+            # paso 1/4 (las funciones no existian todavia). El resto es idempotente al repetirse
+            # (y el GRANT sobre "ALL TABLES" ahora si alcanza a las tablas reales), salvo los 2
+            # CREATE ROLE de la Parte 1, que aca SI van a fallar con "already exists" - tolerado
+            # a proposito, otra vez sin "-v ON_ERROR_STOP=1", mismo criterio que el paso 1/4.
+            psql --host localhost --port 5432 --username turnos_ci --dbname turnos_test \
+              -v migrador_rol=turnos_ci_migrador -v migrador_password=turnos_ci_migrador_password \
+              -v app_rol=turnos_ci_app -v app_password=turnos_ci_app_password \
+              -v nombre_db=turnos_test \
+              -f ../database/scripts/provisionar_roles_postgres.sql
+          } > roles-paso3.log 2>&1
+          code=$?
+          cat roles-paso3.log
+          exit $code
+
+      - name: "Roles Postgres 4/4 - verificar RLS a nivel de base de datos (verificar_rls_postgres.sql, Security)"
+        env:
+          PGPASSWORD: turnos_ci_password
+        run: |
+          set +e
+          {
+            # Conectado como el superusuario de bootstrap (turnos_ci), NO como el rol de
+            # RUNTIME: el propio script necesita hacer `SET ROLE` a AMBOS roles de prueba
+            # (migrador y runtime) dentro de la misma sesion/transaccion (ver su encabezado,
+            # "CÓMO CORRERLO") - un superusuario puede siempre SET ROLE a cualquier rol sin
+            # necesitar membresia explicita. Deliberadamente NO se le otorga al rol de RUNTIME
+            # membresia en el rol de MIGRACION solo para poder conectarse "como runtime" aca: en
+            # Postgres esa membresia (heredable, el default) haria que el rol de RUNTIME
+            # herede tambien la exencion de RLS del owner, exactamente el bypass que toda esta
+            # separacion de roles busca evitar - un regression de seguridad peor que la
+            # comodidad de esta unica conexion de diagnostico. Las aserciones que importan
+            # (Partes 2 y 4 del script) igual ejercitan el comportamiento real del rol de
+            # RUNTIME: el script hace `SET ROLE turnos_ci_app` internamente antes de correrlas.
+            psql -v ON_ERROR_STOP=1 --host localhost --port 5432 --username turnos_ci --dbname turnos_test \
+              -v migrador_rol=turnos_ci_migrador -v app_rol=turnos_ci_app \
+              -f ../database/scripts/verificar_rls_postgres.sql
+          } > roles-verificar-rls.log 2>&1
+          code=$?
+          cat roles-verificar-rls.log
+          exit $code
 
       - name: Setup Node ${{ env.NODE_VERSION }}
         uses: actions/setup-node@v4
@@ -149,6 +340,11 @@ jobs:
               sleep 1
             fi
           fi
+          # dev.sqlite3* ya no se genera (Postgres real via DATABASE_URL, ver "services" mas
+          # arriba) - el "rm -f" se deja igual de inofensivo si algun dia reaparece un
+          # archivo asi por error de configuracion, pero ya no es el mecanismo real de
+          # limpieza entre Fase 1 y Fase 2 (ver la nota larga junto a "services: postgres"
+          # sobre por que Fase 2 ya NO arranca con una base vacia).
           rm -f server.pid dev.sqlite3 dev.sqlite3-*
 
       - name: "Fase 2/2 - arrancar servidor limpio (ventana de cancelacion DEFAULT = 120 min)"
@@ -201,6 +397,11 @@ jobs:
             done
             kill -9 "$PID" 2>/dev/null || true
           fi
+          # dev.sqlite3* ya no se genera (Postgres real via DATABASE_URL, ver "services" mas
+          # arriba) - el "rm -f" se deja igual de inofensivo si algun dia reaparece un
+          # archivo asi por error de configuracion, pero ya no es el mecanismo real de
+          # limpieza entre Fase 1 y Fase 2 (ver la nota larga junto a "services: postgres"
+          # sobre por que Fase 2 ya NO arranca con una base vacia).
           rm -f server.pid dev.sqlite3 dev.sqlite3-*
 
       # Este entorno de desarrollo no tiene forma de leer logs de Actions: la API de descarga
@@ -235,7 +436,7 @@ jobs:
           {
             echo "### turnos-backend-ci.yml / build-and-test - run ${{ github.run_id }} (${{ github.event_name }}, commit ${{ github.sha }})"
             echo
-            for f in server-fase1.log scripts-fase1.log server-fase2.log scripts-fase2-rn8.log; do
+            for f in roles-paso1.log roles-paso2.log roles-paso3.log roles-verificar-rls.log server-fase1.log scripts-fase1.log server-fase2.log scripts-fase2-rn8.log; do
               if [ -s "$f" ]; then
                 echo "#### $f (ultimas 200 lineas)"
                 echo
@@ -267,7 +468,9 @@ jobs:
   # el entorno de desarrollo de DevOps no tiene Docker instalado (ver 08-despliegue/
   # README.md), pero los runners de GitHub Actions si lo traen preinstalado. Corre en
   # config "tipo produccion" (NODE_ENV=production del propio Dockerfile, sin
-  # ENABLE_DEV_ROUTES) para que este smoke test sea representativo de un despliegue real.
+  # ENABLE_DEV_ROUTES) para que este smoke test sea representativo de un despliegue real -
+  # incluida una conexion real a su propio Postgres efimero (--network host, ver el paso
+  # "Levantar el contenedor" mas abajo), no un mock ni node:sqlite.
   # ---------------------------------------------------------------------------------------
   docker-build-smoke:
     name: Build de imagen Docker + smoke test end-to-end
@@ -277,6 +480,29 @@ jobs:
     # falla) - mismo motivo/patron que el job build-and-test de este mismo workflow.
     permissions:
       contents: write
+    # Service container de PostgreSQL (2026-08-07) - mismo motivo y mismas credenciales fijas
+    # (no secretas) que el job build-and-test de mas arriba, ver el comentario largo ahi. Este
+    # es un Postgres efimero PROPIO de este job (cada job de Actions corre en su propia
+    # maquina nueva; no hay ningun dato compartido con el Postgres de build-and-test). La
+    # diferencia real con ese otro job: aca la app no corre como step directo del runner sino
+    # DENTRO de un contenedor levantado a mano con "docker run" (ver ese paso mas abajo), asi
+    # que "localhost" adentro de ESE contenedor no ve por defecto el puerto publicado de este
+    # service container - se resuelve con "--network host" en el "docker run", no con un
+    # host/IP distinto en DATABASE_URL.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: turnos_ci
+          POSTGRES_PASSWORD: turnos_ci_password
+          POSTGRES_DB: turnos_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U turnos_ci -d turnos_test"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
     # Nota operativa (visto en el run 31115744124): este job puede fallar directo en el paso
     # interno "Set up job" (lo genera GitHub, no un step de este archivo) con las anotaciones
     # "Failed to resolve action download info." / "Internal Server Error", sin atarse a ninguna
@@ -295,6 +521,80 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      # ── Separacion de roles de Postgres (2026-08-09/10, DevOps) ─────────────────────────────
+      # Mismo patron y mismos 4 pasos que el job build-and-test de arriba (ver la nota grande
+      # del encabezado de este archivo y los comentarios de esos pasos para el detalle completo
+      # - no repetidos ahi por ahi). Unica diferencia real: working-directory por defecto de
+      # este job es la raiz del repo ("." - ver "defaults" mas abajo), asi que las rutas a los
+      # archivos de DBA son relativas a la raiz, no a backend/.
+      - name: "Roles Postgres 0/4 - psql en el runner (ubuntu-latest ya lo trae; instalar si faltara)"
+        run: |
+          if ! command -v psql > /dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install --yes postgresql-client
+          fi
+          psql --version
+
+      - name: "Roles Postgres 1/4 - provisionar rol de MIGRACION y rol de RUNTIME"
+        env:
+          PGPASSWORD: turnos_ci_password
+        run: |
+          set +e
+          {
+            psql --host localhost --port 5432 --username turnos_ci --dbname turnos_test \
+              -v migrador_rol=turnos_ci_migrador -v migrador_password=turnos_ci_migrador_password \
+              -v app_rol=turnos_ci_app -v app_password=turnos_ci_app_password \
+              -v nombre_db=turnos_test \
+              -f proyectos/turnos-profesionales/05-codigo/database/scripts/provisionar_roles_postgres.sql
+            psql -v ON_ERROR_STOP=1 --host localhost --port 5432 --username turnos_ci --dbname turnos_test \
+              -c 'GRANT CREATE ON SCHEMA public TO turnos_ci_migrador;'
+          } > roles-paso1.log 2>&1
+          code=$?
+          cat roles-paso1.log
+          exit $code
+
+      - name: "Roles Postgres 2/4 - migrar el esquema como el rol de MIGRACION"
+        env:
+          PGPASSWORD: turnos_ci_migrador_password
+        run: |
+          set +e
+          {
+            psql -v ON_ERROR_STOP=1 --host localhost --port 5432 --username turnos_ci_migrador --dbname turnos_test \
+              -f proyectos/turnos-profesionales/05-codigo/database/migrations/001_init.sql
+          } > roles-paso2.log 2>&1
+          code=$?
+          cat roles-paso2.log
+          exit $code
+
+      - name: "Roles Postgres 3/4 - completar GRANTs (funciones SECURITY DEFINER, ya existen)"
+        env:
+          PGPASSWORD: turnos_ci_password
+        run: |
+          set +e
+          {
+            psql --host localhost --port 5432 --username turnos_ci --dbname turnos_test \
+              -v migrador_rol=turnos_ci_migrador -v migrador_password=turnos_ci_migrador_password \
+              -v app_rol=turnos_ci_app -v app_password=turnos_ci_app_password \
+              -v nombre_db=turnos_test \
+              -f proyectos/turnos-profesionales/05-codigo/database/scripts/provisionar_roles_postgres.sql
+          } > roles-paso3.log 2>&1
+          code=$?
+          cat roles-paso3.log
+          exit $code
+
+      - name: "Roles Postgres 4/4 - verificar RLS a nivel de base de datos (verificar_rls_postgres.sql, Security)"
+        env:
+          PGPASSWORD: turnos_ci_password
+        run: |
+          set +e
+          {
+            psql -v ON_ERROR_STOP=1 --host localhost --port 5432 --username turnos_ci --dbname turnos_test \
+              -v migrador_rol=turnos_ci_migrador -v app_rol=turnos_ci_app \
+              -f proyectos/turnos-profesionales/05-codigo/database/scripts/verificar_rls_postgres.sql
+          } > roles-verificar-rls.log 2>&1
+          code=$?
+          cat roles-verificar-rls.log
+          exit $code
 
       # OJO (hallazgo de este ciclo): antes este paso no capturaba su propia salida a ningun
       # archivo. Cuando "docker build" fallaba de verdad (run 31117318338, commit 389fe65 -
@@ -317,10 +617,23 @@ jobs:
       - name: "Levantar el contenedor (config tipo produccion - sin ENABLE_DEV_ROUTES)"
         run: |
           set +e
+          # --network host (en vez de "-p 3000:3000"): el service container de postgres de
+          # arriba publica su puerto 5432 en el localhost DEL RUNNER, no en una red docker
+          # que este contenedor comparta automaticamente - un "docker run" suelto (no
+          # administrado por Actions, a diferencia de un step normal) no ve ese localhost
+          # salvo que comparta la red del host explicitamente. Con --network host, tanto
+          # "localhost:5432" (Postgres) como el puerto 3000 de la app quedan expuestos
+          # directo en el runner sin mapeo aparte - "-p" se saca del todo (Docker lo ignora
+          # con un warning bajo --network host; mejor no dejarlo de adorno).
+          # DATABASE_URL apunta al rol de RUNTIME (turnos_ci_app, ya provisionado por los pasos
+          # "Roles Postgres 1/4-3/4" de arriba) - NUNCA al superusuario de bootstrap turnos_ci
+          # ni al rol de MIGRACION, mismo criterio que docker-compose.yml y el job
+          # build-and-test de este mismo archivo (ver la nota grande del encabezado).
           docker run -d \
             --name turnos-backend-ci \
-            -p 3000:3000 \
+            --network host \
             -e JWT_SECRET="ci-smoke-test-secret-nunca-usar-en-produccion" \
+            -e DATABASE_URL="postgresql://turnos_ci_app:turnos_ci_app_password@localhost:5432/turnos_test" \
             turnos-profesionales-backend:ci \
             > docker-run.log 2>&1
           code=$?
@@ -377,7 +690,7 @@ jobs:
           {
             echo "### turnos-backend-ci.yml / docker-build-smoke - run ${{ github.run_id }} (${{ github.event_name }}, commit ${{ github.sha }})"
             echo
-            for f in docker-build.log docker-run.log docker-container.log proyectos/turnos-profesionales/05-codigo/backend/smoke-test.log; do
+            for f in roles-paso1.log roles-paso2.log roles-paso3.log roles-verificar-rls.log docker-build.log docker-run.log docker-container.log proyectos/turnos-profesionales/05-codigo/backend/smoke-test.log; do
               if [ -s "$f" ]; then
                 echo "#### $f (ultimas 200 lineas)"
                 echo

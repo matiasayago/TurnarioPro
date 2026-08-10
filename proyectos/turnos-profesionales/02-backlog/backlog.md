@@ -62,7 +62,7 @@ pierdan al planificar el lanzamiento):
 | E1 | Alta de servicios y profesionales por negocio | P0 |
 | E2 | Gestión de disponibilidad del profesional | P0 (extendida, ver HU-16 a HU-18) |
 | E3 | Reserva de turno (cliente), con seña opcional por profesional | P0 |
-| E4 | Autenticación y perfiles | P0 |
+| E4 | Autenticación y perfiles | P0 (extendida, ver HU-35) |
 | E7 | Notificaciones (confirmación y recordatorio) | P0 (extendida, ver HU-24 a HU-26) |
 | E5 | Gestión de clientes e historial (profesional) | P1 (extendida, ver HU-19 a HU-23 y HU-33) |
 | E6 | Cancelación y reprogramación de turnos | P1 |
@@ -100,6 +100,60 @@ acceder a las funciones de la app según mi rol.
 
 **HU-02.** Como administrador de un negocio, quiero dar de alta profesionales, para que
 puedan gestionar su propia agenda dentro de mi negocio.
+
+**HU-35 (v1, P1 — nueva, extiende HU-01).** Como cliente o profesional, quiero poder iniciar
+sesión o registrarme con mi cuenta de Google, además de con email y contraseña, para acceder a
+la app sin depender de crear y recordar una contraseña propia.
+- Criterios de aceptación:
+  - **Origen y aprobación (CEO, 2026-08-09):** a partir de una captura real de la app de
+    referencia "Turnario Pro" (`Screenshot_20260805_202552_Turnario.jpg`), documentada por
+    UX/UI en `04-diseno/mapa-pantallas.md` §5.17 (pantalla de Login/Registro) y su tabla de
+    trazabilidad (§7). Resuelve el paréntesis que HU-01 dejaba abierto desde el origen del
+    backlog ("Registro con email/teléfono + contraseña (o proveedor externo, a definir con
+    Arquitecto)"): el proveedor externo es Google. Es una incorporación nueva y puntual,
+    independiente de la ampliación de 2026-08-05/06 (E9–E14, HU-16 a HU-34).
+  - **Prioridad P1, no P0 (justificación de Product Manager):** aunque la historia vive dentro
+    de E4 (P0, "bloquea todo lo demás"), esta historia puntual no bloquea nada — el flujo de
+    email/contraseña (HU-01/HU-02) ya está implementado y en uso, y sigue funcionando sin
+    cambios con o sin esta historia. Se prioriza P1 (valiosa, reduce fricción de registro/
+    login; mismo criterio que otras extensiones sobre funcionalidad ya construida, ej. HU-16,
+    HU-23) en vez de P0 porque su ausencia no impide operar ninguna otra historia de v1.
+  - **Es una opción ADICIONAL, no un reemplazo:** el flujo de email/contraseña ya implementado
+    en Backend (`05-codigo/backend/src/routes/auth.ts` — `/login`, `/registro-cliente`,
+    `/registro-negocio`) debe seguir funcionando exactamente igual que hoy para quien no usa
+    Google. El botón "Google" (outline, con el logo de Google, debajo del botón principal
+    "Iniciar sesión") ya está wireframeado por UX/UI en §5.17 — esta historia no repite ese
+    detalle visual.
+  - Al autenticarse con Google, la app debe seguir distinguiendo el rol del usuario (Cliente,
+    Profesional, Administrador) y mostrar la vista correspondiente, con el mismo criterio que
+    ya exige HU-01 para el login con contraseña. UX/UI ya dejó abierto en §5.17 en qué momento
+    se determina ese rol para esta pantalla (antes o después del login) — es la misma incógnita
+    que ya existe para el flujo de contraseña, no una pregunta nueva de esta historia.
+  - **Pregunta abierta (Backend/DBA) — la tabla `usuario` no contempla un alta sin contraseña
+    propia:** el esquema actual (`03-arquitectura/modelo-datos.md` §2; `05-codigo/backend/
+    migrations/001_init.sql`, `CREATE TABLE usuario`) define `password_hash TEXT NOT NULL` —
+    un usuario que se registra ÚNICAMENTE con Google no tendría una contraseña propia que
+    hashear. Backend/DBA deben decidir cómo resolverlo (por ejemplo: columna nullable + una
+    forma de distinguir el proveedor de autenticación de cada usuario, un hash placeholder no
+    utilizable, u otra alternativa) antes de implementar. No asumido acá — es diseño técnico,
+    fuera del rol de Product Manager.
+  - **Pregunta abierta (Security) — vinculación de cuentas si el email ya está registrado por
+    contraseña:** en la captura hay un único botón "Google" (sin uno equivalente separado
+    debajo de "Crear Cuenta"), lo que sugiere que debería cubrir tanto el login de una cuenta
+    existente como el alta de una nueva en una sola acción — no confirmado como decisión de
+    producto cerrada. El caso que más importa resolver: si un email ya tiene una cuenta creada
+    por el flujo de contraseña y esa persona después toca "Google" con el mismo email, ¿el
+    sistema vincula automáticamente ambas cuentas por coincidencia de email, o es un riesgo de
+    seguridad (posible account takeover si Google no verificó ese email con el mismo criterio
+    de confianza que hoy exige este sistema)? Security debe evaluarlo y definir el
+    comportamiento correcto antes de implementar — no asumido acá.
+  - **Pregunta abierta (DevOps, con Arquitecto) — administración de credenciales OAuth de
+    Google:** quién da de alta y administra las credenciales de la aplicación en Google Cloud
+    Console (client ID/secret) y cómo se gestionan como secreto en cada entorno (desarrollo,
+    CI, producción) — a coordinar con DevOps antes de implementar. No asumido acá.
+  - Ninguna de estas tres preguntas bloquea el resto del backlog ni el resto de E4 (HU-01/
+    HU-02 siguen funcionando sin cambios) — condicionan únicamente el diseño detallado e
+    implementación de esta historia puntual antes de pasar a Fase 4 (Desarrollo).
 
 ---
 

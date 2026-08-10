@@ -13,6 +13,20 @@ export function createApp() {
   runMigrations();
 
   const app = express();
+
+  // CORRECCIÓN (2026-08-10, confirmado contra el primer despliegue real en Render): sin esto,
+  // cualquier ruta con rate-limit (express-rate-limit, ver middleware/rateLimit.ts) revienta con
+  // "ValidationError: The 'X-Forwarded-For' header is set but the Express 'trust proxy' setting
+  // is false" apenas el tráfico pasa por un proxy real que agrega ese header (Render, igual que
+  // Heroku/Railway) — ni el entorno de desarrollo local ni el smoke test de CI (docker run
+  // --network host, sin proxy delante) podían revelar esto. Sin `trust proxy`, Express ignora
+  // `X-Forwarded-For` y `req.ip` devolvería la IP del proxy para TODOS los usuarios por igual
+  // (rompería el rate-limit real, no solo tiraría este error) — express-rate-limit lo detecta y
+  // aborta el request en vez de dejarlo pasar silenciosamente mal configurado. `1` (no `true`):
+  // confía únicamente en el primer hop (el proxy de Render, que está directamente delante de
+  // este servicio) — nunca en un X-Forwarded-For más lejano que un cliente pudiera falsificar.
+  app.set('trust proxy', 1);
+
   // MEDIUM-2 (ver 07-seguridad/informe-seguridad.md): cabeceras de seguridad HTTP básicas
   // (quita `X-Powered-By`, agrega `X-Content-Type-Options`, `X-Frame-Options`/frame-ancestors,
   // `Referrer-Policy`, etc.). Va ANTES de las rutas para cubrir toda la superficie, incluida
