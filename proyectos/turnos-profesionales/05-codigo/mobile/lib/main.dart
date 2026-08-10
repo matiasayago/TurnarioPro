@@ -4,9 +4,11 @@ import 'package:provider/provider.dart';
 
 import 'api_client.dart';
 import 'state/sesion.dart';
+import 'state/theme_controller.dart';
+import 'theme/app_theme.dart';
 import 'screens/login_screen.dart';
 import 'screens/cliente/buscar_negocios_screen.dart';
-import 'screens/profesional/agenda_screen.dart';
+import 'screens/profesional/profesional_shell.dart';
 
 void main() async {
   // Requerido por `intl` antes de usar DateFormat con locale 'es' (ver pantallas de
@@ -16,8 +18,11 @@ void main() async {
 
   final api = ApiClient();
   runApp(
-    ChangeNotifierProvider(
-      create: (_) => Sesion(api),
+    MultiProvider(
+      providers: [
+        ChangeNotifierProvider(create: (_) => Sesion(api)),
+        ChangeNotifierProvider(create: (_) => ThemeController()),
+      ],
       child: const TurnosProfesionalesApp(),
     ),
   );
@@ -28,11 +33,16 @@ class TurnosProfesionalesApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // sistema-diseno.md §8: tema claro/oscuro alternable sin reiniciar la app (ThemeController
+    // notifica, MaterialApp se reconstruye) y respeta la preferencia del sistema por defecto
+    // (ThemeController arranca en ThemeMode.system).
+    final themeMode = context.watch<ThemeController>().mode;
     return MaterialApp(
       title: 'Turnos Profesionales',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(colorSchemeSeed: Colors.teal, useMaterial3: true, brightness: Brightness.light),
-      darkTheme: ThemeData(colorSchemeSeed: Colors.teal, useMaterial3: true, brightness: Brightness.dark),
+      theme: AppTheme.light,
+      darkTheme: AppTheme.dark,
+      themeMode: themeMode,
       home: const _Router(),
     );
   }
@@ -51,7 +61,7 @@ class _Router extends StatelessWidget {
       case Rol.cliente:
         return const BuscarNegociosScreen();
       case Rol.profesional:
-        return const AgendaScreen();
+        return const ProfesionalShell();
       case Rol.administrador:
       case null:
         // El administrador gestiona el negocio; en este slice de mobile no tiene pantallas
