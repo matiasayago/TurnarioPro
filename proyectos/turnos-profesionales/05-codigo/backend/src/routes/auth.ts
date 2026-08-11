@@ -2,8 +2,9 @@ import { Router, Response } from 'express';
 import { z } from 'zod';
 import bcrypt from 'bcryptjs';
 import { v4 as uuid } from 'uuid';
+import { OAuth2Client } from 'google-auth-library';
 import { pool, nowIso, withTransaction } from '../db';
-import { signToken, requireAuth, AuthedRequest, JwtClaims } from '../auth';
+import { signToken, requireAuth, AuthedRequest, JwtClaims, Rol } from '../auth';
 import { loginLimiter, registroLimiter } from '../middleware/rateLimit';
 import { asyncHandler } from '../middleware/asyncHandler';
 import { passwordSchema, uuidSchema, respuestaValidacionFallida } from '../dominio/validacion';
@@ -11,6 +12,18 @@ import { passwordSchema, uuidSchema, respuestaValidacionFallida } from '../domin
 export const authRouter = Router();
 
 const entrarANegocioSchema = z.object({ negocio_id: uuidSchema });
+
+/** Fila de `usuario` (columnas relevantes para login/vinculación de cuentas — ver
+ *  migrations/001_init.sql). `password_hash`/`google_id` son nullable desde HU-35
+ *  (02-backlog/backlog.md, "Resuelto (DBA, 2026-08-10)"): una cuenta tiene uno, el otro, o
+ *  ambos — nunca ninguno (lo garantiza `ck_usuario_password_o_google` a nivel de base). */
+interface UsuarioRow {
+  id: string;
+  email: string;
+  password_hash: string | null;
+  google_id: string | null;
+  rol: Rol;
+}
 
 // HU-00a: administrador registra su negocio (multi-tenant, D1) y queda autenticado.
 // Fix CRITICAL-1 (ver 07-seguridad/informe-seguridad.md), generalizado a N:M (ver
@@ -105,89 +118,291 @@ function responderLoginConNegocios(
   });
 }
 
+/**
+ * A partir de una fila `usuario` ya autenticada (por contraseña en `/login`, o por Google ya
+ * vinculado en `/google` — ver HU-35, 02-backlog/backlog.md: "Google pasa a ser un método de
+ * acceso adicional... el resto del sistema no debe distinguir cómo se autenticó alguien"),
+ * arma y responde el JWT con el mismo shape/claims que ya emitía `POST /auth/login` antes de
+ * esta historia: branch por rol, resolución de negocio(s) activos para profesional/
+ * administrador (ver `responderLoginConNegocios` arriba). Extraída a función propia para que
+ * `POST /auth/login` y `POST /auth/google` (rama de login recurrente ya vinculado) compartan
+ * exactamente la misma lógica en vez de duplicarla.
+ */
+async function emitirLoginParaUsuario(res: Response, usuario: UsuarioRow) {
+  if (usuario.rol === 'cliente') {
+    const token = signToken({ sub: usuario.id, rol: 'cliente' });
+    return res.json({ token });
+  }
+
+  if (usuario.rol === 'profesional') {
+    // `profesional` tiene SELECT público (ver migrations/001_init.sql) — no hace falta
+    // contexto RLS para esta lectura.
+    const profesionalResult = await pool.query('SELECT id FROM profesional WHERE usuario_id = $1', [
+      usuario.id,
+    ]);
+    const profesional = profesionalResult.rows[0] as { id: string } | undefined;
+    if (!profesional) {
+      // No debería poder pasar: todo usuario con rol='profesional' se crea junto con su fila
+      // `profesional` en la misma transacción (POST /negocios/:id/profesionales).
+      return res.status(500).json({ error: 'No se pudo resolver la identidad profesional del usuario' });
+    }
+    // `profesional.negocio_id` (1:1) ya no existe (ver modelo-datos.md §2ter) — la membresía
+    // real vive en `negocio_profesional`, 0..N filas con `activo = true`. Esa tabla también
+    // tiene SELECT público, pero igual corremos esta lectura con contexto (usuarioId) por
+    // consistencia con el resto de los handlers autenticados/semi-autenticados.
+    const negocios = await withTransaction(
+      async (client) => {
+        const result = await client.query(
+          `SELECT np.negocio_id AS negocio_id, n.nombre AS nombre
+           FROM negocio_profesional np
+           JOIN negocio n ON n.id = np.negocio_id
+           WHERE np.profesional_id = $1 AND np.activo = true AND n.eliminado_en IS NULL`,
+          [profesional.id]
+        );
+        return result.rows as { negocio_id: string; nombre: string }[];
+      },
+      { usuarioId: usuario.id }
+    );
+
+    return responderLoginConNegocios(
+      res,
+      { sub: usuario.id, rol: 'profesional', profesional_id: profesional.id },
+      negocios
+    );
+  }
+
+  if (usuario.rol === 'administrador') {
+    // Fix CRITICAL-1 (ver 07-seguridad/informe-seguridad.md), generalizado a N:M: la query
+    // original de la corrección (`SELECT id FROM negocio WHERE admin_usuario_id = ?`, columna
+    // 1:1) sigue resolviendo por una relación PERSISTIDA (no reabre CRITICAL-1, ver
+    // modelo-datos.md §2ter), ahora contra `negocio_administrador`, que puede devolver 0..N filas.
+    //
+    // Contexto RLS OBLIGATORIO acá (a diferencia de la rama `profesional` de arriba):
+    // `negocio_administrador` NO tiene SELECT público (ver migrations/001_init.sql,
+    // `negocio_administrador_select_propio` exige `usuario_id = current_setting('app.usuario_id')`)
+    // — sin `usuarioId: usuario.id`, esta query devolvería 0 filas SIEMPRE, sin error, y todo
+    // administrador vería su login como si no perteneciera a ningún negocio.
+    const negocios = await withTransaction(
+      async (client) => {
+        const result = await client.query(
+          `SELECT na.negocio_id AS negocio_id, n.nombre AS nombre
+           FROM negocio_administrador na
+           JOIN negocio n ON n.id = na.negocio_id
+           WHERE na.usuario_id = $1 AND n.eliminado_en IS NULL`,
+          [usuario.id]
+        );
+        return result.rows as { negocio_id: string; nombre: string }[];
+      },
+      { usuarioId: usuario.id }
+    );
+
+    return responderLoginConNegocios(res, { sub: usuario.id, rol: 'administrador' }, negocios);
+  }
+
+  return res.status(500).json({ error: 'Rol de usuario inconsistente' });
+}
+
+// HU-35 (02-backlog/backlog.md): login/registro con Google, además de email+contraseña. El
+// cliente se construye UNA sola vez, sin `clientId` fijo en el constructor — `audience` se
+// resuelve por request dentro de `verificarIdTokenGoogle` (abajo), recién cuando llega un
+// request real. A propósito NO se lee/valida `process.env.GOOGLE_CLIENT_ID` acá arriba, a nivel
+// de módulo: a diferencia de `JWT_SECRET` (src/auth.ts, HIGH-3 — ahí SÍ falta debe frenar el
+// arranque del proceso), que Google no esté configurado es una opción válida en cualquier
+// entorno que todavía no ofrezca este método (no hay credenciales reales todavía — ver
+// backlog.md HU-35, pregunta abierta de DevOps sobre alta de credenciales OAuth). Mismo criterio
+// de opt-in explícito que `ENABLE_DEV_ROUTES` en src/app.ts: nunca tirar abajo la app entera por
+// esto — responder 503 recién al recibir un request a un endpoint que lo necesita.
+const googleOAuthClient = new OAuth2Client();
+
+type ResultadoGoogle =
+  | { ok: true; googleId: string; email: string; emailVerified: boolean; nombre: string }
+  | { ok: false; status: 503; error: string }
+  | { ok: false; status: 401; error: string };
+
+/**
+ * Verifica un ID token de Google (firma, emisor y audiencia == `GOOGLE_CLIENT_ID`, vía
+ * google-auth-library). Único punto que decide "Google no está configurado en este entorno"
+ * (503) — usado tanto por `POST /auth/google` como por el paso de vinculación dentro de
+ * `POST /auth/login` (ver más abajo), para no duplicar ese chequeo en 2 lugares.
+ */
+async function verificarIdTokenGoogle(idToken: string): Promise<ResultadoGoogle> {
+  const clientId = process.env.GOOGLE_CLIENT_ID;
+  if (!clientId) {
+    return { ok: false, status: 503, error: 'Login con Google no está configurado en este entorno' };
+  }
+  try {
+    const ticket = await googleOAuthClient.verifyIdToken({ idToken, audience: clientId });
+    const payload = ticket.getPayload();
+    if (!payload?.email) {
+      return { ok: false, status: 401, error: 'Token de Google inválido' };
+    }
+    return {
+      ok: true,
+      googleId: payload.sub,
+      email: payload.email,
+      // `email_verified` es opcional en el payload (google-auth-library) — tratar "ausente"
+      // igual que "false" (fail-closed: regla 1 de Security/HU-35, nunca dar de alta sin
+      // confirmación explícita de Google).
+      emailVerified: payload.email_verified === true,
+      nombre: payload.name ?? payload.email,
+    };
+  } catch {
+    // Firma inválida, token expirado, `aud` que no coincide con GOOGLE_CLIENT_ID, etc. —
+    // google-auth-library no expone un tipo de error propio explotable acá; todos se tratan
+    // igual, como token inválido.
+    return { ok: false, status: 401, error: 'Token de Google inválido' };
+  }
+}
+
+function responderErrorGoogle(res: Response, resultado: { ok: false; status: 503 | 401; error: string }) {
+  return res.status(resultado.status).json({ error: resultado.error });
+}
+
+// Reutilizado por el body completo de POST /auth/google (id_token obligatorio) y, envuelto de la
+// misma forma, por el parámetro opcional del mismo nombre en POST /auth/login (ver HU-35 más
+// abajo) — una sola definición de "qué es un id_token válido" para los 2 usos.
+const googleBodySchema = z.object({ id_token: z.string().min(1, 'id_token es requerido') });
+
 // Login genérico para cliente, profesional o administrador.
 authRouter.post(
   '/login',
   loginLimiter,
   asyncHandler(async (req, res) => {
-    const { email, password } = req.body;
+    const { email, password, id_token } = req.body;
     const usuarioResult = await pool.query('SELECT * FROM usuario WHERE email = $1', [email]);
-    const usuario = usuarioResult.rows[0];
-    if (!usuario || !bcrypt.compareSync(password ?? '', usuario.password_hash)) {
+    const usuario = usuarioResult.rows[0] as UsuarioRow | undefined;
+    if (!usuario) {
+      return res.status(401).json({ error: 'Credenciales inválidas' });
+    }
+    // Fix (HU-35, 02-backlog/backlog.md — ver también el comentario de DBA en
+    // migrations/001_init.sql sobre esta misma corrección): `password_hash` ahora puede ser
+    // NULL (cuenta dada de alta únicamente vía Google, sin contraseña propia). Chequeo
+    // explícito ANTES de llamar a `bcrypt.compareSync`, que no maneja `null` de forma segura
+    // como 2do argumento — sin esto, cualquier intento de login por contraseña contra una
+    // cuenta 100% Google rompería acá en vez de responder 401 como cualquier otra credencial
+    // inválida.
+    if (!usuario.password_hash) {
+      return res.status(401).json({ error: 'Credenciales inválidas' });
+    }
+    if (!bcrypt.compareSync(password ?? '', usuario.password_hash)) {
       return res.status(401).json({ error: 'Credenciales inválidas' });
     }
 
-    if (usuario.rol === 'cliente') {
-      const token = signToken({ sub: usuario.id, rol: 'cliente' });
-      return res.json({ token });
-    }
+    // HU-35 (backlog.md, regla de Security 2026-08-10, puntos 2 y 4): si el body además manda
+    // `id_token` de Google, es el paso de confirmación que exige la vinculación de cuentas —
+    // "ya existe una cuenta con este email creada por contraseña, exigir que confirme esa
+    // contraseña en el mismo flujo antes de persistir la vinculación". La contraseña ya se
+    // validó arriba (mismo mecanismo, mismo `loginLimiter`/HIGH-1 — no se abre un endpoint
+    // nuevo de fuerza bruta, tal cual pide el punto 4); acá solo falta verificar el id_token y
+    // persistir `google_id` si todavía no estaba vinculado.
+    if (id_token) {
+      const idTokenCheck = googleBodySchema.safeParse({ id_token });
+      if (!idTokenCheck.success) return respuestaValidacionFallida(res, idTokenCheck.error);
 
-    if (usuario.rol === 'profesional') {
-      // `profesional` tiene SELECT público (ver migrations/001_init.sql) — no hace falta
-      // contexto RLS para esta lectura.
-      const profesionalResult = await pool.query('SELECT id FROM profesional WHERE usuario_id = $1', [
-        usuario.id,
-      ]);
-      const profesional = profesionalResult.rows[0] as { id: string } | undefined;
-      if (!profesional) {
-        // No debería poder pasar: todo usuario con rol='profesional' se crea junto con su fila
-        // `profesional` en la misma transacción (POST /negocios/:id/profesionales).
-        return res.status(500).json({ error: 'No se pudo resolver la identidad profesional del usuario' });
+      const resultadoGoogle = await verificarIdTokenGoogle(idTokenCheck.data.id_token);
+      if (!resultadoGoogle.ok) return responderErrorGoogle(res, resultadoGoogle);
+
+      // Nunca confiar en que el id_token corresponde a esta cuenta solo porque vino en el mismo
+      // request (mismo criterio que POST /auth/entrar-a-negocio: no confiar un valor sin
+      // re-derivarlo) — el email del propio token YA verificado por Google es lo único que se
+      // acepta como prueba de que corresponde a esta cuenta.
+      if (resultadoGoogle.email !== usuario.email) {
+        return res.status(409).json({ error: 'La cuenta de Google no corresponde al email de esta cuenta' });
       }
-      // `profesional.negocio_id` (1:1) ya no existe (ver modelo-datos.md §2ter) — la membresía
-      // real vive en `negocio_profesional`, 0..N filas con `activo = true`. Esa tabla también
-      // tiene SELECT público, pero igual corremos esta lectura con contexto (usuarioId) por
-      // consistencia con el resto de los handlers autenticados/semi-autenticados.
-      const negocios = await withTransaction(
-        async (client) => {
-          const result = await client.query(
-            `SELECT np.negocio_id AS negocio_id, n.nombre AS nombre
-             FROM negocio_profesional np
-             JOIN negocio n ON n.id = np.negocio_id
-             WHERE np.profesional_id = $1 AND np.activo = true AND n.eliminado_en IS NULL`,
-            [profesional.id]
-          );
-          return result.rows as { negocio_id: string; nombre: string }[];
-        },
-        { usuarioId: usuario.id }
-      );
 
-      return responderLoginConNegocios(
-        res,
-        { sub: usuario.id, rol: 'profesional', profesional_id: profesional.id },
-        negocios
-      );
+      // Si ya estaba vinculada (a este mismo google_id) no hay nada que persistir. Relincular a
+      // un google_id DISTINTO del ya vinculado queda fuera de alcance de HU-35 (no lo pide el
+      // backlog) y a propósito no se sobreescribe acá.
+      if (!usuario.google_id) {
+        try {
+          await pool.query('UPDATE usuario SET google_id = $1, modificado_en = $2 WHERE id = $3', [
+            resultadoGoogle.googleId,
+            nowIso(),
+            usuario.id,
+          ]);
+          usuario.google_id = resultadoGoogle.googleId;
+        } catch (err: any) {
+          // 23505 = unique_violation sobre `usuario_google_id_key` (mismo patrón ya usado para
+          // la carrera de reserva de turnos, ver turnos.ts) — esta cuenta de Google ya está
+          // vinculada a otro `usuario_id`.
+          if (err?.code === '23505') {
+            return res.status(409).json({ error: 'Esa cuenta de Google ya está vinculada a otro usuario' });
+          }
+          throw err;
+        }
+      }
     }
 
-    if (usuario.rol === 'administrador') {
-      // Fix CRITICAL-1 (ver 07-seguridad/informe-seguridad.md), generalizado a N:M: la query
-      // original de la corrección (`SELECT id FROM negocio WHERE admin_usuario_id = ?`, columna
-      // 1:1) sigue resolviendo por una relación PERSISTIDA (no reabre CRITICAL-1, ver
-      // modelo-datos.md §2ter), ahora contra `negocio_administrador`, que puede devolver 0..N filas.
-      //
-      // Contexto RLS OBLIGATORIO acá (a diferencia de la rama `profesional` de arriba):
-      // `negocio_administrador` NO tiene SELECT público (ver migrations/001_init.sql,
-      // `negocio_administrador_select_propio` exige `usuario_id = current_setting('app.usuario_id')`)
-      // — sin `usuarioId: usuario.id`, esta query devolvería 0 filas SIEMPRE, sin error, y todo
-      // administrador vería su login como si no perteneciera a ningún negocio.
-      const negocios = await withTransaction(
-        async (client) => {
-          const result = await client.query(
-            `SELECT na.negocio_id AS negocio_id, n.nombre AS nombre
-             FROM negocio_administrador na
-             JOIN negocio n ON n.id = na.negocio_id
-             WHERE na.usuario_id = $1 AND n.eliminado_en IS NULL`,
-            [usuario.id]
-          );
-          return result.rows as { negocio_id: string; nombre: string }[];
-        },
-        { usuarioId: usuario.id }
-      );
+    return emitirLoginParaUsuario(res, usuario);
+  })
+);
 
-      return responderLoginConNegocios(res, { sub: usuario.id, rol: 'administrador' }, negocios);
+// HU-35 (02-backlog/backlog.md): login/registro con la cuenta de Google del cliente o
+// profesional, ALTERNATIVO al flujo de email+contraseña de arriba (que sigue funcionando
+// exactamente igual, sin cambios, para quien no usa Google — ver "Es una opción ADICIONAL, no
+// un reemplazo" en esa historia). Implementa tal cual las reglas que dejó cerradas Security
+// (backlog.md HU-35, "Resuelto (Security, 2026-08-10)"; razonamiento completo en
+// 07-seguridad/informe-seguridad.md, Adenda 2026-08-10, parte A):
+//   1. Sin cuenta previa con ese email -> alta nueva SOLO si el ID token trae
+//      `email_verified: true`; si viene `false`, se rechaza el alta.
+//   2. Ya existe una cuenta previa por contraseña con ese email -> NUNCA vincular ni loguear
+//      automático, sin importar `email_verified` (riesgo de account takeover vía email
+//      reciclado/cuenta Google comprometida/Workspace — ver la adenda citada). Acá se responde
+//      con 409 + `requiere_confirmacion_password`; el cliente confirma reenviando ese mismo
+//      `id_token` a POST /auth/login junto con la contraseña existente (ver el comentario en ese
+//      endpoint) — reutiliza su mismo rate limiting (HIGH-1) en vez de abrir un endpoint nuevo
+//      de fuerza bruta (punto 4 de la regla de Security).
+//   3. Una vez vinculada sigue existiendo una única fila `usuario` — Google pasa a ser un
+//      método de acceso adicional de ese usuario_id, nunca un usuario nuevo.
+authRouter.post(
+  '/google',
+  loginLimiter,
+  asyncHandler(async (req, res) => {
+    const bodyParsed = googleBodySchema.safeParse(req.body);
+    if (!bodyParsed.success) return respuestaValidacionFallida(res, bodyParsed.error);
+
+    const resultado = await verificarIdTokenGoogle(bodyParsed.data.id_token);
+    if (!resultado.ok) return responderErrorGoogle(res, resultado);
+    const { googleId, email, emailVerified, nombre } = resultado;
+
+    // Buscar primero por `google_id` (login recurrente, cuenta ya vinculada) — ver
+    // recomendación de DBA en migrations/001_init.sql. Nunca se busca primero por email: eso es
+    // exactamente el atajo que la regla 2 de arriba prohíbe.
+    const porGoogleIdResult = await pool.query('SELECT * FROM usuario WHERE google_id = $1', [googleId]);
+    const usuarioVinculado = porGoogleIdResult.rows[0] as UsuarioRow | undefined;
+    if (usuarioVinculado) {
+      return emitirLoginParaUsuario(res, usuarioVinculado);
     }
 
-    res.status(500).json({ error: 'Rol de usuario inconsistente' });
+    const porEmailResult = await pool.query('SELECT * FROM usuario WHERE email = $1', [email]);
+    const existentePorEmail = porEmailResult.rows[0] as UsuarioRow | undefined;
+
+    if (!existentePorEmail) {
+      // Regla 1: sin cuenta previa con este email, alta nueva solo si Google confirma el email.
+      if (!emailVerified) {
+        return res.status(403).json({
+          error:
+            'Tu cuenta de Google no tiene el email verificado — no se puede crear una cuenta con este método. Probá con otro método de registro.',
+        });
+      }
+      // Alta nueva == mismo rol que POST /auth/registro-cliente (única alta pública sin admin
+      // de por medio — profesionales/administradores no se autoregistran vía Google).
+      const usuarioId = uuid();
+      await pool.query(
+        'INSERT INTO usuario (id, email, password_hash, google_id, nombre, rol, creado_en) VALUES ($1, $2, NULL, $3, $4, $5, $6)',
+        [usuarioId, email, googleId, nombre, 'cliente', nowIso()]
+      );
+      const token = signToken({ sub: usuarioId, rol: 'cliente' });
+      return res.status(201).json({ token });
+    }
+
+    // Regla 2: ya existe una cuenta con este email que no llegó acá por `google_id` (si ya
+    // tuviera este mismo google_id vinculado, ya se habría resuelto arriba) -> PROHIBIDA la
+    // vinculación/login automático, sin importar `email_verified`.
+    return res.status(409).json({
+      error: 'Ya existe una cuenta con este email — iniciá sesión con tu contraseña para vincular Google',
+      requiere_confirmacion_password: true,
+    });
   })
 );
 
