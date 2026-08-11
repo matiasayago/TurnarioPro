@@ -5,6 +5,17 @@ App única con dos modos (Cliente / Profesional) según el rol del usuario auten
 
 ## ✅ Estado (slice original, hasta HU-15): compilación verificada por CI (2026-08-06)
 
+**Actualización (HU-35, este ciclo):** el entorno de desarrollo pasó a tener el SDK de Flutter
+instalado (`C:\flutter`, 3.44.9 estable, con soporte Web/Chrome — `flutter doctor` sigue sin
+Android SDK ni Visual Studio, así que Android/Windows desktop siguen sin poder compilarse acá,
+pero eso no afecta a Web) — a diferencia de lo que dice el párrafo original de abajo (dejado tal
+cual, como registro histórico de cuándo se escribió). Con eso, el cambio de HU-35 sí se verificó
+localmente y de punta a punta para el target Web: `flutter pub get`, `flutter analyze` (limpio,
+sin ningún hallazgo en el código nuevo — el único "info" que reporta es preexistente y ajeno a
+este cambio, en `dashboard_screen.dart`) y `flutter build web` (compila y bundlea el asset del
+logo de Google correctamente). No se instaló el SDK de Android en este ciclo — sigue sin poder
+compilarse `flutter build apk` localmente, sin cambios respecto del párrafo original.
+
 Este entorno de desarrollo sigue sin el SDK de Flutter (ni Dart standalone) instalado, así que
 a diferencia del backend (que sí se instaló, corrió y se probó de punta a punta, ver
 `../backend/README.md`), acá no se puede ejecutar el compilador localmente. En su lugar, desde
@@ -104,13 +115,80 @@ Android, `localhost` del host se accede como `10.0.2.2` — ya configurado como 
 `lib/api_client.dart`. Desde un dispositivo físico o iOS, cambiar `ApiClient(baseUrl: ...)` en
 `lib/main.dart` a la IP de la máquina que corre el backend.
 
+## Login con Google (HU-35) — solo Web en este ciclo
+
+`02-backlog/backlog.md` (HU-35). Alcance de este ciclo: **únicamente el target Web**
+(`flutter run -d chrome` / `-d web-server`) — Android queda explícitamente afuera (el Client ID
+de tipo Android todavía está bloqueado, ver `../../08-despliegue/google-oauth.md` §2 Paso 4: no
+existe nombre de paquete definitivo ni SHA-1 de firma para este proyecto todavía). No hay ninguna
+configuración de Android agregada por este cambio.
+
+**Paquete instalado:** `google_sign_in: ^7.2.0` (+ `google_sign_in_web: ^1.1.3` como dependencia
+directa, necesaria para `renderButton` — ver el porqué en el doc comment de
+`lib/widgets/google_sign_in_button_web.dart`). Es la versión con la API nueva (desde 7.0.0,
+breaking change: `GoogleSignIn.instance` singleton + `initialize()` obligatorio antes que
+cualquier otro método) — **no** el patrón viejo `GoogleSignIn(clientId: ...)` + `signIn()` de
+versiones anteriores a la 6.0, que ya no existe en esta versión.
+
+**Cómo se pasa el Client ID:** por variable de compilación, **nunca hardcodeado**:
+`GOOGLE_CLIENT_ID` se lee con `String.fromEnvironment('GOOGLE_CLIENT_ID')`
+(`lib/widgets/google_sign_in_button_web.dart`) y se pasa a
+`GoogleSignIn.instance.initialize(clientId: ...)` recién ahí. Para correr o buildear con Google
+habilitado:
+
+```bash
+flutter run -d chrome --web-hostname localhost --web-port 7357 \
+  --dart-define=GOOGLE_CLIENT_ID=TU_CLIENT_ID.apps.googleusercontent.com
+```
+
+- El Client ID es el de tipo **"Web application"** (`../../08-despliegue/google-oauth.md` §2
+  Paso 3) — no el de tipo Android (que ni siquiera existe todavía, ver arriba).
+- **`--web-hostname`/`--web-port` fijos, no son opcionales acá:** `flutter run -d chrome` sin
+  esas flags elige un puerto aleatorio en cada corrida, y el SDK de Google (Google Identity
+  Services) solo funciona desde orígenes que estén cargados en la lista "Authorized JavaScript
+  origins" del Client ID en Google Cloud Console (`../../08-despliegue/google-oauth.md` §2 Paso
+  3, punto 5 — se dejó vacía a propósito hasta este punto). Con un puerto fijo alcanza con cargar
+  ese origen (ej. `http://localhost:7357`) una sola vez. Mismo mecanismo para `flutter build web`
+  servido detrás de un dominio real: ese dominio también tiene que estar en esa misma lista.
+- Sin `--dart-define=GOOGLE_CLIENT_ID=...` (o con un valor vacío), el botón "Google" se sigue
+  mostrando, pero al tocarlo avisa "Login con Google no está disponible en este momento" en vez
+  de intentar inicializar el SDK — mismo espíritu que el 503 que ya devuelve el backend cuando
+  falta esa misma variable del lado del servidor (`../backend/src/routes/auth.ts`,
+  `verificarIdTokenGoogle`). Para probar ese flujo de éxito de punta a punta hace falta además
+  que el backend tenga su propio `GOOGLE_CLIENT_ID` cargado (`../backend/.env`, mismo valor) —
+  ver `../backend/README.md`.
+
+**Archivos nuevos de este ciclo:**
+- `lib/widgets/google_sign_in_button.dart` — export condicional (`dart.library.js_interop`) entre
+  la implementación real (`_web.dart`) y un fallback (`_stub.dart`) para cualquier otra
+  plataforma, para que `login_screen.dart` (pantalla compartida por todas las plataformas) no
+  rompa el día que se retome Android/iOS — `google_sign_in_web` importa `dart:ui_web`, que solo
+  existe compilando para Web.
+- `lib/widgets/google_sign_in_button_web.dart` — la implementación real. Nota importante: en Web,
+  `google_sign_in` 7.x **no admite un botón propio de la app que dispare el login** —
+  `GoogleSignIn.instance.authenticate()` tira `UnimplementedError` a propósito en esta
+  plataforma; el único login interactivo soportado es el botón que renderiza el SDK de Google
+  (`google_sign_in_web`'s `renderButton`). Se configura lo más cerca posible del criterio de
+  `04-diseno/sistema-diseno.md` §7.1bis (outline, radio moderado — no píldora) que da el propio
+  SDK (`theme: outline`, `shape: rectangular`), pero **no es** el `OutlineButton` del sistema de
+  diseño pixel a pixel — es el botón real de Google, requisito de la plataforma, no una elección
+  de estilo. Ese `OutlineButton` sí se usa tal cual (con el logo de Google,
+  `lib/widgets/google_logo.dart`) para el estado "no disponible" (sin `GOOGLE_CLIENT_ID` o con
+  el SDK sin poder inicializar).
+- `lib/widgets/google_sign_in_button_stub.dart` — fallback no-web (hoy: siempre "no disponible").
+- `lib/widgets/google_logo.dart` — logo de Google para el botón propio del sistema de diseño
+  (`assets/branding/google_logo.png`, asset propio publicado por Google para este uso — ver
+  developers.google.com/identity/branding-guidelines).
+
 ## Pantallas implementadas (ver mapa completo en `04-diseno/mapa-pantallas.md`)
 
-**Cliente:** Login, Buscar Negocios (HU-00b), Detalle de Negocio/Servicios (HU-07), Elegir
-Profesional (HU-08), Horarios Disponibles (HU-09), Confirmar Turno (HU-09b), Mis Turnos
-(HU-12), Reprogramar Turno (HU-13). Sin cambios de diseño visual todavía (siguen con el
-`ThemeData` genérico anterior a este ciclo — el rediseño de esta iteración fue exclusivamente del
-lado Profesional, según lo pedido).
+**Cliente:** Login (+ Google, HU-35, solo Web — ver sección propia arriba), Buscar Negocios
+(HU-00b), Detalle de Negocio/Servicios (HU-07), Elegir Profesional (HU-08), Horarios Disponibles
+(HU-09), Confirmar Turno (HU-09b), Mis Turnos (HU-12), Reprogramar Turno (HU-13). Sin cambios de
+diseño visual todavía más allá del botón de Google (siguen con el `ThemeData` genérico anterior a
+este ciclo — el rediseño de esta iteración fue exclusivamente del lado Profesional, según lo
+pedido). No incluye "Crear Cuenta" ni "¿Olvidaste tu contraseña?" — `mapa-pantallas.md` §5.17
+documenta que esas dos partes no se capturaron, quedan fuera de HU-35.
 
 **Profesional:** Dashboard (HU-27, nueva), Gestión de Horarios (HU-05 + HU-16 + HU-18, reemplaza a
 "Definir Disponibilidad"), Agenda semanal (HU-06, reubicada), Excepciones (HU-15), Mis Clientes
@@ -130,3 +208,10 @@ placeholders "Próximamente".
   `../backend/src/integraciones/pagos.ts`).
 - Tema claro/oscuro: implementado de punta a punta en `lib/theme/` (ver sección de rediseño
   arriba), no se probó visualmente por no poder correr la app.
+- **Login (contraseña y Google) no maneja todavía la respuesta con `negocios: [...]`** que manda
+  el backend cuando un profesional/administrador tiene 0 o 2+ negocios activos (JWT sin
+  `negocio_id`, ver `responderLoginConNegocios` en `../backend/src/routes/auth.ts`) — tanto
+  `_login()` como el nuevo `_iniciarConGoogle()` de `login_screen.dart` toman `resp['token']` sin
+  distinguir ese caso, igual que ya hacía el login por contraseña antes de HU-35. Es el mismo gap
+  ya documentado en el backlog para HU-27 ("cambiar de vista" — implementado en Backend, falta el
+  selector en Mobile), no uno nuevo introducido por Google.

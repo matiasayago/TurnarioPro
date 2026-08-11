@@ -1,10 +1,17 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import '../api_client.dart';
 import '../state/sesion.dart';
+import '../widgets/google_sign_in_button.dart';
 
 /// HU-01: login de cliente o profesional. El registro de negocio/administrador (HU-00a) y el
 /// registro de cliente (HU-01) se resuelven con pantallas propias no incluidas en este slice
 /// inicial — este login alcanza para probar el flujo con datos creados vía el backend/API.
+///
+/// HU-35 (`02-backlog/backlog.md`): además del login por contraseña de abajo, esta pantalla
+/// ofrece "Iniciar sesión con Google" (wireframe en `04-diseno/mapa-pantallas.md` §5.17) — ver
+/// [_iniciarConGoogle] y [_pedirPasswordParaVincular] para el flujo completo contra
+/// `POST /auth/google` / `POST /auth/login` (contrato real en `src/routes/auth.ts`).
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
 
@@ -16,6 +23,7 @@ class _LoginScreenState extends State<LoginScreen> {
   final _emailCtrl = TextEditingController();
   final _passCtrl = TextEditingController();
   bool _cargando = false;
+  bool _googleCargando = false;
   String? _error;
 
   Future<void> _login() async {
@@ -38,6 +46,125 @@ class _LoginScreenState extends State<LoginScreen> {
     }
   }
 
+  void _mostrarAviso(String mensaje) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(mensaje)));
+  }
+
+  /// HU-35 — se dispara cuando [GoogleSignInButton] ya resolvió un login de Google exitoso
+  /// (`idToken`/`email` vienen del propio SDK de Google, no del backend). A partir de acá el
+  /// contrato es el mismo `ApiClient`/`Sesion` que usa [_login]:
+  /// - `200`/`201` con `{token}` (o `{token, negocios}`, mismo shape sin manejo especial que ya
+  ///   deja pasar [_login] hoy — ver `Sesion.iniciarSesion`) → sesión iniciada.
+  /// - `401`/`403`/`503` → error tal cual lo manda el backend (mismo patrón que [_login]).
+  /// - `409` con `requiere_confirmacion_password: true` → ya existe una cuenta por contraseña con
+  ///   ese email; pasa a [_pedirPasswordParaVincular] en vez de mostrarse como error.
+  Future<void> _iniciarConGoogle(String idToken, String email) async {
+    if (_googleCargando) return;
+    setState(() {
+      _googleCargando = true;
+      _error = null;
+    });
+    final sesion = context.read<Sesion>();
+    try {
+      final resp = await sesion.api.post('/auth/google', {'id_token': idToken});
+      sesion.iniciarSesion(resp['token'] as String, email: email);
+    } on ApiException catch (e) {
+      if (e.statusCode == 409 && e.body?['requiere_confirmacion_password'] == true) {
+        if (mounted) await _pedirPasswordParaVincular(email, idToken);
+      } else if (mounted) {
+        setState(() => _error = e.toString());
+      }
+    } catch (e) {
+      if (mounted) setState(() => _error = e.toString());
+    } finally {
+      if (mounted) setState(() => _googleCargando = false);
+    }
+  }
+
+  /// HU-35, regla de Security (`02-backlog/backlog.md`, "Resuelto (Security, 2026-08-10)", punto
+  /// 2): ya existe una cuenta creada por contraseña con este email — nunca se vincula sola por
+  /// coincidencia de email. Pide esa contraseña acá y la confirma en `POST /auth/login` junto con
+  /// el mismo `id_token` que ya dio Google: ese endpoint valida la contraseña, vincula la cuenta
+  /// de Google y devuelve el login en un único paso (ver el comentario sobre HU-35 en el handler
+  /// de `/login`, `src/routes/auth.ts`) — reutiliza el mismo rate limiting que el login normal,
+  /// no abre un endpoint nuevo.
+  Future<void> _pedirPasswordParaVincular(String email, String idToken) async {
+    final sesion = context.read<Sesion>();
+    final passwordCtrl = TextEditingController();
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) {
+        bool enviando = false;
+        String? dialogError;
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            Future<void> confirmar() async {
+              setDialogState(() {
+                enviando = true;
+                dialogError = null;
+              });
+              try {
+                final resp = await sesion.api.post('/auth/login', {
+                  'email': email,
+                  'password': passwordCtrl.text,
+                  'id_token': idToken,
+                });
+                sesion.iniciarSesion(resp['token'] as String, email: email);
+                if (dialogContext.mounted) Navigator.of(dialogContext).pop();
+              } catch (e) {
+                setDialogState(() {
+                  enviando = false;
+                  dialogError = e.toString();
+                });
+              }
+            }
+
+            return AlertDialog(
+              title: const Text('Vincular cuenta de Google'),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Ya existe una cuenta con este email ($email) — ingresá tu contraseña para vincular Google.'),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: passwordCtrl,
+                    autofocus: true,
+                    obscureText: true,
+                    enabled: !enviando,
+                    decoration: const InputDecoration(labelText: 'Contraseña'),
+                    onSubmitted: (_) {
+                      if (!enviando) confirmar();
+                    },
+                  ),
+                  if (dialogError != null) ...[
+                    const SizedBox(height: 8),
+                    Text(dialogError!, style: const TextStyle(color: Colors.red)),
+                  ],
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: enviando ? null : () => Navigator.of(dialogContext).pop(),
+                  child: const Text('Cancelar'),
+                ),
+                FilledButton(
+                  onPressed: enviando ? null : confirmar,
+                  child: enviando
+                      ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                      : const Text('Confirmar'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+    passwordCtrl.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -58,8 +185,17 @@ class _LoginScreenState extends State<LoginScreen> {
             const SizedBox(height: 24),
             if (_error != null) Text(_error!, style: const TextStyle(color: Colors.red)),
             FilledButton(
-              onPressed: _cargando ? null : _login,
+              onPressed: (_cargando || _googleCargando) ? null : _login,
               child: _cargando ? const CircularProgressIndicator() : const Text('Ingresar'),
+            ),
+            const SizedBox(height: 12),
+            // HU-35 (mapa-pantallas.md §5.17): outline, con el logo de Google, debajo del botón
+            // principal — mismo criterio de radio moderado (no píldora) que sistema-diseno.md
+            // §7.1bis ya documenta para los botones de esta pantalla.
+            GoogleSignInButton(
+              onSignedIn: _iniciarConGoogle,
+              onError: _mostrarAviso,
+              onUnavailable: () => _mostrarAviso('Login con Google no está disponible en este momento'),
             ),
           ],
         ),
