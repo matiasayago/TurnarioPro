@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../../state/sesion.dart';
 import 'detalle_negocio_screen.dart';
-import 'mis_turnos_screen.dart';
 
 /// HU-00b / CU3: el cliente descubre negocios disponibles en la plataforma (multi-tenant, D1).
 class BuscarNegociosScreen extends StatefulWidget {
@@ -23,17 +22,13 @@ class _BuscarNegociosScreenState extends State<BuscarNegociosScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // Antes tenía un ícono de atajo a "Mis turnos" en el AppBar (única forma de llegar ahí
+    // cuando esta pantalla era la raíz suelta del lado Cliente, sin bottom nav). Ahora que
+    // "Mis Turnos" es una pestaña persistente de `ClienteShell`, ese atajo quedó redundante y,
+    // peor, tapaba la bottom nav al empujar una pantalla completa por encima del shell — se
+    // quita en vez de dejarlo (ver nota de la tarea de navegación del Cliente).
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Negocios'),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.event_note),
-            tooltip: 'Mis turnos',
-            onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const MisTurnosScreen())),
-          ),
-        ],
-      ),
+      appBar: AppBar(title: const Text('Negocios')),
       body: FutureBuilder<List<dynamic>>(
         future: _negocios,
         builder: (context, snapshot) {
