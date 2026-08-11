@@ -47,7 +47,8 @@ prueba de concurrencia desde la UI, sin instalar Flutter.
 ## Implementado en este slice
 
 - Auth: registro de negocio+administrador, registro de cliente, login (JWT con
-  `rol`/`negocio_id`/`profesional_id`).
+  `rol`/`negocio_id`/`profesional_id`), login/registro con Google (HU-35 — ver sección dedicada
+  más abajo).
 - Negocios: alta, listado público, alta de servicios y profesionales (RN9 — scoping por
   `negocio_id` del JWT, nunca por parámetro).
 - Profesionales: asociar servicio con seña configurable (D2/RN10), disponibilidad,
@@ -297,3 +298,42 @@ reprogramación de ese turno con el mismo override activo, y reversibilidad (vol
 restaura la duración del servicio, no solo queda probado que el override funciona) — más
 autorización (un profesional no puede configurar la duración de otro) y validación
 (negativo, cero, campo faltante).
+
+## Login con Google (HU-35)
+
+Ver `../../02-backlog/backlog.md` (HU-35) para el backlog aprobado por el CEO y la regla de
+vinculación de cuentas cerrada por Security, y `../../07-seguridad/informe-seguridad.md`
+(Adenda 2026-08-10, parte A) para el razonamiento completo de esa regla;
+`../../03-arquitectura/modelo-datos.md` §2sexies para el modelado de datos (DBA —
+`usuario.password_hash` nullable + `usuario.google_id`). Alternativo al login/registro por
+contraseña (`POST /auth/login`, `POST /auth/registro-cliente`, `POST /auth/registro-negocio`),
+que sigue funcionando exactamente igual, sin cambios, para quien no usa Google.
+
+- **`POST /auth/google`** — body `{ "id_token": string }` (el ID token JWT que devuelve el SDK
+  de Google Sign-In del lado del cliente; no confundir con un access token). Se verifica con
+  `google-auth-library` contra `GOOGLE_CLIENT_ID` (ver `.env.example`) — si esa variable no
+  está seteada, responde `503` en vez de romper el arranque de la app (mismo criterio de opt-in
+  explícito que `ENABLE_DEV_ROUTES`).
+  - Cuenta ya vinculada (`google_id` coincide, login recurrente): `200 { token }` o
+    `200 { token, negocios }` — mismo shape/claims que `POST /auth/login`.
+  - Sin cuenta previa con ese email: alta nueva (rol `cliente`, igual que
+    `POST /auth/registro-cliente`) solo si el token trae `email_verified: true` → `201 { token }`;
+    si viene `false`, `403`.
+  - Ya existe una cuenta creada por contraseña con ese email: la vinculación automática está
+    PROHIBIDA (regla de Security, HU-35, ni siquiera con `email_verified: true` — riesgo de
+    account takeover vía email reciclado/cuenta Google comprometida). Responde
+    `409 { error, requiere_confirmacion_password: true }` — el cliente debe confirmar la
+    contraseña existente reenviando ese mismo `id_token` a `POST /auth/login` (ver abajo).
+- **`POST /auth/login`** acepta ahora, además de `email`/`password`, un `id_token` opcional del
+  mismo tipo — es el paso de confirmación de la vinculación de arriba: si la contraseña es
+  correcta y el `id_token` es válido y corresponde al mismo email de la cuenta, persiste
+  `usuario.google_id` (solo si todavía no estaba vinculada) y responde el login normalmente.
+  Reutiliza el mismo `loginLimiter` (HIGH-1) que ya protege el login por contraseña, en vez de
+  abrir un endpoint nuevo de superficie de fuerza bruta.
+- `usuario.password_hash` ahora es nullable (cuenta dada de alta 100% por Google) —
+  `POST /auth/login` valida explícitamente que no sea `NULL` antes de comparar contra bcrypt
+  (una cuenta sin contraseña propia responde `401`, igual que una contraseña incorrecta).
+
+No probado end-to-end: todavía no existe un `GOOGLE_CLIENT_ID` real (DevOps está resolviendo el
+alta de credenciales OAuth en Google Cloud Console, ver backlog.md HU-35). Verificado con
+`npx tsc --noEmit` (sin errores).
