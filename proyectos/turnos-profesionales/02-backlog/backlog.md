@@ -200,13 +200,36 @@ la app sin depender de crear y recordar una contraseña propia.
        fecha) para auditoría, y ofrecer además "vincular Google" desde "Seguridad de la cuenta"
        (`04-diseno/mapa-pantallas.md` §5.13) para quien ya está logueado por contraseña — ahí no
        hace falta repedirla, la sesión activa ya es prueba suficiente de identidad.
-  - **Pregunta abierta (DevOps, con Arquitecto) — administración de credenciales OAuth de
-    Google:** quién da de alta y administra las credenciales de la aplicación en Google Cloud
-    Console (client ID/secret) y cómo se gestionan como secreto en cada entorno (desarrollo,
-    CI, producción) — a coordinar con DevOps antes de implementar. No asumido acá.
-  - Ninguna de estas tres preguntas bloquea el resto del backlog ni el resto de E4 (HU-01/
-    HU-02 siguen funcionando sin cambios) — condicionan únicamente el diseño detallado e
-    implementación de esta historia puntual antes de pasar a Fase 4 (Desarrollo).
+  - **Resuelto (DevOps, con Arquitecto, 2026-08-11) — administración de credenciales OAuth de
+    Google:** un único proyecto de Google Cloud (gratis, cualquier cuenta de Google — no tiene
+    relación con las cuentas pagas de Google Play/Apple Developer de
+    `03-arquitectura/plan-produccion.md` §8) con dos Client ID (tipo "Web application" y tipo
+    "Android"; iOS queda sin crear por ahora, ver D15 en `01-requisitos/documento-funcional.md`)
+    es la única credencial de aplicación que hace falta — la administra el CEO, ningún agente de
+    IA puede crearla (mismo tipo de límite que las cuentas de tiendas de apps). Se gestiona como
+    una única variable de entorno nueva, `GOOGLE_CLIENT_ID` (sin `GOOGLE_CLIENT_SECRET`: el flujo
+    de verificación de ID token del lado del servidor con `google-auth-library` no lo necesita),
+    con el mismo valor en todos los entornos (a diferencia de `JWT_SECRET`) — presente en
+    `.env` local (gitignorado), deliberadamente ausente en CI (el endpoint responde 503 sin
+    necesitar ningún mock, HU-35 no bloquea el resto del backlog), y declarada con `sync: false`
+    en `05-codigo/backend/render.yaml` para que el CEO la cargue a mano desde el dashboard de
+    Render cuando tenga el valor real. Instructivo completo paso a paso para el CEO (con los
+    nombres exactos de los menús de Google Cloud Console), el razonamiento técnico completo, y
+    el criterio de gateo para que Backend/Mobile construyan ya sin esperar credenciales reales
+    (el endpoint responde 503 si `GOOGLE_CLIENT_ID` no está seteada, mismo criterio que
+    `ENABLE_DEV_ROUTES`) en `08-despliegue/google-oauth.md`.
+    **Bloqueo real encontrado para el Client ID Android en particular (no para el Web, que no
+    depende de esto):** hace falta un nombre de paquete Android definitivo y al menos un SHA-1
+    de un keystore de firma — ninguno de los dos existe hoy (`05-codigo/mobile` nunca corrió
+    `flutter create` con una organización propia ni generó ningún keystore, ver su README.md) —
+    pendiente de Arquitecto/Mobile, detallado en ese mismo documento; no bloquea nada de lo
+    demás.
+  - Las tres preguntas quedaron resueltas (DBA/Security/DevOps, ver arriba) — Backend y Mobile
+    ya pueden construir el flujo real de HU-35 en paralelo, sin esperar a que existan
+    credenciales reales de Google (el endpoint queda gateado mientras tanto, ver
+    `08-despliegue/google-oauth.md` §5). Ninguna de las tres bloqueó nunca el resto del backlog
+    ni el resto de E4 (HU-01/HU-02 siguieron funcionando sin cambios) — condicionaban únicamente
+    el diseño detallado e implementación de esta historia puntual.
 
 ---
 

@@ -772,3 +772,52 @@ Detalle completo, razonamiento columna por columna y RLS en `03-arquitectura/mod
   modelan/revisan el mismo cambio en paralelo sin coordinación explícita, hay que releer el
   resultado del otro antes de dar el propio por cerrado — no alcanza con no haber tenido el
   hallazgo del otro disponible al momento de escribir la primera versión.
+
+## Credenciales OAuth de Google para HU-35 (login con Google) — DevOps, con Arquitecto (2026-08-11)
+
+Plan completo en `proyectos/turnos-profesionales/08-despliegue/google-oauth.md` — resuelve la
+tercera y última pregunta abierta de HU-35 (`02-backlog/backlog.md`, ahora marcada como resuelta
+ahí mismo, mismo patrón que ya usaron DBA/Security para las suyas). Resumen para reutilizar:
+
+- **Enfoque técnico confirmado, sin alternativa mejor:** `google-auth-library`
+  (`OAuth2Client.verifyIdToken`) del lado del backend, verificando el ID token que entrega el SDK
+  de Google Sign-In del cliente (Mobile) — sin flujo de redirect, sin `client_secret`, sin
+  reemplazar el JWT propio del proyecto (`05-codigo/backend/src/auth.ts`), que sigue siendo la
+  única fuente de sesión de la app. Ya era el estándar de la empresa
+  (`03-arquitectura/lineamientos-tecnicos.md`, "Autenticación: OAuth2/OIDC + JWT") desde antes de
+  que existiera HU-35.
+- **Una sola variable nueva, `GOOGLE_CLIENT_ID`** (Client ID de tipo "Web application" de Google
+  Cloud Console) — mismo valor en todos los entornos (a diferencia de `JWT_SECRET`). **No hace
+  falta `GOOGLE_CLIENT_SECRET`** — confirmado, ese flujo no lo usa. El Client ID de tipo
+  "Android" (necesario igual, ver abajo) no se referencia en ningún código ni variable de
+  entorno — Google lo matchea solo por nombre de paquete + SHA-1 de firma.
+- **Gestión por entorno:** local (`.env`, ya gitignorado, `.env.example` actualizado), CI
+  (deliberadamente ausente — el endpoint responde 503 sin mockear nada, HU-35 no bloquea el
+  resto del backlog), Render (`05-codigo/backend/render.yaml`, entrada `GOOGLE_CLIENT_ID` con
+  `sync: false`, mismo patrón que un secreto — el CEO la carga a mano en el dashboard cuando
+  tenga el valor real).
+- **Gateo mientras no existan credenciales reales:** el endpoint se construye igual, siempre
+  montado, pero responde 503 con un mensaje claro si `GOOGLE_CLIENT_ID` no está seteada — no
+  crashea el arranque (a diferencia de `JWT_SECRET`) ni se oculta con 404 (a diferencia de
+  `ENABLE_DEV_ROUTES`, patrón que no encaja acá porque un 404 no distingue "no configurado
+  todavía" de "no existe"). Backend/Mobile pueden construir ya, en paralelo, sin esperar al CEO.
+- **Bloqueo real, no de este ciclo pero encontrado acá:** el Client ID de tipo Android necesita
+  un nombre de paquete Android definitivo y un SHA-1 de un keystore de firma — ninguno de los
+  dos existe todavía en este proyecto (`05-codigo/mobile` nunca fijó una organización propia ni
+  generó un keystore, ver su README.md). Pendiente de Arquitecto/Mobile, no resuelto acá. El
+  Client ID Web no depende de esto y se puede crear ya.
+- **D15 (`01-requisitos/documento-funcional.md`, ya confirmada por el CEO) responde directamente
+  si hace falta Client ID iOS: no todavía** ("solo Android por ahora... iOS/App Store queda para
+  una release posterior") — se deja sin crear a propósito, no es un olvido.
+- **Ninguna credencial real se creó en este ciclo** — ningún agente de IA puede crear el proyecto
+  de Google Cloud (mismo tipo de límite que las cuentas de Render/Google Play/Apple Developer, ya
+  documentado en ciclos anteriores de DevOps).
+- **Concurrencia detectada durante este ciclo, nota operativa:** al crear la rama de este ciclo
+  (`feature/google-oauth-plan`) se encontró al agente de Backend trabajando en paralelo, en vivo,
+  sobre el mismo directorio de trabajo compartido (implementando el endpoint real de HU-35 en su
+  propia rama, `feature/google-oauth-backend`) — coincide con lo esperado
+  (`02-backlog/backlog.md`, HU-35: DevOps resuelve el plan de credenciales, Backend construye el
+  endpoint en paralelo). Para no interferir con ese proceso, este ciclo se completó en un git
+  worktree aislado en vez de en el directorio de trabajo principal — ver
+  `08-despliegue/google-oauth.md` para el detalle; se deja anotado acá por si vuelve a pasar en un
+  ciclo futuro.
