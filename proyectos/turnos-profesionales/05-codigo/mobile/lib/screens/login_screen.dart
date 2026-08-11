@@ -25,11 +25,12 @@ class _LoginScreenState extends State<LoginScreen> {
     });
     final sesion = context.read<Sesion>();
     try {
+      final email = _emailCtrl.text.trim();
       final resp = await sesion.api.post('/auth/login', {
-        'email': _emailCtrl.text.trim(),
+        'email': email,
         'password': _passCtrl.text,
       });
-      sesion.iniciarSesion(resp['token'] as String);
+      sesion.iniciarSesion(resp['token'] as String, email: email);
     } catch (e) {
       setState(() => _error = e.toString());
     } finally {

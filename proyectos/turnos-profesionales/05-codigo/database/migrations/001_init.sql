@@ -1,8 +1,9 @@
 -- Turnos Profesionales — migración inicial (Postgres)
 -- Rol: DBA · Fase 3 — Diseño (evolucionada en varios ciclos posteriores: fix CRITICAL-1 §2bis,
--- generalización N:M §2ter, D10/duracion_cita_min §2quater, y la ratificación de RLS de este
--- mismo ciclo (2026-08-09) — ver 03-arquitectura/modelo-datos.md para el detalle completo de cada
--- una y memory/proyectos/turnos-profesionales/decisiones.md para la traza de decisiones).
+-- generalización N:M §2ter, D10/duracion_cita_min §2quater, la ratificación de RLS del
+-- 2026-08-09, y HU-20/HU-21/HU-35 del 2026-08-10 (ficha de paciente extendida + historial
+-- clínico + login con Google) — ver 03-arquitectura/modelo-datos.md para el detalle completo de
+-- cada una y memory/proyectos/turnos-profesionales/decisiones.md para la traza de decisiones).
 -- Convenciones: GUID como PK, auditoría completa, soft delete donde corresponde (docs/06-modelo-datos.md §3)
 --
 -- ARCHIVO DUPLICADO A PROPÓSITO — mantener sincronizado. Este archivo es la fuente de verdad del
@@ -26,6 +27,20 @@
 -- un superusuario bypassea RLS siempre, FORCE incluido. Cierre completo = FORCE (ya aplicado acá)
 -- + separar un rol de migración de un rol de runtime sin BYPASSRLS (script y detalle exacto para
 -- DevOps en ../scripts/provisionar_roles_postgres.sql y modelo-datos.md §5bis).
+--
+-- 2026-08-10 (DBA) — HU-20 (ficha de paciente extendida), HU-21 (historial clínico: Tratamiento/
+-- Nota médica) y HU-35 (login con Google). 3 tablas nuevas (`paciente`, `tratamiento`,
+-- `nota_medica`, con RLS FORCE desde el primer commit — ver bloque dedicado más abajo), 1 columna
+-- nueva en `negocio` (`es_rubro_salud`, D11/RN15) y 3 cambios en `usuario` (`password_hash` pasa
+-- a nullable, + `google_id`, + `telefono`). Detalle completo del razonamiento junto a cada bloque
+-- y en modelo-datos.md. IMPORTANTE — a diferencia de los 3 ciclos anteriores que editaron este
+-- archivo directamente (arriba), este es el PRIMER ciclo en que ya existe un Postgres de
+-- producción real y persistente (Render) que ya corrió `runMigrations()` una vez — editar este
+-- archivo por sí solo NO alcanza para que estos cambios lleguen a esa base (el gate de
+-- `runMigrations()`, ver backend/src/db.ts, salta el script COMPLETO si la tabla `usuario` ya
+-- existe). El delta para aplicar a mano contra un ambiente ya migrado vive en
+-- `002_pacientes_historial_auth_google.sql`, mismo directorio — ver su propio header para el
+-- detalle completo de este gap operativo y cómo correrlo.
 
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
@@ -35,20 +50,120 @@ CREATE TYPE estado_pago AS ENUM ('pendiente', 'acreditado', 'rechazado', 'expira
 
 -- usuario se crea antes que negocio porque negocio_administrador (definida más abajo,
 -- reemplaza a la antigua columna negocio.admin_usuario_id) referencia usuario(id).
+--
+-- `password_hash` pasa de NOT NULL a NULLABLE + se agrega `google_id` (HU-35, 2026-08-10, login
+-- con Google). Resuelve la pregunta abierta explícita que backlog.md dejaba para Backend/DBA
+-- ("la tabla usuario no contempla un alta sin contraseña propia") — decisión formalizada también
+-- ahí, reemplazando esa pregunta por este mismo razonamiento. Alternativas evaluadas:
+-- (a) columna nullable + una columna separada "proveedor_auth" (ENUM) para distinguir cómo
+--     autentica cada usuario;
+-- (b) un hash placeholder no utilizable (una constante que bcrypt nunca produciría de una
+--     contraseña real) en vez de NULL;
+-- (c, ELEGIDA) `password_hash` nullable + `google_id` nullable/UNIQUE, SIN columna "proveedor"
+--     separada, más un CHECK que exige al menos una de las dos.
+-- Se descarta (b): un placeholder es un caso especial invisible en el esquema (nada en el DDL
+-- documenta qué constante es "falsa"; código que compare contra password_hash sin saber del
+-- placeholder puede tratarlo como hash real) — NULL es autoexplicativo ("no tiene contraseña") y
+-- el motor lo hace explícito por construcción, sin convención tácita que alguien pueda olvidar.
+-- Se descarta (a) frente a (c) por redundancia: un "proveedor_auth" separado puede
+-- desincronizarse de qué columnas están realmente pobladas (ej. quedar en 'google' con
+-- password_hash NOT NULL de antes, o viceversa) — (c) deriva el/los métodos disponibles
+-- directamente de qué columnas tienen valor, una sola fuente de verdad por hecho. Además (c) da
+-- una garantía declarativa que (a) no da gratis: el CHECK de abajo impide a nivel de base de
+-- datos que exista una fila sin NINGÚN método de login válido (cuenta huérfana, imposible de
+-- autenticar). Si más adelante hace falta saber "cómo se registró originalmente" este usuario
+-- (pregunta de negocio/analítica, no de autorización), se puede agregar sin romper nada — hoy
+-- ninguna HU lo pide.
+-- `google_id`: el claim `sub` (subject) del ID token de Google — identificador estable e
+-- inmutable de la cuenta, NO el email (mejor práctica estándar de OIDC: un email puede cambiar;
+-- `sub` no). UNIQUE (nullable-safe: Postgres permite múltiples NULL en una columna UNIQUE, así
+-- que no afecta a las cuentas sin Google) para resolver "¿ya existe una cuenta para este Google?"
+-- con una query directa por igualdad en el login.
+-- **Recomendación para Backend (no implementada acá, fuera del alcance de DBA) — CORREGIDA
+-- 2026-08-10/11 para alinearse con la revisión de Security (`07-seguridad/informe-seguridad.md`,
+-- Adenda 2026-08-10, parte A — resuelta EN PARALELO a este mismo cambio, ver también
+-- `02-backlog/backlog.md` HU-35): la primera versión de este comentario recomendaba vincular
+-- automáticamente por coincidencia de email verificado — es EXACTAMENTE la alternativa que
+-- Security evaluó y descartó ("no cierra los escenarios de email reciclado/cuenta Google
+-- comprometida/Workspace"), así que se corrige acá para no dejar una recomendación contradictoria
+-- entre este archivo y el backlog ya aprobado.**
+-- `POST /auth/login-google` (o el endpoint que se defina) debería: 1) buscar por `google_id`
+-- primero (login recurrente, ya vinculada); 2) si no hay match y NO existe ninguna cuenta con ese
+-- email todavía, crear una fila nueva (`password_hash = NULL, google_id = <sub>`) SOLO si el ID
+-- token trae `email_verified: true` — rechazar el alta si viene `false`; 3) si SÍ existe una
+-- cuenta previa por contraseña con ese email, **NUNCA vincular ni loguear automáticamente, sin
+-- importar `email_verified`** — responder pidiendo que confirme su contraseña actual en el mismo
+-- flujo, y recién tras validarla (mismo mecanismo que `/login` de contraseña) persistir
+-- `UPDATE usuario SET google_id = ...` sobre esa fila existente. Reglas completas y el porqué en
+-- `informe-seguridad.md` (adenda citada arriba). Además, `/login` de contraseña (existente,
+-- `src/routes/auth.ts`) hoy hace `bcrypt.compareSync(password ?? '', usuario.password_hash)` sin
+-- chequear que `password_hash` no sea NULL — con esta migración, una cuenta 100% Google que
+-- intente loguearse por contraseña pasaría un `NULL` como hash a bcrypt; agregar un chequeo
+-- explícito (`if (!usuario.password_hash) return 401`) antes de esa línea, para no depender de
+-- cómo maneje `bcryptjs` un hash nulo.
+--
+-- `telefono` (dato básico de Cliente, documento-funcional.md §5 glosario: "nombre, email,
+-- teléfono" — NO es un campo extendido de HU-20/D11, aplica a todos los rubros/roles por igual,
+-- a diferencia de los campos de `paciente` de más abajo). No existía como columna pese a estar
+-- documentado como dato básico desde el origen del proyecto — brecha real encontrada al modelar
+-- HU-20 (la Ficha de Paciente, mapa-pantallas.md §5.9bis, lo muestra como 1 de los 3 campos
+-- obligatorios del formulario, junto a nombre/email). Vive en `usuario` (no en `paciente`) por
+-- el mismo motivo que nombre/email: es un dato de IDENTIDAD de la persona, no de la relación
+-- profesional↔paciente — editarlo desde cualquier pantalla (Editar Perfil, Editar Paciente) lo
+-- actualiza una sola vez para toda la plataforma, igual que ya pasa hoy con nombre/email.
+-- Nullable porque las cuentas existentes no lo tienen y `POST /auth/registro-cliente` hoy no lo
+-- pide.
+-- **Nota abierta para Arquitecto/Backend (no resuelta acá, fuera del alcance de DBA):** editar
+-- nombre/email/teléfono desde "Editar Paciente" (pantalla que vive DENTRO del contexto de un
+-- negocio/profesional) escribe sobre la fila GLOBAL de `usuario`, visible para cualquier otro
+-- negocio donde esa misma persona también sea cliente — un profesional de un negocio puede así
+-- cambiar el teléfono que ve otro profesional de otro negocio totalmente distinto. Es el mismo
+-- comportamiento que ya existe hoy para nombre/email (no lo introduce esta migración) y coincide
+-- con la app de referencia, pero vale la pena dejarlo señalado: `usuario` sigue sin RLS
+-- habilitada (ver nota en `POST /auth/registro-cliente`, `src/routes/auth.ts`), así que hoy esa
+-- escritura depende enteramente de que el endpoint la autorice bien en código de aplicación, sin
+-- ninguna capa de RLS de respaldo.
 CREATE TABLE usuario (
   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   email           TEXT NOT NULL UNIQUE,
-  password_hash   TEXT NOT NULL,
+  password_hash   TEXT,
+  google_id       TEXT UNIQUE,
+  telefono        TEXT,
   nombre          TEXT NOT NULL,
   rol             rol_usuario NOT NULL,
   creado_en       TIMESTAMPTZ NOT NULL DEFAULT now(),
-  modificado_en   TIMESTAMPTZ
+  modificado_en   TIMESTAMPTZ,
+  CONSTRAINT ck_usuario_password_o_google
+    CHECK (password_hash IS NOT NULL OR google_id IS NOT NULL)
 );
 
+-- `es_rubro_salud` (D11/RN15, 2026-08-10 — HU-20). D11 (documento-funcional.md §1) dejó
+-- pendiente para DBA el "criterio determinístico" para reconocer un negocio de rubro salud,
+-- ofreciendo 2 alternativas: lista cerrada de rubros válidos, o un flag booleano dedicado ("ej.
+-- es_rubro_salud" — se usa acá literalmente el nombre que ya proponía esa decisión). Se elige el
+-- flag booleano sobre la lista cerrada porque `rubro` ya tiene datos reales como texto libre
+-- (ej. "Salud", "Entrenamiento Personal", ver capturas en mapa-pantallas.md §5.11bis) y forzar
+-- una migración a un catálogo cerrado arriesgaría invalidar valores existentes o ser demasiado
+-- rígido para rubros futuros que el CEO no anticipó — mismo criterio de "la solución más simple
+-- que resuelve el hallazgo sin sobre-diseñar" ya usado en el fix de CRITICAL-1 (§2bis).  `rubro`
+-- se mantiene sin cambios (texto libre, para mostrar/describir el negocio); `es_rubro_salud` es
+-- la señal consultable y determinística que gatea los campos extendidos de `paciente` (ver esa
+-- tabla más abajo) — Backend/Mobile deciden mostrar/ocultar esos campos con
+-- `SELECT es_rubro_salud FROM negocio WHERE id = ?`, no parseando `rubro`.
+-- DEFAULT false (no NULL) + NOT NULL: un negocio recién creado nunca debería dejar esto
+-- indefinido — el administrador lo confirma explícitamente al elegir su rubro en el alta
+-- (HU-00a), con `false` como default seguro (no expone campos de salud por accidente si todavía
+-- no se decidió explícitamente que corresponde).
+-- Pendiente operativo (documentado, no ejecutado acá — es backfill de datos, no DDL): los
+-- negocios ya existentes con `rubro` de salud en texto libre (ej. 'Salud') no van a tener
+-- `es_rubro_salud = true` automáticamente — requiere una corrección manual puntual (sugerida en
+-- 03-arquitectura/modelo-datos.md), no un patrón de texto ciego, porque requiere criterio humano
+-- sobre qué valores de `rubro` realmente califican.
 CREATE TABLE negocio (
   id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   nombre            TEXT NOT NULL,
   rubro             TEXT,
+  es_rubro_salud    BOOLEAN NOT NULL DEFAULT false,
   ubicacion         TEXT,
   creado_en         TIMESTAMPTZ NOT NULL DEFAULT now(),
   creado_por        UUID,
@@ -217,6 +332,182 @@ CREATE TABLE notificacion (
   creado_en       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX idx_notificacion_turno ON notificacion (turno_id);
+
+-- ============================================================================
+-- Ficha de paciente extendida + historial clínico (HU-20/HU-21, 2026-08-10, DBA)
+-- ============================================================================
+-- Contexto: HU-20 pide campos ampliados de "ficha de paciente" (fecha de nacimiento, género,
+-- dirección, alergias, contacto de emergencia, notas médicas, estado activo/inactivo) y HU-21
+-- pide 2 entidades nuevas (Tratamiento, Nota médica) — ninguna de las dos existía en el modelo
+-- hasta este ciclo (documento-funcional.md §5, glosario, ya las listaba como "no existe hoy en
+-- el modelo de datos — a modelar por DBA").
+--
+-- Decisión de diseño (la pregunta central de este ciclo, más allá de "qué columnas"): ¿dónde
+-- viven estos datos? Se evaluaron 2 alternativas obvias antes de decidir una tercera:
+-- (a) columnas nuevas directamente en `usuario` (así como ya viven nombre/email) — tratar al
+--     paciente como una extensión 1:1 de la identidad global del cliente;
+-- (b) una tabla `paciente` nueva, 1:1 con `usuario` (mismo dato, solo separada para no ensuciar
+--     `usuario` con columnas nullable de un solo rol) — la formulación literal de la pregunta
+--     que motivó este ciclo (columnas en "cliente" vs. tabla "paciente" 1:1 con "cliente");
+-- (c, ELEGIDA) una tabla `paciente` nueva, pero NO 1:1 con `usuario` — 1 fila por cada
+--     combinación (negocio_id, profesional_id, cliente_id).
+-- Se descartan (a) y (b) por el MISMO motivo, verificado con evidencia textual explícita, no por
+-- preferencia estilística: RN7/RN13/D3 (documento-funcional.md §3) exigen que el historial de
+-- visitas Y los tratamientos/notas médicas sean "visible[s] únicamente para el profesional que
+-- lo atendió/registró... No se comparte entre profesionales del mismo negocio" — y HU-19
+-- (backlog.md) extiende EXPLÍCITAMENTE ese mismo criterio a la ficha completa, no solo al
+-- historial/notas: "guardar el estado [activo/inactivo] como un atributo propio del paciente
+-- (SCOPE POR PROFESIONAL, mismo criterio de privacidad que el resto de LA FICHA, RN7/D3)". Y
+-- HU-22 (import/export) confirma que la ficha completa (básica + extendida de HU-20) se exporta
+-- "solo su propia cartera" bajo el mismo RN7/D3. Es decir: la ficha (no solo tratamientos y
+-- notas) es un dato que cada profesional lleva POR SU CUENTA de cada paciente — dos
+-- profesionales del MISMO negocio atendiendo al MISMO cliente llevan fichas independientes, que
+-- pueden divergir (ej. uno marca a María como "inactiva" en su cartera; el otro no). Una columna
+-- en `usuario` (a) o una tabla 1:1 con `usuario` (b) solo puede guardar UN valor de cada campo
+-- por persona — estructuralmente incompatible con "dos profesionales, dos fichas". `negocio_id`
+-- se suma además de `profesional_id` (no alcanzaría con profesional_id solo) por D1/RN9: un
+-- mismo profesional puede pertenecer a 2+ negocios (§2ter) y el dato de un cliente "dentro de un
+-- negocio" debe aislarse por negocio también — sin esto, el mismo profesional atendiendo al
+-- mismo cliente en 2 consultorios distintos compartiría una única ficha entre ambos negocios,
+-- exactamente el cruce que D1/RN9 prohíbe para cualquier otro dato de cliente.
+--
+-- Nota para Backend: esto es DISTINTO de lo que preguntaba literalmente la consigna de este
+-- ciclo ("¿columnas en `cliente` o tabla `paciente` 1:1 con `cliente`?") — no existe ninguna
+-- tabla `cliente` en este esquema (el rol "cliente" es un valor de `usuario.rol`; ver
+-- `turno.cliente_id UUID REFERENCES usuario(id)` como precedente de esa misma convención), y la
+-- cardinalidad real que exigen RN7/RN13/D3/HU-19/HU-22 no es 1:1 sino 1 fila por
+-- (negocio_id, profesional_id, cliente_id) — más granular que lo que planteaba la pregunta
+-- original. Ver 03-arquitectura/modelo-datos.md para el mismo razonamiento con más contexto.
+--
+-- `paciente` NO se limita a negocios de rubro salud (a diferencia de sus columnas extendidas, ver
+-- abajo): HU-19 (estado activo/inactivo, "Gestión de Pacientes") y HU-10/HU-11 (listado de
+-- clientes + historial) NO están condicionadas por rubro — son la base de "mi cartera" para
+-- CUALQUIER profesional. Por eso `paciente` existe en general (1 fila por cada cliente que un
+-- profesional atendió o agregó), y son específicamente las columnas de salud (fecha_nacimiento en
+-- adelante) las que quedan vacías/sin usar para negocios que no son de rubro salud (D11/RN15) —
+-- gateado por `negocio.es_rubro_salud` a nivel de aplicación (Backend/Mobile deciden mostrar u
+-- ocultar esos campos consultando esa columna; no es un CHECK de base de datos porque Postgres no
+-- puede validar contra una columna de OTRA tabla sin un trigger — mismo criterio ya usado en
+-- §2ter para no implementar como constraint la validación de integridad profesional↔negocio, ahí
+-- documentada como recomendación en vez de trigger).
+--
+-- Recomendación para Backend sobre CUÁNDO se crea la fila `paciente`: no implementado acá (fuera
+-- de alcance de DBA) — 2 opciones razonables, ninguna cerrada: (i) al vuelo, la primera vez que
+-- el profesional abre/edita la ficha de un cliente (lazy); (ii) automáticamente cuando se crea el
+-- primer turno entre ese profesional y ese cliente dentro de ese negocio (mismo momento en que
+-- HU-23/CU6 ya resuelven "el paciente ya existe en su cartera (o se da de alta en el mismo
+-- flujo)"). El UNIQUE de abajo permite un INSERT ... ON CONFLICT (negocio_id, profesional_id,
+-- cliente_id) DO NOTHING para cualquiera de las dos sin duplicar filas.
+CREATE TABLE paciente (
+  id                            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  negocio_id                    UUID NOT NULL REFERENCES negocio(id),
+  profesional_id                UUID NOT NULL REFERENCES profesional(id),
+  cliente_id                    UUID NOT NULL REFERENCES usuario(id),
+  -- Campos extendidos (HU-20/D7/RN12) — solo relevantes/mostrados para negocios de rubro salud
+  -- (D11/RN15, negocio.es_rubro_salud = true), pero SIN CHECK que lo fuerce (ver nota arriba):
+  -- gate de aplicación, no de base de datos. Todos nullable — "todos los campos nuevos son
+  -- opcionales salvo los que ya son requeridos hoy" (HU-20, criterio de aceptación).
+  fecha_nacimiento              DATE,
+  -- TEXT libre, sin CHECK/ENUM a propósito: el wireframe (mapa-pantallas.md §5.9) muestra un
+  -- dropdown ("Prefiero no decir" entre las opciones) pero es contenido de UI, no una regla de
+  -- negocio que dependa de valores específicos (a diferencia de rol_usuario/estado_turno, que sí
+  -- son ENUM porque controlan lógica real) — dejarlo TEXT evita que agregar/cambiar una opción
+  -- del dropdown alguna vez requiera una migración de esquema.
+  genero                        TEXT,
+  direccion                     TEXT,
+  contacto_emergencia_nombre    TEXT,
+  contacto_emergencia_telefono  TEXT,
+  -- Mismo criterio que `genero`: TEXT libre, el dropdown ("Familiar", etc.) es UI, no negocio.
+  contacto_emergencia_relacion  TEXT,
+  alergias                      TEXT,
+  notas_medicas_generales       TEXT,
+  -- Campo NO extendido/NO gateado por rubro (D20/RN20/HU-19) — activo/inactivo aplica a
+  -- cualquier paciente de cualquier rubro. BOOLEAN (no un `estado` TEXT/ENUM), mismo criterio ya
+  -- usado en `negocio_profesional.activo`. Manual únicamente (RN20): sin trigger ni job que lo
+  -- recalcule por antigüedad de la última visita — el profesional lo cambia a mano.
+  activo                        BOOLEAN NOT NULL DEFAULT true,
+  creado_en                     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  creado_por                    UUID,
+  modificado_en                 TIMESTAMPTZ,
+  modificado_por                UUID,
+  -- Soft delete (no está en la lista original Negocio/Profesional/Servicio del estándar de
+  -- empresa, docs/06-modelo-datos.md §3, pero por el MISMO motivo que ahí: "no romper el
+  -- historial... si se da de baja" — acá, no romper `tratamiento`/`nota_medica`, que referencian
+  -- `paciente_id`, si un profesional necesita retirar una ficha creada por error/duplicada).
+  eliminado_en                  TIMESTAMPTZ,
+  -- Un profesional lleva UNA sola ficha por cliente, POR NEGOCIO (ver razonamiento arriba) — el
+  -- mismo trío no puede repetirse. Habilita además un INSERT ... ON CONFLICT DO NOTHING/UPDATE
+  -- para el alta perezosa/automática que se recomienda a Backend más arriba.
+  CONSTRAINT uq_paciente_negocio_profesional_cliente UNIQUE (negocio_id, profesional_id, cliente_id)
+);
+-- No hace falta un índice aparte sobre (negocio_id) ni sobre (negocio_id, profesional_id): la
+-- UNIQUE de arriba ya es, en sí misma, un índice cuyo prefijo izquierdo cubre exactamente esas 2
+-- consultas (ej. "mis pacientes en el negocio activo" = WHERE negocio_id = ? AND profesional_id
+-- = ?, la consulta dominante bajo el patrón "vista activa" de auth.ts/modelo-datos.md §2ter). Sí
+-- hace falta un índice propio para el sentido inverso (cliente_id no es prefijo de esa UNIQUE):
+CREATE INDEX idx_paciente_cliente ON paciente (cliente_id);
+
+-- Tratamiento (HU-21/D8/RN13) — "proceso de seguimiento asociado a un paciente por un
+-- profesional, independiente de un turno puntual" (documento-funcional.md §5). Referencia
+-- ÚNICAMENTE `paciente_id` (no negocio_id/profesional_id propios, a diferencia de `turno`): a
+-- diferencia de `turno` (que puede resolver su negocio_id por más de un camino posible, ver
+-- razonamiento de §2ter sobre servicio.negocio_id), acá el ÚNICO padre posible es `paciente`, ya
+-- NOT NULL y sin ambigüedad — repetir negocio_id/profesional_id acá sería una redundancia con
+-- una única fuente de verdad (la de `paciente`) que podría desincronizarse; se resuelve por JOIN
+-- en la policy de RLS de más abajo, mismo criterio ya aceptado en este esquema para
+-- disponibilidad/excepcion_disponibilidad/profesional_servicio (ver "pendiente para una próxima
+-- iteración" en la sección de RLS original, más abajo).
+CREATE TABLE tratamiento (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  paciente_id     UUID NOT NULL REFERENCES paciente(id),
+  descripcion     TEXT NOT NULL,
+  fecha_inicio    DATE NOT NULL,
+  -- Nullable: un tratamiento puede seguir abierto/en curso (sin evidencia de wireframe de un
+  -- campo de fin, pero "proceso de seguimiento" del glosario admite duración — bajo riesgo
+  -- agregarlo nullable desde ahora en vez de necesitar otra migración cuando se pida).
+  fecha_fin       DATE,
+  creado_en       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  creado_por      UUID,
+  modificado_en   TIMESTAMPTZ,
+  modificado_por  UUID
+);
+CREATE INDEX idx_tratamiento_paciente ON tratamiento (paciente_id);
+
+-- Nota médica (HU-21/D8/RN13) — "anotación clínica/de seguimiento... independiente de un turno
+-- puntual" (documento-funcional.md §5). Mismo criterio de referencia que `tratamiento` (solo
+-- paciente_id, ver comentario de arriba).
+CREATE TABLE nota_medica (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  paciente_id     UUID NOT NULL REFERENCES paciente(id),
+  fecha           DATE NOT NULL DEFAULT CURRENT_DATE,
+  texto           TEXT NOT NULL,
+  creado_en       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  creado_por      UUID,
+  modificado_en   TIMESTAMPTZ,
+  modificado_por  UUID
+);
+CREATE INDEX idx_nota_medica_paciente ON nota_medica (paciente_id);
+
+-- Recomendación para Backend — cómo resolver los 4 stat cards de HU-21 (mapa-pantallas.md
+-- §5.10): "Citas totales"/"Completadas" NO salen de `paciente`/`tratamiento`/`nota_medica` —
+-- salen de `turno`, igual que el historial de visitas ya lo hace hoy (RN7):
+--   SELECT count(*) FROM turno WHERE cliente_id = ? AND profesional_id = ?                  -- Citas totales
+--   SELECT count(*) FROM turno
+--     WHERE cliente_id = ? AND profesional_id = ? AND estado = 'confirmado' AND fin < now()  -- Completadas
+-- "Completadas" se deriva así (confirmado + ya pasado) porque `estado_turno` (ver ENUM al
+-- principio de este archivo) NO tiene un valor 'atendido'/'completado' propio — un turno
+-- confirmado se queda en 'confirmado' para siempre, incluso después de ocurrir (el comentario de
+-- "Historial de visitas" en modelo-datos.md que menciona un estado "atendido" es conceptual, no
+-- un valor real del ENUM — confirmado al revisar `CREATE TYPE estado_turno` más arriba). Agregar
+-- un valor nuevo al ENUM (ej. 'completado', con o sin un job que lo transicione automáticamente
+-- al pasar `fin`) sería la alternativa más prolija a mediano plazo, pero es un cambio de
+-- comportamiento sobre la máquina de estados de `turno` (documento-arquitectura.md §3, ya
+-- aprobada) — fuera del alcance de este ciclo (HU-21 pide modelar Tratamiento/Nota médica, no
+-- rediseñar el estado de turno); se documenta acá como recomendación para un ciclo futuro, no se
+-- implementa. "Tratamientos"/"Notas médicas" sí son conteos directos y triviales sobre las
+-- tablas nuevas:
+--   SELECT count(*) FROM tratamiento WHERE paciente_id = ?
+--   SELECT count(*) FROM nota_medica WHERE paciente_id = ?
 
 -- ============================================================================
 -- Row Level Security — defensa en profundidad además de los checks de la API
@@ -615,6 +906,94 @@ CREATE POLICY turno_acceso_job_expiracion ON turno
     current_setting('app.job_sistema', true) = 'true'
   ) WITH CHECK (
     current_setting('app.job_sistema', true) = 'true'
+  );
+
+-- ============================================================================
+-- RLS de paciente/tratamiento/nota_medica (HU-20/HU-21, 2026-08-10, DBA) — aplicando desde el
+-- primer commit la lección de §5bis de este mismo archivo: CUALQUIER tabla nueva lleva FORCE ROW
+-- LEVEL SECURITY además de ENABLE, no solo ENABLE (el gap de ownership que dejó toda la RLS de
+-- este proyecto sin efecto real hasta 2026-08-09 aplicaría igual, desde el día 1, a cualquier
+-- tabla nueva que se olvide de FORCE).
+-- ============================================================================
+--
+-- A diferencia de `turno`/`servicio` (visibles para CUALQUIER staff del negocio — administrador
+-- o cualquier profesional activo), acá el criterio es más estricto: SOLO el profesional dueño de
+-- la fila (RN7/RN13/D3 — "visible únicamente para el profesional que lo atendió/registró... No
+-- se comparte entre profesionales del mismo negocio"). Ni el administrador del negocio ni otro
+-- profesional del mismo negocio pasan esta policy — coincide con el default ya documentado en
+-- documento-funcional.md §6 ("Alcance de permisos del administrador... A7/D3 dejan al
+-- administrador sin acceso al historial por defecto"), que ese documento deja como pregunta
+-- menor todavía abierta, NO cerrada acá: si en un próximo ciclo el CEO confirma que el
+-- administrador SÍ debe tener acceso, agregar una policy adicional (OR EXISTS contra
+-- negocio_administrador, mismo patrón que `turno`) es aditivo y no rompe esta.
+--
+-- Tampoco hay policy para que el propio cliente/paciente vea su ficha/tratamientos/notas: ninguna
+-- HU de este ciclo pide una vista de ese lado (Mobile, modo Cliente) — se puede agregar sin
+-- romper nada si se pide más adelante.
+ALTER TABLE paciente ENABLE ROW LEVEL SECURITY;
+ALTER TABLE paciente FORCE ROW LEVEL SECURITY; -- ver nota junto a `profesional`, más arriba en este archivo
+CREATE POLICY paciente_acceso_propio_profesional ON paciente
+  USING (
+    EXISTS (
+      SELECT 1 FROM negocio_profesional np
+      JOIN profesional p ON p.id = np.profesional_id
+      WHERE np.negocio_id = paciente.negocio_id
+        AND np.profesional_id = paciente.profesional_id
+        AND p.usuario_id = NULLIF(current_setting('app.usuario_id', true), '')::uuid
+    )
+  )
+  WITH CHECK (
+    EXISTS (
+      SELECT 1 FROM negocio_profesional np
+      JOIN profesional p ON p.id = np.profesional_id
+      WHERE np.negocio_id = paciente.negocio_id
+        AND np.profesional_id = paciente.profesional_id
+        AND p.usuario_id = NULLIF(current_setting('app.usuario_id', true), '')::uuid
+    )
+  );
+
+-- tratamiento/nota_medica: NO repiten negocio_id/profesional_id (ver comentario junto a su
+-- CREATE TABLE) — la policy se ancla en `paciente` vía JOIN, reusando exactamente el mismo
+-- criterio de dueño único (profesional) que la policy de arriba, para que nunca puedan quedar
+-- desincronizadas entre sí (no hay 2 columnas "profesional_id" que puedan decir cosas distintas).
+ALTER TABLE tratamiento ENABLE ROW LEVEL SECURITY;
+ALTER TABLE tratamiento FORCE ROW LEVEL SECURITY; -- ver nota junto a `profesional`, más arriba en este archivo
+CREATE POLICY tratamiento_acceso_via_paciente ON tratamiento
+  USING (
+    EXISTS (
+      SELECT 1 FROM paciente pa
+      JOIN profesional p ON p.id = pa.profesional_id
+      WHERE pa.id = tratamiento.paciente_id
+        AND p.usuario_id = NULLIF(current_setting('app.usuario_id', true), '')::uuid
+    )
+  )
+  WITH CHECK (
+    EXISTS (
+      SELECT 1 FROM paciente pa
+      JOIN profesional p ON p.id = pa.profesional_id
+      WHERE pa.id = tratamiento.paciente_id
+        AND p.usuario_id = NULLIF(current_setting('app.usuario_id', true), '')::uuid
+    )
+  );
+
+ALTER TABLE nota_medica ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nota_medica FORCE ROW LEVEL SECURITY; -- ver nota junto a `profesional`, más arriba en este archivo
+CREATE POLICY nota_medica_acceso_via_paciente ON nota_medica
+  USING (
+    EXISTS (
+      SELECT 1 FROM paciente pa
+      JOIN profesional p ON p.id = pa.profesional_id
+      WHERE pa.id = nota_medica.paciente_id
+        AND p.usuario_id = NULLIF(current_setting('app.usuario_id', true), '')::uuid
+    )
+  )
+  WITH CHECK (
+    EXISTS (
+      SELECT 1 FROM paciente pa
+      JOIN profesional p ON p.id = pa.profesional_id
+      WHERE pa.id = nota_medica.paciente_id
+        AND p.usuario_id = NULLIF(current_setting('app.usuario_id', true), '')::uuid
+    )
   );
 
 -- ============================================================================

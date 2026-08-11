@@ -18,11 +18,20 @@ class Sesion extends ChangeNotifier {
   String? profesionalId;
   String? negocioId;
 
+  /// Email de la sesión activa — NO viaja en el JWT (ver `auth.ts`: `signToken` solo pone
+  /// `sub`/`rol`/`negocio_id`/`profesional_id`), así que no se puede decodificar del token como
+  /// el resto de estos campos. Se recibe como parámetro opcional de [iniciarSesion] con el mismo
+  /// valor que el usuario ya tipeó para loguearse (`login_screen.dart`) — precisa y no inventada,
+  /// a diferencia de un `nombre` que la app no tiene forma de conocer todavía (mismo motivo por
+  /// el que `dashboard_screen.dart` evita fabricar uno, ver su comentario "¡Hola!").
+  String? email;
+
   bool get autenticado => token != null;
 
-  void iniciarSesion(String token) {
+  void iniciarSesion(String token, {String? email}) {
     final claims = _decodificarClaims(token);
     this.token = token;
+    this.email = email;
     rol = Rol.values.firstWhere((r) => r.name == claims['rol']);
     profesionalId = claims['profesional_id'] as String?;
     negocioId = claims['negocio_id'] as String?;
@@ -32,6 +41,7 @@ class Sesion extends ChangeNotifier {
 
   void cerrarSesion() {
     token = null;
+    email = null;
     rol = null;
     profesionalId = null;
     negocioId = null;
