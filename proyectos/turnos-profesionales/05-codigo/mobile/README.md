@@ -84,6 +84,28 @@ Novedades:
   el alcance de este ciclo, pero no se puede llegar a ellas navegando la app; candidatas a
   reemplazo cuando se construya "Gestión de Pacientes" (HU-10+HU-19) con el lenguaje visual nuevo.
 
+## 🆕 Bottom nav del lado Cliente (`ClienteShell`) — sin correr por CI todavía
+
+El lado Cliente nunca tuvo navegación persistente (cada pantalla era suelta, sin forma de moverse
+entre secciones salvo el flujo lineal de reserva) — gap detectado probando la app en vivo, no
+parte del rediseño "Turnario Pro" original (que fue exclusivamente del lado Profesional). Ya
+estaba diseñado en `04-diseno/mapa-pantallas.md` §3, solo faltaba construirlo.
+
+- `lib/screens/cliente/cliente_shell.dart`: nuevo punto de entrada del rol Cliente en `main.dart`
+  (antes era `BuscarNegociosScreen` directo), mismo patrón exacto que `profesional_shell.dart`
+  (`IndexedStack` + `AppBottomNavigationBar`, 4 ítems: Buscar, Mis Turnos, Notificaciones,
+  Configuración). Buscar (HU-00b) y Mis Turnos (HU-12/HU-13) son las pantallas ya existentes sin
+  cambios de contenido; Notificaciones y Configuración son `ProximamenteScreen` (sin backend
+  todavía — Notificaciones no tiene endpoint, Configuración de Cliente no fue pedida en esta
+  ronda).
+- `ProximamenteScreen` se movió de `lib/screens/profesional/` a `lib/widgets/` (ahora la usan
+  ambos modos) y se agregó al barrel `lib/widgets/widgets.dart`.
+- `BuscarNegociosScreen` perdió el ícono de atajo a "Mis turnos" de su `AppBar` (quedó redundante
+  con la pestaña nueva, y tapaba la bottom nav al empujar una pantalla completa por encima del
+  shell). El flujo de reserva (Detalle de Negocio → Elegir Profesional → Horarios Disponibles →
+  Confirmar Turno) sigue siendo un stack normal empujado por encima del shell, sin cambios —
+  confirmado que ninguna de esas pantallas asume un `Navigator.pop()` a una pantalla específica.
+
 ### Gaps de backend documentados en el propio código (no inventados, no silenciados)
 
 - El backend (`estado_turno` en `migrations/001_init.sql`) no tiene un estado "completado" ni
@@ -182,13 +204,16 @@ flutter run -d chrome --web-hostname localhost --web-port 7357 \
 
 ## Pantallas implementadas (ver mapa completo en `04-diseno/mapa-pantallas.md`)
 
-**Cliente:** Login (+ Google, HU-35, solo Web — ver sección propia arriba), Buscar Negocios
-(HU-00b), Detalle de Negocio/Servicios (HU-07), Elegir Profesional (HU-08), Horarios Disponibles
-(HU-09), Confirmar Turno (HU-09b), Mis Turnos (HU-12), Reprogramar Turno (HU-13). Sin cambios de
-diseño visual todavía más allá del botón de Google (siguen con el `ThemeData` genérico anterior a
-este ciclo — el rediseño de esta iteración fue exclusivamente del lado Profesional, según lo
-pedido). No incluye "Crear Cuenta" ni "¿Olvidaste tu contraseña?" — `mapa-pantallas.md` §5.17
-documenta que esas dos partes no se capturaron, quedan fuera de HU-35.
+**Cliente:** Login (+ Google, HU-35, solo Web — ver sección propia arriba), `ClienteShell` (bottom
+nav de 4 ítems, ver sección de arriba), Buscar Negocios (HU-00b), Detalle de Negocio/Servicios
+(HU-07), Elegir Profesional (HU-08), Horarios Disponibles (HU-09), Confirmar Turno (HU-09b), Mis
+Turnos (HU-12), Reprogramar Turno (HU-13). Las pantallas del flujo de reserva y Mis Turnos siguen
+con el `ThemeData` genérico anterior a este ciclo (el rediseño visual "Turnario Pro" fue
+exclusivamente del lado Profesional, según lo pedido); solo el `ClienteShell`/`AppBottomNavigationBar`
+y el botón de Google usan piezas del sistema de diseño nuevo. No incluye "Crear Cuenta" ni
+"¿Olvidaste tu contraseña?" — `mapa-pantallas.md` §5.17 documenta que esas dos partes no se
+capturaron, quedan fuera de HU-35. Notificaciones y Configuración (Cliente): placeholders
+"Próximamente".
 
 **Profesional:** Dashboard (HU-27, nueva), Gestión de Horarios (HU-05 + HU-16 + HU-18, reemplaza a
 "Definir Disponibilidad"), Agenda semanal (HU-06, reubicada), Excepciones (HU-15), Mis Clientes
