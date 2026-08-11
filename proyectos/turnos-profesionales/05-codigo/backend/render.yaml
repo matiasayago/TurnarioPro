@@ -129,6 +129,24 @@ services:
       - key: ENABLE_DEV_ROUTES
         value: "false"
 
+      # GOOGLE_CLIENT_ID — login con Google (HU-35). Instructivo completo (incluido el paso a
+      # paso para el CEO en Google Cloud Console) en ../../08-despliegue/google-oauth.md.
+      # "sync: false" (a diferencia de JWT_SECRET, que usa "generateValue", y de DATABASE_URL,
+      # que usa "fromDatabase"): Render no puede generar ni resolver ningún valor para esta
+      # clave por su cuenta — un Client ID de OAuth lo emite Google, no Render — así que queda
+      # declarada acá sin valor, pendiente de cargarse A MANO desde el dashboard del servicio
+      # una vez que el CEO tenga el Client ID real. No es secreta en el mismo sentido que
+      # JWT_SECRET (un Client ID de OAuth no es confidencial por diseño), pero tampoco
+      # corresponde escribir acá un valor real todavía (no existe uno) ni un placeholder que
+      # alguien pudiera desplegar por error — "sync: false" deja la carga explícita en manos de
+      # quien tenga el valor real, mismo criterio de higiene que el resto de este archivo.
+      # Mientras esta variable no esté cargada, el endpoint de login con Google responde 503
+      # (ver ../../08-despliegue/google-oauth.md §5, criterio "opt-in explícito, no crashear
+      # todo" — mismo espíritu que ENABLE_DEV_ROUTES arriba, adaptado a un error claro en vez de
+      # una ruta invisible) — el resto del servicio sigue funcionando con normalidad sin esto.
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+
       # No se listan acá EXPIRACION_PAGO_MIN / VENTANA_CANCELACION_MIN / RATE_LIMIT_* —
       # tienen defaults de aplicación ya pensados para producción (15 min, 120 min, 10
       # intentos/15 min, ver ../../08-despliegue/README.md §3). Agregarlas acá (o a mano en
