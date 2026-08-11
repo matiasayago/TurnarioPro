@@ -9,7 +9,7 @@ import 'package:flutter/material.dart';
 ///
 /// Nota de alcance: el control visual para elegir el modo (Configuración → Tema) todavía no se
 /// construye en este ciclo — la pantalla de Configuración del Profesional queda como placeholder
-/// (ver `screens/profesional/proximamente_screen.dart`). Esta clase deja la infraestructura
+/// (ver `widgets/proximamente_screen.dart`). Esta clase deja la infraestructura
 /// lista para que ese control futuro solo tenga que llamar a `setThemeMode`.
 class ThemeController extends ChangeNotifier {
   ThemeMode _mode = ThemeMode.system;

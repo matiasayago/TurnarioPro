@@ -7,7 +7,7 @@ import 'state/sesion.dart';
 import 'state/theme_controller.dart';
 import 'theme/app_theme.dart';
 import 'screens/login_screen.dart';
-import 'screens/cliente/buscar_negocios_screen.dart';
+import 'screens/cliente/cliente_shell.dart';
 import 'screens/profesional/profesional_shell.dart';
 
 void main() async {
@@ -59,7 +59,7 @@ class _Router extends StatelessWidget {
     if (!sesion.autenticado) return const LoginScreen();
     switch (sesion.rol) {
       case Rol.cliente:
-        return const BuscarNegociosScreen();
+        return const ClienteShell();
       case Rol.profesional:
         return const ProfesionalShell();
       case Rol.administrador:

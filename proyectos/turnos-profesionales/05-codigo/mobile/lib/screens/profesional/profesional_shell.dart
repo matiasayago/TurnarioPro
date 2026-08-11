@@ -5,7 +5,6 @@ import 'configuracion_screen.dart';
 import 'dashboard_screen.dart';
 import 'gestion_horarios_screen.dart';
 import 'gestion_pacientes_screen.dart';
-import 'proximamente_screen.dart';
 
 // Índices de pestaña del bottom nav de Profesional (orden real, ver `screens` en build() más
 // abajo) — con nombre para no repetir números mágicos al cambiar de pestaña desde
@@ -28,8 +27,8 @@ const int _tabPacientes = 2;
 /// Configuración el menú real (§5.11bis) — a propósito no se reutiliza `MisClientesScreen`
 /// (versión anterior y más simple de "Mis Clientes"/HU-10, todavía en `mis_clientes_screen.dart`)
 /// para no mezclar el lenguaje visual viejo con el nuevo dentro del mismo shell. WhatsApp y
-/// Notificaciones siguen como placeholders (ver `proximamente_screen.dart`) — fuera de esta
-/// ronda.
+/// Notificaciones siguen como placeholders (ver `widgets/proximamente_screen.dart`) — fuera de
+/// esta ronda.
 class ProfesionalShell extends StatefulWidget {
   const ProfesionalShell({super.key});
 
