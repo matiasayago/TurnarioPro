@@ -33,6 +33,7 @@ class MonthCalendarPicker extends StatelessWidget {
     required this.onDayTap,
     this.datesWithSchedule = const {},
     this.showLegend = true,
+    this.allowPastSelection = false,
   });
 
   /// Cualquier fecha dentro del mes visible — se usan solo `year`/`month`, el día se ignora.
@@ -48,6 +49,13 @@ class MonthCalendarPicker extends StatelessWidget {
   /// Fechas que ya tienen un horario configurado (badge de reloj superpuesto, §7.5/§7.5bis).
   final Set<DateTime> datesWithSchedule;
   final bool showLegend;
+
+  /// Si es `true`, las fechas pasadas se pueden elegir igual (se tratan como `elegible`, sin el
+  /// estilo atenuado de `pasada`). Este widget se diseñó originalmente para disponibilidad
+  /// (siempre fechas futuras, ver Gestión de Horarios) — `allowPastSelection` lo habilita también
+  /// para elegir una fecha pasada real, ej. fecha de nacimiento (Ficha de Paciente, HU-20). Por
+  /// defecto `false`: no cambia el comportamiento ya existente de ningún llamador actual.
+  final bool allowPastSelection;
 
   /// Normaliza una fecha a medianoche local — usar siempre antes de agregar a `selectedDates`
   /// o comparar, para que la igualdad de `DateTime` funcione de forma consistente.
@@ -114,6 +122,7 @@ class MonthCalendarPicker extends StatelessWidget {
                 today: today,
                 selected: selectedDates.contains(DateTime(month.year, month.month, day)),
                 hasSchedule: datesWithSchedule.contains(DateTime(month.year, month.month, day)),
+                allowPastSelection: allowPastSelection,
                 onTap: onDayTap,
               ),
           ],
@@ -143,18 +152,20 @@ class _DayCell extends StatelessWidget {
     required this.selected,
     required this.hasSchedule,
     required this.onTap,
+    this.allowPastSelection = false,
   });
 
   final DateTime date;
   final DateTime today;
   final bool selected;
   final bool hasSchedule;
+  final bool allowPastSelection;
   final ValueChanged<DateTime> onTap;
 
   @override
   Widget build(BuildContext context) {
     final colors = AppColors.of(context);
-    final isPast = date.isBefore(today);
+    final isPast = date.isBefore(today) && !allowPastSelection;
     final isToday = date == today;
 
     final CalendarDayState state = selected

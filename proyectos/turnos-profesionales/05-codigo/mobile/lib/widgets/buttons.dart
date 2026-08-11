@@ -198,6 +198,45 @@ class SuccessButton extends StatelessWidget {
   }
 }
 
+/// §7.1bis — `DestructiveButton`, corregido contra capturas reales: fondo `danger` sólido
+/// (NO outline, a diferencia de lo que especulaba §7.1 sin evidencia todavía) + texto blanco
+/// bold, ancho completo. Uso confirmado: acciones de alto impacto como "Cerrar Sesión" (§5.11bis)
+/// — no para "eliminar" una fila de lista, donde una variante outline podría ser más apropiada
+/// (sin evidencia directa todavía, ver esa nota en sistema-diseno.md §7.1bis).
+class DestructiveButton extends StatelessWidget {
+  const DestructiveButton({
+    super.key,
+    required this.label,
+    this.onPressed,
+    this.icon,
+    this.radiusVariant = AppButtonRadius.pill,
+    this.expand = true,
+    this.loading = false,
+  });
+
+  final String label;
+  final VoidCallback? onPressed;
+  final IconData? icon;
+  final AppButtonRadius radiusVariant;
+  final bool expand;
+  final bool loading;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = AppColors.of(context);
+    return _SolidAppButton(
+      label: label,
+      icon: icon,
+      onPressed: onPressed,
+      loading: loading,
+      background: colors.danger.base,
+      foreground: Colors.white,
+      radiusVariant: radiusVariant,
+      expand: expand,
+    );
+  }
+}
+
 /// §7.1 — "Cancelar" en modales, acciones secundarias no destacadas. Píldora, fondo
 /// transparente, borde `border` ~1.5dp, texto `textPrimary`.
 class OutlineButton extends StatelessWidget {

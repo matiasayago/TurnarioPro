@@ -35,6 +35,24 @@ export function createApp() {
   app.use(helmet());
   app.use(express.json());
 
+  // Dev-only: un cliente web servido desde otro origen (p. ej. `flutter run -d web-server`, en
+  // un puerto distinto al de esta API) necesita cabeceras CORS o el navegador bloquea la
+  // respuesta aunque ambos corran en localhost. Mismo flag que ya gatea `/dev` y el preview
+  // HTML (ENABLE_DEV_ROUTES) — en Render queda explícitamente en "false" (ver render.yaml), así
+  // que esto nunca se activa en producción salvo opt-in explícito.
+  if (process.env.ENABLE_DEV_ROUTES === 'true') {
+    app.use((req, res, next) => {
+      res.header('Access-Control-Allow-Origin', '*');
+      res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+      res.header('Access-Control-Allow-Methods', 'GET,POST,PATCH,PUT,DELETE,OPTIONS');
+      if (req.method === 'OPTIONS') {
+        res.sendStatus(204);
+        return;
+      }
+      next();
+    });
+  }
+
   app.get('/health', (_req, res) => res.json({ ok: true }));
 
   app.use('/auth', authRouter);

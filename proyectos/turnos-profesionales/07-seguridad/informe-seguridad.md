@@ -416,3 +416,191 @@ recordatorios para fases futuras (frontend web, integracion real de pagos).
 Ningun hallazgo de este informe fue remediado por Security -- se reporta para decision del
 Director General IA sobre como y cuando priorizar la correccion, conforme a las reglas de
 actuacion del rol.
+
+---
+
+## Adenda (2026-08-10) -- Dos decisiones puntuales pre-implementacion: HU-35 y HU-20
+
+**Alcance de esta adenda, distinto del resto de este informe:** el cuerpo del documento de
+arriba es una revision de codigo ya escrito (Fase 5, 2026-08-05). Aca se documentan dos
+decisiones de diseno de seguridad pedidas puntualmente por UX/UI y Product Manager durante el
+diseno de HU-35 (login con Google, `02-backlog/backlog.md`) y HU-20 (datos de salud en la Ficha
+de Paciente, `02-backlog/backlog.md` + `04-diseno/mapa-pantallas.md` parrafos 5.9/6) -- **antes**
+de que exista implementacion. No es una auditoria OWASP completa del proyecto. El detalle
+operativo de cada decision (la regla que Backend/DBA deben implementar) tambien quedo reflejado
+directamente en `02-backlog/backlog.md`, junto a cada historia; aca se documenta ademas el
+razonamiento completo y las alternativas descartadas.
+
+| Decision | Bloquea diseno/desarrollo (Fases 3-5)? | Bloquea produccion con datos/vinculacion reales? |
+|---|---|---|
+| HU-35 -- nunca vincular/loguear solo por coincidencia de email | No | Si, si se implementara distinto de lo decidido aca (ej. auto-vinculacion silenciosa) |
+| HU-20 -- RLS por negocio no alcanza solo; falta scope por profesional + auditoria de accesos | No | Si (scope por profesional + auditoria) -- complementa, no reemplaza, el gate legal de Ley 25.326 ya definido por el CEO |
+
+### A. HU-35 -- Vinculacion de cuentas al loguear con Google
+
+**Pregunta original** (`02-backlog/backlog.md`, HU-35): si un email ya tiene una cuenta creada
+por el flujo de contrasena y esa persona toca "Google" con el mismo email, el sistema vincula
+automaticamente por coincidencia de email, o es riesgo de account takeover si Google no verifico
+ese email con el mismo criterio de confianza que hoy exige el sistema?
+
+**Decision: nunca vincular ni loguear automaticamente solo por coincidencia de email** -- ni
+siquiera cuando el ID token de Google confirma `email_verified: true`. Reglas completas (ya
+trasladadas al backlog, HU-35, para que Backend las implemente tal cual):
+
+1. Sin cuenta previa con ese email -> alta nueva via Google solo si `email_verified: true`; si
+   viene `false`, rechazar el alta.
+2. Cuenta previa por contrasena con ese email -> exigir que la persona confirme la contrasena
+   existente en el mismo flujo antes de persistir la vinculacion Google<->usuario_id, sin importar
+   `email_verified`.
+3. Una vez vinculada: sigue existiendo una unica fila `usuario`; Google pasa a ser un metodo de
+   acceso adicional de ese `usuario_id`, no un usuario nuevo -- requiere que Backend/DBA persistan
+   explicitamente esa asociacion (proveedor + `sub` de Google, no el email), nunca inferirla en
+   cada login por comparar el string de email.
+
+**Por que no alcanza con confiar solo en `email_verified: true`:**
+
+- `email_verified: true` prueba que la cuenta de Google controla **hoy** esa casilla de correo --
+  no prueba que quien la controla hoy es la misma persona que creo la contrasena original de esta
+  app. Hay vectores conocidos donde esas dos cosas dejan de coincidir: casillas de email
+  recicladas o abandonadas y reclamadas despues por otra persona (clase de ataque ya documentada
+  en la industria contra servicios que tratan "mismo email" como "misma identidad" para
+  vinculacion de cuentas), una cuenta de Google comprometida, o cuentas Google Workspace que una
+  organizacion puede emitir para su propio dominio sin pasar por el mismo flujo de verificacion
+  con el que una persona crea una cuenta personal de Gmail. El propio estandar OpenID Connect
+  expone `email_verified` como una senal a chequear, no como una prueba absoluta de identidad --
+  por eso sigue siendo obligatoria para el alta nueva (punto 1), pero no es suficiente por si
+  sola para vincular una cuenta YA existente (punto 2).
+- Impacto si se vinculara mal: esta cuenta puede tener reservas y, a partir de HU-20, datos de
+  salud -- exactamente el tipo de dato que la parte B de esta misma adenda trata como sensible. El
+  costo de explotar una vinculacion automatica (si existiera) es bajo para quien controle la
+  casilla de correo en el momento del ataque; el costo de pedir una confirmacion adicional
+  (contrasena existente, una sola vez, en el mismo flujo) es bajo y no degrada la propuesta de
+  valor de HU-35 para el caso comun (alta nueva) -- solo agrega un paso en el caso de colision con
+  una cuenta preexistente, que ademas es el caso de mayor riesgo.
+- **Alternativas evaluadas y no elegidas:**
+  - *Rechazar sin ofrecer vinculacion en absoluto* ("inicia sesion por el metodo original, sin
+    opcion de vincular Google despues"): mas simple de implementar y tambien segura, pero peor
+    experiencia sin necesidad real -- la confirmacion con contrasena ya cierra el riesgo con el
+    mismo nivel de friccion que un login normal. Queda como alternativa valida para una primera
+    version mas simple si Backend prefiere no construir el flujo de confirmacion todavia, pero no
+    es la recomendacion.
+  - *Vincular automatico si `email_verified: true`, sin pedir nada mas:* es la lectura mas directa
+    de la pregunta original, pero no cierra los escenarios de email reciclado/cuenta Google
+    comprometida/Workspace descritos arriba -- no se recomienda para un sistema que va a guardar
+    datos de salud (HU-20).
+
+**No bloqueante para el resto de HU-35** (mismo criterio que ya tenian las otras dos preguntas
+abiertas de esta historia) -- condiciona el diseno detallado/implementacion de esta historia
+puntual, no el resto de E4 (HU-01/HU-02 siguen funcionando sin cambios).
+
+**Nota de higiene, informativa, no bloqueante de HU-35 (gap preexistente, no introducido por esta
+historia):** verificado contra el codigo real (`05-codigo/backend/src/routes/auth.ts`,
+`POST /auth/registro-cliente` y `/registro-negocio`) que el flujo de contrasena actual tampoco
+verifica hoy que el email sea real -- no hay confirmacion por correo, se confia en el string tal
+cual lo escribe quien se registra. Exigir `email_verified` de Google es, en los hechos, mas
+estricto que la linea base actual del propio sistema. No se agrega como bloqueante de esta
+historia (fuera del alcance puntual pedido), pero queda anotado como mejora de higiene futura
+equivalente para ambos metodos.
+
+### B. HU-20 -- Sensibilidad de datos de salud en la Ficha de Paciente
+
+**Pregunta original** (`04-diseno/mapa-pantallas.md` parrafos 5.9/6, `02-backlog/backlog.md` HU-20):
+alergias, notas medicas generales y contacto de emergencia van a quedar protegidos por el mismo
+esquema de Row Level Security multi-tenant que ya protege el resto del proyecto -- ese
+aislamiento estandar alcanza, o hace falta algo adicional (cifrado a nivel de columna, auditoria
+de accesos, restriccion de endpoints) antes de produccion real?
+
+**Decision: el RLS multi-tenant por negocio, tal como esta disenado hoy, es necesario pero no
+alcanza solo.** Verificado contra el DDL real (`05-codigo/database/migrations/001_init.sql`) y
+contra el codigo real (`05-codigo/backend/src/routes/clientes.ts`,
+`03-arquitectura/documento-arquitectura.md` parrafo 5), no solo por inspeccion de los documentos de
+diseno:
+
+1. **El nivel que ya cubren las policies de RLS existentes es "por negocio" (cualquier staff del
+   negocio), no "por profesional".** Las policies de `profesional`/`servicio`/
+   `negocio_profesional` acotan la escritura a "algun administrador o profesional del negocio" y
+   `turno_select_publico` es de lectura publica -- correcto para agenda/catalogo, pero **RN7/D3
+   exige un nivel mas estricto para el historial y para lo que agrega HU-20**: visible unicamente
+   para el profesional que atendio/registro a ese paciente, ni siquiera para otro profesional del
+   mismo negocio. Esa restriccion mas fina existe hoy, pero se aplica **a nivel de query de
+   aplicacion, no de RLS**: `GET /clientes/:id/historial` filtra explicitamente
+   `WHERE t.cliente_id = $1 AND t.profesional_id = $2` (comentario del propio codigo: "No se
+   filtra en el cliente (UI), se filtra aca, en la query"), y `documento-arquitectura.md` parrafo 5 lo
+   documenta igual ("Ningun dato de historial de un cliente se expone a un profesional que no lo
+   atendio (D3) -- se valida a nivel de query, no solo de UI"). Si las tablas nuevas de HU-20
+   heredan el mismo patron de RLS que `turno`/`profesional` (correcto para esos casos) **sin**
+   replicar ademas esta restriccion por profesional, alergias/notas medicas/contacto de
+   emergencia quedarian visibles para cualquier profesional o administrador del mismo negocio --
+   una regresion de privacidad respecto de lo que ya garantiza el historial hoy, y muy
+   probablemente un incumplimiento de RN7/D3 tal como esta redactada.
+2. **Punto de modelado urgente para DBA, que esta extendiendo este mismo esquema en paralelo
+   ahora mismo:** hoy "cliente" es directamente la fila `usuario` (no existe una entidad
+   "paciente" separada) y un mismo `usuario_id` puede ser cliente de profesionales y negocios
+   distintos. `02-backlog/backlog.md` (HU-20, nota de reconciliacion de Product Manager,
+   2026-08-10) ya deja escrito que "`Cliente` sigue siendo una unica entidad compartida por todos
+   los rubros... con estas columnas nullable" -- afirmacion correcta para la pregunta que
+   responde (no hace falta una entidad separada por rubro), pero que **no debe leerse como
+   autorizacion para agregar estas columnas directamente sobre el `usuario` global**: si se
+   agregan ahi, quedan visibles para cualquier profesional que alguna vez atendio a esa persona,
+   en cualquier negocio -- rompe RN7/D3 de raiz, no es un problema de RLS sino de donde vive el
+   dato fisicamente. Ya hay precedente en el propio backlog para la ubicacion correcta: HU-19
+   (activo/inactivo del paciente) y la definicion de "Reciente" (ambas en `02-backlog/backlog.md`,
+   2026-08-10) ya se resolvieron explicitamente como "atributo propio del paciente, scope por
+   profesional" -- el mismo criterio (una tabla o relacion scopeada por
+   `(profesional_id, cliente_id)`, no columnas del `usuario` compartido) debe aplicarse a
+   alergias/notas medicas/contacto de emergencia. No es una decision que le corresponda cerrar a
+   Security (es modelado de datos, de DBA) -- se deja marcado en detalle porque es exactamente el
+   tipo de gap que ningun test HTTP existente detectaria por si solo (mismo aprendizaje que
+   dejaron CRITICAL-1 de este informe y el hallazgo de RLS del 2026-08-09: la autorizacion de
+   aplicacion puede esconder un gap de modelado en vez de mostrarlo).
+3. **Checklist tecnico que debe quedar resuelto antes de produccion con datos reales**
+   (complementa, no reemplaza, el gate legal de Ley 25.326 que ya definio el CEO -- ver
+   `02-backlog/backlog.md` HU-20 y `03-arquitectura/plan-produccion.md` parrafo 9):
+   - Acceso restringido por profesional (no solo por negocio) para estos campos especificos, con
+     una prueba de regresion automatica dedicada (mismo espiritu que
+     `scripts/test-autorizacion-cruzada.mjs`: profesional A no debe poder leer/escribir los
+     campos de salud de un paciente que nunca atendio, aunque comparta negocio con el profesional
+     que si lo atendio).
+   - Log de auditoria de accesos (lectura y escritura) a estos campos especificamente -- quien,
+     cuando, sobre que paciente. No existe hoy ningun mecanismo de auditoria en el esquema; es
+     una capacidad nueva, razonablemente barata de agregar ahora que DBA ya esta tocando este
+     mismo esquema en paralelo, mas cara de retrofit despues.
+   - Confirmar que el export de HU-22 (que ya declara en el backlog "solo su propia cartera")
+     reusa efectivamente este mismo control de acceso por profesional para estos campos -- un
+     export masivo es el vector de mayor impacto si el control de acceso tuviera un agujero.
+     (Nota: `02-backlog/backlog.md` ya marca HU-22 como diferida para una revision de Security
+     propia antes de construirse -- este punto queda como recordatorio para esa revision futura,
+     no se resuelve aca.)
+   - Restriccion de endpoints: solo los endpoints ya scopeados por profesional (ficha/historial)
+     deberian poder leer o escribir estos campos -- ningun endpoint administrativo de negocio con
+     alcance mas amplio.
+4. **Cifrado a nivel de columna -- recomendado, no bloqueante en este ciclo.** A favor: ya esta
+   confirmado (no es hipotetico) que en `docker-compose.yml` y en el contenedor de CI el rol de
+   conexion a Postgres es superusuario y bypassea RLS siempre (ver el bloque "Separacion
+   owner/runtime..." en `001_init.sql` y la entrada del 2026-08-09 en
+   `memory/proyectos/turnos-profesionales/decisiones.md`) -- mientras ese gap no este cerrado en
+   todos los ambientes (incluido Render, sin confirmar todavia), cifrar a nivel de columna las dos
+   variables mas sensibles (alergias, notas medicas generales) seria una capa adicional que sigue
+   protegiendo el dato aunque RLS quede bypaseada por un error de configuracion. En contra: agrega
+   complejidad real (gestion de claves, y pierde la posibilidad de buscar/filtrar por esos campos
+   en el backend salvo que se disene explicitamente para eso) que no se justifica **si** el punto
+   1 (scope por profesional) y la separacion de roles owner/runtime ya pendiente para DevOps
+   (`05-codigo/database/scripts/provisionar_roles_postgres.sql`) se cierran antes de cargar datos
+   reales. Decision: no exigirlo como bloqueante de este ciclo; si para cuando el CEO tenga la
+   confirmacion legal de su abogado sobre Ley 25.326 la separacion de roles owner/runtime todavia
+   no esta cerrada en el ambiente de produccion real, reevaluar como bloqueante en ese momento.
+5. **Contacto de emergencia -- nota aparte:** es un dato personal de un tercero (no del paciente),
+   pero queda identificado y vinculado a una ficha de salud -- se recomienda tratarlo con el mismo
+   criterio de acceso que alergias/notas medicas (puntos 1-3 arriba) aunque en sentido estricto no
+   sea, por si mismo, un "dato de salud".
+
+**Que puede esperar:** todo lo anterior es diseno/documentacion -- no bloquea Fases 3-5
+(diseno/desarrollo/pruebas), tal como ya establecio el CEO para HU-20 en general. Es la lista
+tecnica concreta que debe estar resuelta antes de que datos reales de pacientes lleguen a
+produccion, en linea con (no en reemplazo de) el gate legal ya definido.
+
+---
+
+Ningun hallazgo de esta adenda fue remediado ni implementado por Security -- son decisiones de
+diseno documentadas para que Backend/DBA las implementen cuando les toque, conforme a las reglas
+de actuacion del rol.
