@@ -65,8 +65,13 @@ turnosRouter.post(
     // turno sale de `servicio.negocio_id`, inequívoco porque un servicio sigue siendo 1:1 con su
     // negocio (esa relación no cambia en esta generalización). Acá solo hace falta confirmar que
     // el profesional_id pedido exista (la FK de `turno.profesional_id` fallaría más abajo si no).
-    const profesionalResult = await pool.query('SELECT id FROM profesional WHERE id = $1', [profesional_id]);
-    const profesional = profesionalResult.rows[0] as { id: string } | undefined;
+    // `usuario_id` se agrega a este SELECT (antes solo `id`) porque el alta automática de
+    // `paciente` más abajo necesita la identidad del PROFESIONAL, no la del cliente que reserva
+    // — ver el comentario grande junto al INSERT INTO paciente.
+    const profesionalResult = await pool.query('SELECT id, usuario_id FROM profesional WHERE id = $1', [
+      profesional_id,
+    ]);
+    const profesional = profesionalResult.rows[0] as { id: string; usuario_id: string } | undefined;
     const servicioResult = await pool.query('SELECT negocio_id, duracion_min FROM servicio WHERE id = $1', [
       servicio_id,
     ]);
@@ -182,6 +187,39 @@ turnosRouter.post(
           await client.query(
             'INSERT INTO notificacion (id, turno_id, tipo, creado_en) VALUES ($1, $2, $3, $4)',
             [uuid(), turnoId, 'confirmacion', ts] // D4 — el envío real lo hace el proveedor de notificaciones (stub, ver notificaciones.ts)
+          );
+
+          // HU-19/HU-20 (ver 03-arquitectura/modelo-datos.md §2quinquies y backlog.md HU-19):
+          // alta automática de la fila `paciente` en el primer turno entre este profesional y
+          // este cliente — sin esto, "Gestión de Pacientes" (Mobile) y el criterio "Nuevo" de
+          // HU-19 (alta en la cartera, últimos 30 días) no tendrían de dónde salir hasta que el
+          // profesional abriera la ficha a mano (opción (i) que dejó abierta DBA en
+          // modelo-datos.md/001_init.sql; acá se adopta la opción (ii), automática). `ON
+          // CONFLICT DO NOTHING` porque esto corre en CADA turno del mismo (negocio, profesional,
+          // cliente) — del 2do turno en adelante no debe pisar los campos que el profesional ya
+          // haya cargado a mano en la ficha.
+          //
+          // Cambio de identidad de RLS DENTRO de esta misma transacción — necesario, no
+          // cosmético: `paciente` exige (policy `paciente_acceso_propio_profesional`, ver
+          // database/migrations/002_pacientes_historial_auth_google.sql) que `app.usuario_id`
+          // sea el usuario_id del PROFESIONAL dueño de la ficha; `turno` arriba exige exactamente
+          // lo opuesto (RN2, `cliente_id = app.usuario_id`, ver 001_init.sql). Este handler corre
+          // con `requireAuth('cliente')`, así que el contexto que fijó `withTransaction` más
+          // abajo (`usuarioId: req.auth!.sub`) es el del CLIENTE — insertar en `paciente` con ese
+          // contexto violaría el WITH CHECK de esa policy (INSERT rechazado con 42501, no un
+          // simple "0 filas afectadas" como pasaría con un UPDATE/DELETE). `set_config(...,
+          // true)` puede llamarse más de una vez en la misma transacción (mismo mecanismo que ya
+          // usa `withTransaction` en db.ts) — el nuevo valor rige para el resto de la transacción
+          // sin romper la atomicidad (si algo de lo anterior fallara, esta sentencia ni se
+          // alcanza y todo se revierte junto). Va al FINAL a propósito, después de las 3
+          // sentencias que sí necesitan la identidad del cliente — no reordenar sin revisar esto.
+          await client.query('SELECT set_config($1, $2, true)', ['app.usuario_id', profesional!.usuario_id]);
+          await client.query('SELECT set_config($1, $2, true)', ['app.negocio_id', servicio.negocio_id]);
+          await client.query(
+            `INSERT INTO paciente (negocio_id, profesional_id, cliente_id, creado_en)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (negocio_id, profesional_id, cliente_id) DO NOTHING`,
+            [servicio.negocio_id, profesional_id, req.auth!.sub, ts]
           );
         },
         { usuarioId: req.auth!.sub }
