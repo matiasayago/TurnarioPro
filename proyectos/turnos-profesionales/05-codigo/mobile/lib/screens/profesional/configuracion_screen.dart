@@ -8,7 +8,6 @@ import '../../theme/app_radius.dart';
 import '../../theme/app_spacing.dart';
 import '../../theme/app_typography.dart';
 import '../../widgets/widgets.dart';
-import 'proximamente_screen.dart';
 
 /// Configuración (menú principal, Profesional) — reemplaza el ítem "Configuración" del bottom
 /// nav (antes apuntaba directo a `ProximamenteScreen`, ver `profesional_shell.dart`). Estructura

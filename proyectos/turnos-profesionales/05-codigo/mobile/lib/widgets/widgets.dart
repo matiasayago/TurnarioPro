@@ -9,5 +9,6 @@ export 'app_modal_sheet.dart';
 export 'buttons.dart';
 export 'month_calendar_picker.dart';
 export 'numeric_stepper_field.dart';
+export 'proximamente_screen.dart';
 export 'stat_card.dart';
 export 'status_pill.dart';
