@@ -245,6 +245,7 @@ class OutlineButton extends StatelessWidget {
     required this.label,
     this.onPressed,
     this.icon,
+    this.leading,
     this.radiusVariant = AppButtonRadius.pill,
     this.expand = true,
   });
@@ -252,6 +253,12 @@ class OutlineButton extends StatelessWidget {
   final String label;
   final VoidCallback? onPressed;
   final IconData? icon;
+
+  /// Reemplaza a [icon] cuando el ícono no es representable como un `IconData` de un solo color
+  /// (ej. el logo multicolor de Google del botón "Google" en Login, HU-35 — ver
+  /// `google_logo.dart`). Si se pasan ambos, [leading] tiene prioridad. Mismo tamaño/espaciado
+  /// que [icon] para no duplicar el resto de este widget por un solo caso de ícono no estándar.
+  final Widget? leading;
   final AppButtonRadius radiusVariant;
   final bool expand;
 
@@ -280,7 +287,10 @@ class OutlineButton extends StatelessWidget {
               mainAxisSize: expand ? MainAxisSize.max : MainAxisSize.min,
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                if (icon != null) ...[
+                if (leading != null) ...[
+                  SizedBox(width: 18, height: 18, child: leading),
+                  const SizedBox(width: AppSpacing.sm),
+                ] else if (icon != null) ...[
                   Icon(icon, size: 18, color: fg),
                   const SizedBox(width: AppSpacing.sm),
                 ],
