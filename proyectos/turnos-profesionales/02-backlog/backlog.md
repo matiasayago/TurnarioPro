@@ -53,6 +53,13 @@ pierdan al planificar el lanzamiento):
   con datos reales de pacientes en producción. HU-20 se construye y prueba con normalidad en
   Fases 3–5; su salida a producción con datos reales queda condicionada a luz verde legal
   explícita del CEO — es un bloqueante de Fase 6 (Despliegue), no de desarrollo.
+- **Import/export de pacientes en lote / HU-22 — bloqueante de DESARROLLO** (a diferencia de
+  HU-20 arriba, que solo bloquea el lanzamiento). UX/UI pidió explícitamente revisión de
+  Security antes de implementar, por moverse PII en lote. El Director General IA decidió
+  (2026-08-10) dejarla fuera de la tanda de desarrollo en curso (Gestión de Pacientes, Ficha,
+  Historial, Configuración) — no se construye en Backend ni Mobile hasta que Security dé luz
+  verde explícita. Sigue siendo parte del alcance de v1 (E0–E14) — solo cambia cuándo se
+  construye, no si se construye. Detalle completo en HU-22.
 
 ## Épicas
 
@@ -64,7 +71,7 @@ pierdan al planificar el lanzamiento):
 | E3 | Reserva de turno (cliente), con seña opcional por profesional | P0 |
 | E4 | Autenticación y perfiles | P0 (extendida, ver HU-35) |
 | E7 | Notificaciones (confirmación y recordatorio) | P0 (extendida, ver HU-24 a HU-26) |
-| E5 | Gestión de clientes e historial (profesional) | P1 (extendida, ver HU-19 a HU-23 y HU-33) |
+| E5 | Gestión de clientes e historial (profesional) | P1 (extendida, ver HU-19 a HU-23 y HU-33; HU-22 diferida, ver nota) |
 | E6 | Cancelación y reprogramación de turnos | P1 |
 | E9 | Dashboard del profesional (resumen del día) | P1 |
 | E10 | Reportes y estadísticas (negocio/profesional) | P1 (repriorizada 2026-08-06, ver nota) |
@@ -85,6 +92,18 @@ pierdan al planificar el lanzamiento):
 > toggles placeholder, estado activo/inactivo, alcance de v1) — aplicadas en todas las HU
 > correspondientes, con repriorización justificada de E10–E12 a P1. Detalle completo al final de
 > este documento, en la sección "Ampliación del backlog".
+>
+> **Reconciliación (Product Manager, 2026-08-10):** verificado — esta nota, tal como quedó
+> redactada el 2026-08-06, ya resuelve la ambigüedad: "alcance de v1" es una de las 15
+> decisiones aplicadas de la lista de arriba, y **E9–E14 sí forman parte del alcance confirmado
+> de v1**, igual que E0–E8, aunque se hayan incorporado más tarde (2026-08-05, posterior al
+> cierre de la Fase 2 original de E0–E8). Esa conclusión quedaba implícita en el texto de arriba
+> y explícita solo en la sección "Roadmap de producto" al inicio del documento — se deja
+> explícita también acá para que nadie que lea únicamente esta tabla de épicas quede con la duda.
+> Única excepción puntual dentro de ese alcance: **HU-22** (import/export de pacientes) queda
+> diferida para revisión de Security antes de construirse (ver esa historia y "Notas operativas
+> de rollout" en el Roadmap) — sigue siendo v1, solo cambia cuándo se construye, no si se
+> construye.
 
 ---
 
@@ -129,24 +148,58 @@ la app sin depender de crear y recordar una contraseña propia.
     ya exige HU-01 para el login con contraseña. UX/UI ya dejó abierto en §5.17 en qué momento
     se determina ese rol para esta pantalla (antes o después del login) — es la misma incógnita
     que ya existe para el flujo de contraseña, no una pregunta nueva de esta historia.
-  - **Pregunta abierta (Backend/DBA) — la tabla `usuario` no contempla un alta sin contraseña
-    propia:** el esquema actual (`03-arquitectura/modelo-datos.md` §2; `05-codigo/backend/
-    migrations/001_init.sql`, `CREATE TABLE usuario`) define `password_hash TEXT NOT NULL` —
-    un usuario que se registra ÚNICAMENTE con Google no tendría una contraseña propia que
-    hashear. Backend/DBA deben decidir cómo resolverlo (por ejemplo: columna nullable + una
-    forma de distinguir el proveedor de autenticación de cada usuario, un hash placeholder no
-    utilizable, u otra alternativa) antes de implementar. No asumido acá — es diseño técnico,
-    fuera del rol de Product Manager.
-  - **Pregunta abierta (Security) — vinculación de cuentas si el email ya está registrado por
-    contraseña:** en la captura hay un único botón "Google" (sin uno equivalente separado
-    debajo de "Crear Cuenta"), lo que sugiere que debería cubrir tanto el login de una cuenta
-    existente como el alta de una nueva en una sola acción — no confirmado como decisión de
-    producto cerrada. El caso que más importa resolver: si un email ya tiene una cuenta creada
-    por el flujo de contraseña y esa persona después toca "Google" con el mismo email, ¿el
-    sistema vincula automáticamente ambas cuentas por coincidencia de email, o es un riesgo de
-    seguridad (posible account takeover si Google no verificó ese email con el mismo criterio
-    de confianza que hoy exige este sistema)? Security debe evaluarlo y definir el
-    comportamiento correcto antes de implementar — no asumido acá.
+  - **Resuelto (DBA, 2026-08-10) — la tabla `usuario` no contemplaba un alta sin contraseña
+    propia:** el esquema hasta este ciclo (`03-arquitectura/modelo-datos.md` §2;
+    `05-codigo/backend/migrations/001_init.sql`, `CREATE TABLE usuario`) definía `password_hash
+    TEXT NOT NULL` — un usuario que se registra ÚNICAMENTE con Google no tendría una contraseña
+    propia que hashear. **Decisión tomada:** `password_hash` pasa a nullable, se agrega
+    `google_id TEXT UNIQUE` (nullable, el claim `sub`/subject del ID token de Google — estable e
+    inmutable, no el email) y un `CHECK (password_hash IS NOT NULL OR google_id IS NOT NULL)` que
+    garantiza a nivel de base de datos que ninguna cuenta quede sin ningún método de login válido.
+    Se descartó explícitamente un hash placeholder no utilizable (queda como un caso especial
+    invisible en el esquema) y también descartó agregar una columna separada "proveedor_auth"
+    (redundante: puede desincronizarse de qué columnas están realmente pobladas) — la combinación
+    `password_hash`/`google_id` deriva el/los métodos disponibles directamente de qué columnas
+    tienen valor, sin flag adicional que mantener sincronizado. Razonamiento completo, columna por
+    columna, y la recomendación para Backend sobre el flujo de login/vinculación de cuentas por
+    email en `03-arquitectura/modelo-datos.md` §2sexies y en los comentarios de
+    `05-codigo/database/migrations/001_init.sql` (`CREATE TABLE usuario`). Aplicado en esa
+    migración y, para el ambiente de Render ya migrado, en la migración incremental
+    `05-codigo/database/migrations/002_pacientes_historial_auth_google.sql` (pendiente de correr
+    a mano contra Render — ver el header de ese archivo). **Pendiente real para Backend, no
+    cerrado por DBA:** implementar el endpoint de login/registro con Google en sí
+    (`src/routes/auth.ts`) sigue sin construirse — esta resolución es solo el modelo de datos que
+    lo habilita.
+  - **Resuelto (Security, 2026-08-10) — vinculación de cuentas si el email ya está registrado
+    por contraseña:** un único botón "Google" (login + alta en una sola acción, como sugiere la
+    captura) es viable con este diseño, siempre que el backend distinga los casos de abajo — no
+    hace falta un botón separado por caso. **Regla general: nunca vincular ni loguear
+    automáticamente por la sola coincidencia de email** — ni siquiera si Google confirma
+    `email_verified: true`. Justificación completa (por qué no alcanza con `email_verified`
+    solo, alternativas evaluadas) en `07-seguridad/informe-seguridad.md` (adenda 2026-08-10);
+    reglas concretas para Backend:
+    1. **Sin cuenta previa con ese email:** dar de alta una cuenta nueva vía Google solo si el
+       ID token trae `email_verified: true`. Si viene `false`, rechazar el alta y pedir otro
+       método — nunca crear una cuenta sobre un email que ni el propio proveedor verificó.
+    2. **Ya existe una cuenta creada por contraseña con ese email:** nunca autovincular, sin
+       importar `email_verified`. Mostrar "Ya existe una cuenta con este email — iniciá sesión
+       con tu contraseña para vincular Google" y exigir esa contraseña en el mismo flujo; solo
+       tras validarla se persiste la asociación Google↔usuario_id.
+    3. Una vez vinculada sigue existiendo una única fila `usuario` (mismo `id`/`rol`/membresías
+       de negocio) — Google pasa a ser un método de acceso adicional de ese `usuario_id`, nunca
+       un usuario nuevo. Implica persistir, por usuario, qué proveedor(es) tiene habilitados y
+       el `sub` de Google (no el email, que puede cambiar del lado de Google) — la forma
+       concreta (tabla propia vs. columna nullable en `usuario`) queda para Backend/DBA junto
+       con la pregunta abierta de arriba sobre `password_hash NOT NULL`; lo que fija esta
+       decisión es que la vinculación debe quedar registrada explícitamente, nunca inferida en
+       cada login por coincidencia de string de email.
+    4. El paso de confirmación con la contraseña existente reutiliza el rate limiting que ya
+       exige HIGH-1 (`07-seguridad/informe-seguridad.md`) — mismo endpoint/lógica que el login
+       normal, no abre superficie nueva de fuerza bruta.
+    5. Recomendado, no bloqueante: loguear el evento de vinculación (usuario_id, proveedor,
+       fecha) para auditoría, y ofrecer además "vincular Google" desde "Seguridad de la cuenta"
+       (`04-diseno/mapa-pantallas.md` §5.13) para quien ya está logueado por contraseña — ahí no
+       hace falta repedirla, la sesión activa ya es prueba suficiente de identidad.
   - **Pregunta abierta (DevOps, con Arquitecto) — administración de credenciales OAuth de
     Google:** quién da de alta y administra las credenciales de la aplicación en Google Cloud
     Console (client ID/secret) y cómo se gestionan como secreto en cada entorno (desarrollo,
@@ -290,9 +343,27 @@ grandes.
     falta un job/cálculo periódico, alcanza con guardar el estado como un atributo propio del
     paciente (scope por profesional, mismo criterio de privacidad que el resto de la ficha,
     RN7/D3) y filtrar sobre él.
-  - "Nuevos"/"Recientes" sí siguen requiriendo un cálculo derivado (fecha de alta o de última
-    visita) — a confirmar el criterio exacto en diseño detallado (UX/Arquitecto); no bloquea
-    esta historia porque no forma parte de la simplificación anterior.
+  - **Nota de reconciliación (Product Manager, 2026-08-10):** `04-diseno/mapa-pantallas.md`
+    §5.8 y §5.8bis todavía describen "manual vs. calculado" como algo sin confirmar contra
+    capturas reales (verificación del 2026-08-07) — quedó desactualizado sin querer, no es una
+    contradicción de negocio real: la decisión del CEO del bullet anterior es del 2026-08-06,
+    anterior a esa verificación, y ya la resuelve. DBA/Backend/Mobile deben implementar contra
+    esta versión (backlog), no contra la pregunta que quedó sin tachar en el documento de UX/UI.
+  - **"Nuevos" y "Recientes" — criterio resuelto (Product Manager, 2026-08-10), para que
+    DBA/Backend lo implementen sin ambigüedad:** son dos métricas derivadas, independientes
+    entre sí y del estado manual Activo/Inactivo (no lo sobrescriben ni dependen de él),
+    calculadas al momento de la consulta — sin columna propia ni job periódico, mismo criterio
+    que evitó el job para Activo/Inactivo:
+    - **Nuevo** (4ta stat card, confirmada contra capturas reales en §5.8bis): paciente cuya
+      fecha de alta en la cartera de este profesional (fecha del primer turno con él, o de
+      creación del vínculo profesional-paciente — DBA define la fuente exacta según cómo modele
+      la relación) cae dentro de los últimos **30 días**.
+    - **Reciente** (chip de filtro): paciente que tuvo al menos un turno con estado completado
+      en los últimos **30 días**, con el mismo scope por profesional (RN7/D3) que el resto de la
+      ficha.
+    - **30 días es un valor propuesto por Product Manager, sujeto a ajuste** (mismo criterio que
+      otros valores concretos de esta ampliación, ej. el límite de HU-29) — no bloquea el
+      desarrollo; si el uso real pide otro umbral, es un cambio de configuración, no de diseño.
 
 **HU-20 (v1, P1 — nueva ficha de detalle, relacionada con HU-10).** Como profesional de un
 negocio de **rubro salud**, quiero registrar datos ampliados de cada paciente (fecha de
@@ -307,10 +378,59 @@ ficha clínica más completa que la de un simple contacto.
     fiable en el momento de mostrar/ocultar estos campos — a confirmar con DBA/Backend si hoy se
     guarda como texto libre o como catálogo cerrado, porque condiciona cómo se implementa esta
     verificación.
+  - **Nota de reconciliación y formalización (Product Manager, 2026-08-10):** este alcance
+    quedó resuelto arriba desde el 2026-08-06 (D11/RN15 en `01-requisitos/documento-funcional.md`
+    §1/§3) — no es una pregunta nueva de esta ronda. Se formaliza acá porque
+    `04-diseno/mapa-pantallas.md` §5.9 todavía dice "HU-20 también deja abierto si estos campos
+    aplican a todos los rubros de negocio... este wireframe los muestra todos, sin ocultamiento
+    condicional, a la espera de esa definición" — ese texto de UX/UI quedó desactualizado (la
+    decisión del CEO es anterior y no se sincronizó ahí), no hay ninguna decisión de negocio
+    nueva pendiente. Para que Mobile no construya la Ficha de Paciente contra la versión vieja
+    del wireframe:
+    - Los campos de salud **no son "opcionales pero visibles" para todos los rubros** — son
+      **condicionales**: se muestran y son editables únicamente cuando `negocio.rubro` es salud;
+      para cualquier otro rubro, la sección completa (Contacto de emergencia + ✱ Salud, §5.9 de
+      `mapa-pantallas.md`) no se renderiza en absoluto, no solo se deja vacía.
+    - A nivel de datos esto no requiere una entidad separada por rubro: `Cliente` sigue siendo
+      una única entidad compartida por todos los rubros (ya confirmado en
+      `01-requisitos/documento-funcional.md` §5, glosario) con estas columnas nullable — para un
+      paciente de un negocio no-salud simplemente quedan en `NULL` siempre (nunca se completan
+      ni se muestran); no hace falta modelar nada distinto por rubro más allá de esa condición
+      de lectura/escritura.
+    - **Dependencia para esta tanda (Mobile/Backend):** la pregunta de implementación que ya
+      tenía DBA pendiente (si `negocio.rubro` sigue siendo texto libre o pasa a catálogo
+      cerrado/flag `es_rubro_salud` para condicionar de forma confiable, ver
+      `01-requisitos/documento-funcional.md` §1/D11) sigue sin resolver y ahora sí es bloqueante
+      para el condicional de mostrar/ocultar de la Ficha de Paciente — DBA está trabajando en
+      paralelo sobre esta misma rama; coordinar antes de dar por cerrado el diseño detallado de
+      esta pantalla.
   - Todos los campos nuevos son opcionales salvo los que ya son requeridos hoy.
   - **Nota de seguridad:** alergias y contacto de emergencia son datos de salud/sensibles;
     requieren revisión de Security antes de habilitarse en producción, con el mismo criterio
     de privacidad que ya aplica al historial (RN7/D3).
+  - **Revisión de Security (2026-08-10) — resultado:** el aislamiento estándar por negocio (RLS
+    multi-tenant, RN9) es necesario pero **no alcanza solo** para estos campos. RN7/D3 exige que
+    sean visibles únicamente para el profesional que atendió/registró a ese paciente — más
+    estricto que "cualquier staff del negocio", que es el nivel que ya cubren las policies de
+    RLS existentes hoy (`05-codigo/database/migrations/001_init.sql`); esa restricción más fina
+    hoy se aplica a nivel de query de aplicación (`GET /clientes/:id/historial`), no de RLS —
+    mismo patrón que debe replicarse (o reforzarse con una policy propia) para estos campos
+    nuevos. **Importante para DBA, que está modelando esto en paralelo ahora mismo:** que
+    `Cliente` sea conceptualmente "una única entidad compartida por todos los rubros" (nota de
+    reconciliación de arriba) resuelve la condicionalidad por rubro, pero no implica que estas
+    columnas deban vivir como atributos del `usuario` global — si se agregan ahí, quedan
+    visibles para cualquier profesional que alguna vez atendió a esa persona, en cualquier
+    negocio, rompiendo RN7/D3. Necesitan quedar scopeadas por `(profesional_id, cliente_id)`,
+    igual que ya se resolvió para el estado Activo/Inactivo (HU-19) y para "Reciente" (nota de
+    arriba, 2026-08-10). Checklist técnico completo antes de producción con datos reales
+    (detalle y justificación en `07-seguridad/informe-seguridad.md`, adenda 2026-08-10): (1) el
+    scope por `(profesional_id, cliente_id)` de arriba, con una prueba de regresión dedicada
+    (mismo espíritu que `scripts/test-autorizacion-cruzada.mjs`); (2) log de auditoría de
+    accesos (lectura/escritura) a estos campos; (3) confirmar que el export de HU-22 reusa el
+    mismo control de acceso. El cifrado a nivel de columna se recomienda como capa adicional
+    pero no se exige como bloqueante de este ciclo. Nada de esto reemplaza ni adelanta el gate
+    legal de Ley 25.326 de la nota siguiente — es la lista técnica que debe quedar resuelta para
+    cuando ese gate se levante.
   - **Nota de riesgo de LANZAMIENTO, no de desarrollo (CEO, 2026-08-06):** el CEO va a consultar
     a un abogado sobre la Ley 25.326 (datos sensibles/de salud) antes de habilitar esta historia
     con datos reales de pacientes en producción. Puede construirse y probarse con normalidad en
@@ -331,11 +451,26 @@ médicas), para llevar seguimiento clínico/de servicio más allá de la agenda.
     modelo — a modelar por DBA antes de desarrollarse (hoy el historial es una consulta sobre
     Turno, sin entidad propia).
 
-**HU-22 (v1, P2 — nueva).** Como profesional, quiero importar y exportar mi listado de
-pacientes, para migrar datos desde otra herramienta o hacer un respaldo propio.
+**HU-22 (v1, P2 — DIFERIDA, bloqueada para desarrollo — ver nota).** Como profesional, quiero
+importar y exportar mi listado de pacientes, para migrar datos desde otra herramienta o hacer un
+respaldo propio.
 - Criterios de aceptación:
+  - **Diferida — bloqueada para desarrollo (Director General IA, 2026-08-10):** UX/UI marcó
+    explícitamente en `04-diseno/mapa-pantallas.md` §5.8 y §6 que Importar/Exportar mueve datos
+    personales (PII) de pacientes **en lote** y pidió "marcar para revisión de Security antes de
+    implementar". El Director General IA decidió excluir esta historia de la tanda de desarrollo
+    que arranca ahora (Gestión de Pacientes, Ficha de Paciente, Historial, Configuración) — se
+    formaliza acá para que quede trazado y **nadie la implemente por error** mientras tanto.
+    Sigue siendo parte del alcance de v1 confirmado (no se cancela, no sale de E0–E14, ver nota
+    de reconciliación en la tabla de épicas más arriba) — lo único que cambia es la secuencia: su
+    desarrollo queda bloqueado hasta que Security complete la revisión de manejo de PII en lote
+    (cifrado en tránsito/reposo, límites de tamaño y rate limiting del export, validación de la
+    importación, alcance de auditoría) y dé luz verde explícita. Mismo patrón que ya usa HU-20
+    para su gate legal de lanzamiento, pero acá el bloqueo es de **desarrollo**, no solo de
+    salida a producción: ni Backend ni Mobile deben empezar a construirla hasta esa luz verde.
   - **Formato resuelto (CEO, 2026-08-06):** soporta **CSV y Excel (.xlsx)**, en **ambos
-    sentidos** — importación y exportación.
+    sentidos** — importación y exportación. Queda documentado para cuando Security habilite la
+    historia; no habilita por sí solo a empezar a construirla.
   - La exportación genera un archivo con todos los pacientes de la cartera del profesional
     (mismos campos que la ficha, básica + extendida donde aplique por rubro, HU-20 — RN7/D3:
     solo su propia cartera).
@@ -659,7 +794,10 @@ como registro de trazabilidad, no como pendientes.
    profesional/administrador puede pertenecer a más de uno). Ya implementado en Backend (DBA
    generalizó el modelo 1:1 → N:M, ver `03-arquitectura/modelo-datos.md` §2ter); falta Mobile.
 7. **Import/export de pacientes (HU-22):** formato CSV/Excel, ambos sentidos, con plantilla
-   descargable.
+   descargable. **Actualización 2026-08-10:** el Director General IA diferió el desarrollo de
+   esta historia hasta que Security revise el manejo de PII en lote — sigue siendo v1, no se
+   construye todavía; ver nota completa en la propia HU-22 y en "Notas operativas de rollout"
+   del Roadmap.
 8. **Reportes (HU-28) y Configuración de pagos del negocio (HU-30):** alcance básico definido
    — reportes: turnos por estado + monto facturado, filtrable por período/profesional/servicio;
    pagos: solo datos de la cuenta de Mercado Pago del negocio.

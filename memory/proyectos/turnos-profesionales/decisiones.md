@@ -663,3 +663,112 @@ Detalle completo, razonamiento columna por columna y secuencia de adopción en
   ninguna línea real del YAML) — no confundir con un defecto de configuración: se distingue
   revisando las annotations del check-run (`GET /repos/.../check-runs/{id}/annotations`, también
   sin login) antes de tocar nada del workflow por esa causa.
+
+## Resolución de HU-19/HU-20/HU-22 y reconciliación de alcance v1 — Product Manager (2026-08-10)
+
+El Director General IA pidió resolver, antes de que DBA/Backend/Mobile arranquen la tanda de
+Gestión de Pacientes/Ficha de Paciente/Historial/Configuración, 4 preguntas que UX/UI había
+dejado abiertas en `04-diseno/mapa-pantallas.md`. Detalle completo y justificación de cada una
+en `02-backlog/backlog.md`, mismo estilo que la justificación ya usada para HU-35. Resumen:
+
+- **HU-19 (Activos/Inactivos/Recientes, §5.8):** el estado Activo/Inactivo ya estaba resuelto
+  como manual desde el 2026-08-06 (CEO) — `mapa-pantallas.md` §5.8/§5.8bis quedó desactualizado
+  sin sincronizarse con esa decisión (la verificación contra capturas reales es del 2026-08-07,
+  posterior a la decisión, pero no la cruzó). Se formalizó esa reconciliación en el backlog. Lo
+  genuinamente nuevo: se definió el criterio calculado que faltaba para "Nuevo" (alta en la
+  cartera del profesional, últimos 30 días) y "Reciente" (último turno completado, últimos 30
+  días) — ambas independientes del estado manual, calculadas al consultar (sin job ni columna
+  propia). 30 días es una propuesta de Product Manager, sujeta a ajuste, mismo criterio que otros
+  valores numéricos de esta ampliación (ej. HU-29).
+- **HU-20 (ficha extendida por rubro, §5.9):** también ya estaba resuelto desde el 2026-08-06
+  (D11/RN15) — mismo patrón de documentación desactualizada en `mapa-pantallas.md` §5.9, ahora
+  reconciliado en el backlog. Se formalizó explícitamente para DBA/Mobile: los campos de salud
+  son condicionales (ocultos por completo para rubros no-salud, no solo "opcionales pero
+  visibles"), sobre una única entidad `Cliente` compartida entre rubros (columnas nullable, sin
+  entidad separada por rubro). Se marcó como dependencia bloqueante de esta tanda la pregunta de
+  implementación que ya tenía DBA pendiente (criterio determinístico de "rubro salud" — catálogo
+  cerrado vs. flag booleano); no resuelta por Product Manager (es diseño técnico), sí escalada
+  como bloqueante ahora que Mobile va a construir la pantalla que la necesita.
+- **HU-22 (import/export en lote, §5.8):** marcada formalmente como **diferida, bloqueada para
+  desarrollo**, por decisión del Director General IA (no de Product Manager) — UX/UI ya había
+  pedido revisión de Security antes de implementar, por PII en lote. Sigue siendo parte del
+  alcance de v1 (E0–E14); solo se resecuencia cuándo se construye, no si se construye. Ninguna
+  otra historia de la tanda depende de HU-22.
+- **Reconciliación del alcance v1** (`02-backlog/backlog.md`, nota de la tabla de épicas):
+  verificado que la nota ya reflejaba, desde el 2026-08-06, que E9–E14 forman parte de v1 — no
+  había una contradicción de negocio real, solo faltaba una conclusión explícita para quien
+  leyera únicamente esa tabla sin cruzar con la sección "Roadmap de producto". Se agregó esa
+  conclusión explícita, con la salvedad de la nueva diferida de HU-22.
+
+No se tocó `04-diseno/mapa-pantallas.md` (UX/UI, entregable de otro rol) ni código de `05-codigo/`
+— se documentó en el backlog la desactualización detectada en ese documento para que el Director
+General IA decida si corresponde pedirle a UX/UI que lo sincronice.
+
+## Modelado de Ficha de Paciente extendida (HU-20), historial clínico (HU-21) y login con Google (HU-35) — DBA (2026-08-10)
+
+Detalle completo, razonamiento columna por columna y RLS en `03-arquitectura/modelo-datos.md`
+§2quinquies/§2sexies/§5ter. Resumen para reutilizar:
+
+- **HU-20/HU-21 — corrige un supuesto previo de este mismo archivo.** La entrada anterior
+  ("Resolución de HU-19/HU-20/HU-22...", 2026-08-10, Product Manager, más arriba) asumía "una
+  única entidad `Cliente` compartida entre rubros (columnas nullable, sin entidad separada por
+  rubro)". Verificado contra el texto explícito de RN7/RN13/D3 (`documento-funcional.md` §3) y de
+  HU-19/HU-22 (`backlog.md`) — "visible únicamente para el profesional que lo atendió/registró...
+  no se comparte entre profesionales del mismo negocio", extendido EXPLÍCITAMENTE por HU-19 a la
+  ficha completa, no solo al historial — esa cardinalidad no alcanza: no es 1:1 con `usuario`
+  (no existe una tabla `Cliente`; el rol "cliente" es un valor de `usuario.rol`). Se modela una
+  tabla `paciente` nueva, 1 fila por `(negocio_id, profesional_id, cliente_id)` — la ficha es
+  propiedad del profesional que la lleva, aislada además por negocio (D1/RN9), no de la persona en
+  sí. Dos entidades nuevas más, `tratamiento`/`nota_medica` (HU-21/D8/RN13), referencian
+  únicamente `paciente_id`.
+- **`negocio.es_rubro_salud` (D11/RN15)** — la pregunta de implementación que este mismo archivo ya
+  tenía escalada como bloqueante (entrada de Product Manager de más arriba): se eligió un flag
+  booleano dedicado (opción que la propia D11 sugería) sobre una lista cerrada de rubros, para no
+  arriesgar invalidar los valores de `rubro` (texto libre) ya en uso. Gatea a nivel de aplicación
+  (Backend/Mobile consultan la columna), no vía `CHECK` de base de datos (no se puede validar
+  contra otra tabla sin trigger).
+- **HU-35 — login con Google.** `usuario.password_hash` pasa a nullable + se agrega `google_id
+  TEXT UNIQUE` (el claim `sub` de Google) + `CHECK (password_hash IS NOT NULL OR google_id IS NOT
+  NULL)`. Se descartó un hash placeholder (caso especial invisible en el esquema) y una columna
+  "proveedor_auth" separada (redundante, puede desincronizarse) — la combinación de las 2 columnas
+  nullable ya deriva el/los métodos de login disponibles, con el `CHECK` garantizando que ninguna
+  cuenta quede sin ningún método válido. De paso se agregó `usuario.telefono` (brecha real: dato
+  documentado como básico desde el origen del proyecto pero nunca agregado como columna).
+- **Hallazgo operativo — Render producción ya está migrado.** Es el primer ciclo de este proyecto
+  en que editar `001_init.sql` directamente NO alcanza para que los cambios lleguen a la base real:
+  `runMigrations()` (`backend/src/db.ts`) corre ese archivo una sola vez por base, gateado por
+  "¿ya existe `usuario`?" — Render ya migró en el ciclo anterior (§Cierre del gap de ownership...,
+  2026-08-09) y sigue corriendo (confirmado con un smoke test real contra
+  `https://turnos-profesionales-backend.onrender.com`). Se actualizó `001_init.sql` igual (ambas
+  copias, sigue siendo correcto para ambientes que migren desde cero) y además se creó
+  `05-codigo/database/migrations/002_pacientes_historial_auth_google.sql`, el delta para aplicar a
+  mano (`psql $DATABASE_URL -f ...`) contra Render u otro ambiente ya migrado — no se ejecuta
+  solo, `runMigrations()` no lo conoce. Pendiente real para Backend/DevOps: correrlo contra Render,
+  y considerar (recomendación, no implementada) que `runMigrations()` pase a soportar una
+  secuencia de migraciones numeradas en vez de un único script "todo o nada".
+- **RLS de las 3 tablas nuevas** — `FORCE ROW LEVEL SECURITY` desde el primer commit (lección
+  directa del hallazgo de 2026-08-09), con un criterio MÁS estricto que `turno`/`servicio`: solo
+  el profesional dueño de la fila pasa la policy, ni el administrador del negocio ni otro
+  profesional del mismo negocio — coincide con el default ya documentado en
+  `documento-funcional.md` §6 (administrador sin acceso al historial por defecto), que sigue sin
+  cerrarse en este ciclo.
+- **No verificado contra un Postgres real** (mismo caveat que casi todo el resto de este proyecto —
+  Docker no está disponible en este entorno de desarrollo). SQL revisado manualmente con cuidado
+  (balance de paréntesis verificado programáticamente, referencias entre tablas revisadas en
+  orden). Prioridad para quien retome Backend: correr `002_pacientes_historial_auth_google.sql`
+  contra un ambiente de prueba antes que contra Render producción directamente.
+- **CORRECCIÓN (encontrada por el propio DBA al revisar el estado final, no reportada por
+  terceros):** Security revisó HU-35/HU-20 en paralelo, en la misma ventana
+  (`07-seguridad/informe-seguridad.md`, Adenda 2026-08-10) y sin coordinación directa conmigo.
+  Coincidieron independientemente en el punto central de HU-20 (scope por profesional, no solo
+  por negocio — validación cruzada útil, ver `modelo-datos.md` §5ter). Pero mi primer borrador del
+  comentario de `usuario` en `001_init.sql` recomendaba a Backend vincular una cuenta Google
+  automáticamente por coincidencia de email verificado — exactamente la alternativa que Security
+  evaluó y descartó explícitamente por riesgo de account takeover (email reciclado/cuenta Google
+  comprometida/Workspace). Corregido en el mismo ciclo, antes de cerrar la tarea, en
+  `001_init.sql` (ambas copias) y `modelo-datos.md` §2sexies, para que ninguna de las dos fuentes
+  quede contradiciendo la regla real ya aprobada (backlog.md HU-35: nunca autovincular, exigir
+  confirmación de contraseña). Se deja registrado como recuerdo operativo: cuando dos roles
+  modelan/revisan el mismo cambio en paralelo sin coordinación explícita, hay que releer el
+  resultado del otro antes de dar el propio por cerrado — no alcanza con no haber tenido el
+  hallazgo del otro disponible al momento de escribir la primera versión.

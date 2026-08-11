@@ -37,7 +37,9 @@ const altaProfesionalSchema = z.object({
 negociosRouter.get(
   '/',
   asyncHandler(async (_req, res) => {
-    const result = await pool.query('SELECT id, nombre, rubro, ubicacion FROM negocio WHERE eliminado_en IS NULL');
+    const result = await pool.query(
+      'SELECT id, nombre, rubro, ubicacion, es_rubro_salud FROM negocio WHERE eliminado_en IS NULL'
+    );
     res.json(result.rows);
   })
 );
