@@ -12,6 +12,8 @@ dependencies:
   http: ^1.2.1
   provider: ^6.1.2
   intl: ^0.19.0
+  google_sign_in: ^7.2.0
+  google_sign_in_web: ^1.1.3
 
 dev_dependencies:
   flutter_test:
@@ -20,3 +22,10 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  # HU-35 (login con Google, ver lib/widgets/google_logo.dart): logo oficial de Google ("G"
+  # multicolor), publicado por Google para armar botones de "Sign in with Google" propios (ver
+  # developers.google.com/identity/branding-guidelines) — se bundlea localmente en vez de
+  # referenciarlo por URL para no depender de red en cada render ni acoplar el login a que
+  # Google siga sirviendo ese archivo en esa URL.
+  assets:
+    - assets/branding/google_logo.png
