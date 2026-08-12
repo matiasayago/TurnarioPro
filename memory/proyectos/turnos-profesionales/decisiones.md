@@ -889,3 +889,60 @@ ver nota de coordinación entre ramas más abajo). Detalle completo en
   `004_notificaciones.sql` contra un ambiente de prueba antes que Render, con foco en confirmar
   empíricamente que la policy de INSERT deja pasar los 2 call sites existentes tal como están hoy
   (sin `destinatario_usuario_id`).
+
+## Notificaciones — bandeja + configuración + job de recordatorio (HU-14b/HU-25/HU-26) — Backend (2026-08-12)
+
+Rama `feature/notificaciones`, sobre el modelado de DBA (commit `9d7204d`, ver entrada anterior en
+este mismo archivo; `004_notificaciones.sql` ya aplicado a mano contra Render por el CEO — no se
+corrió desde este ciclo). Detalle completo (contratos exactos, comentarios línea por línea) en
+`05-codigo/backend/README.md`, sección "Notificaciones — bandeja + configuración granular". Resumen
+para reutilizar:
+
+- **Los 3 INSERT que DBA dejó documentados como recomendación se completaron/agregaron**, sin
+  necesitar ningún cambio de identidad de RLS: `POST /turnos` y `PATCH /:id/reprogramar` agregan
+  `destinatario_usuario_id` (el profesional del turno) al INSERT existente; `PATCH /:id/cancelar`
+  agrega el INSERT que no existía, `tipo='cancelacion'`. Los 3 corren autenticados como cliente y
+  la policy `notificacion_insert_evento_turno` (`004_notificaciones.sql`) ya contemplaba
+  exactamente este caso (cliente inserta con destinatario = el profesional del mismo turno) —
+  verificado leyendo la policy con cuidado antes de escribir código, no asumido.
+- **Decisión tomada, no explícita en el pedido:** `PATCH /:id/reprogramar` sigue insertando
+  `tipo='confirmacion'` (no `'reprogramacion'`, aunque DBA dejó ese label disponible en el ENUM) —
+  el pedido de este ciclo fue completar el destinatario, no cambiar el tipo; queda documentado en
+  el propio código para quien retome esta decisión.
+- **Bandeja (`GET /notificaciones`):** texto armado en español en `src/dominio/notificaciones.ts`
+  (`armarMensajeNotificacion`), derivado en cada lectura vía JOIN turno+usuario(cliente)+
+  profesional+usuario(profesional) — nunca persistido, mismo criterio que dejó DBA. **No agrupa
+  "Hoy"/"Ayer"** — decisión explícita: el backend no tiene ninguna noción confiable de la zona
+  horaria del dispositivo, así que agrupar server-side asumiría una fija y podría mostrar "Ayer"
+  en vez de "Hoy" cerca de la medianoche para un usuario en otro huso; devuelve lista plana
+  ordenada por `creado_en DESC` (mismo patrón que `GET /turnos/mios`/`GET /clientes/:id/historial`
+  ya establecido en este backend) y Mobile agrupa con su propio reloj local.
+- **Router nuevo `src/routes/notificaciones.ts` en `/notificaciones`** (bandeja + `PATCH
+  /:id/leer` + `PATCH /leer-todas` + `GET`/`PATCH /configuracion` para HU-26, mismo patrón
+  lazy-upsert que `GET`/`PATCH /usuario/privacidad` de HU-32) — **no** `/usuario/notificaciones`:
+  `src/routes/usuario.ts` no existe en esta rama (lo crea, con otro contenido, HU-32 en
+  `feature/configuracion-profesional`, todavía no mergeada) — crearlo en paralelo acá habría
+  producido el mismo archivo nuevo con historia divergente en 2 ramas, conflicto de merge
+  garantizado. Queda como decisión a revisar en un ciclo futuro, después de mergear ambas ramas,
+  si conviene reubicar `/notificaciones/configuracion` bajo `/usuario/*` para uniformar.
+- **Hallazgo de RLS real, encontrado y corregido durante la implementación (no con una migración
+  nueva — cambio de esquema, fuera del alcance de Backend):** el job de recordatorio
+  (`src/jobs/recordarTurnosProximos.ts`) necesita chequear, antes de insertar, si un turno YA
+  tiene un recordatorio — pero `notificacion` no tiene ninguna policy de SELECT que reconozca
+  `app.job_sistema` (solo la de INSERT), a diferencia de `turno` (que sí tiene SELECT público,
+  `turno_select_publico`). Un `NOT EXISTS` corriendo solo con `jobSistema: true` vería siempre 0
+  filas y el job duplicaría el recordatorio en cada corrida, sin ningún error visible (RLS
+  deniega leyendo 0 filas, no tira excepción — mismo patrón de riesgo silencioso que Security ya
+  señaló para RLS en general). Se resolvió con la misma técnica que ya usa `POST /turnos` para un
+  problema análogo: impersonar (`set_config('app.usuario_id', ...)`) al destinatario puntual de
+  cada turno candidato justo antes de su propio `INSERT ... WHERE NOT EXISTS`, dentro de la misma
+  transacción `jobSistema: true`. **Recomendación para DBA:** una policy de SELECT dedicada para
+  `app.job_sistema` en `notificacion` (análoga a `turno_acceso_job_expiracion`) sería más directa
+  a nivel de esquema. **Recomendación para QA/Security:** agregar este escenario a
+  `database/scripts/verificar_rls_postgres.sql` cuando exista — ningún test HTTP existente lo
+  detecta (RLS deniega en silencio).
+- **`notificacionProvider.enviar` (`integraciones/notificaciones.ts`) sigue sin invocarse** desde
+  ningún endpoint, a propósito — sigue siendo un stub que solo loguea (D4 no resolvió todavía qué
+  proveedor de push real se usa); conectar el "envío" real queda para un ciclo futuro.
+- No probado end-to-end contra Render (sin acceso de red desde este entorno — mismo caveat que
+  ciclos anteriores). Verificado con `npx tsc --noEmit` (sin errores).
