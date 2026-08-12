@@ -1,9 +1,11 @@
 -- Turnos Profesionales — migración inicial (Postgres)
 -- Rol: DBA · Fase 3 — Diseño (evolucionada en varios ciclos posteriores: fix CRITICAL-1 §2bis,
 -- generalización N:M §2ter, D10/duracion_cita_min §2quater, la ratificación de RLS del
--- 2026-08-09, y HU-20/HU-21/HU-35 del 2026-08-10 (ficha de paciente extendida + historial
--- clínico + login con Google) — ver 03-arquitectura/modelo-datos.md para el detalle completo de
--- cada una y memory/proyectos/turnos-profesionales/decisiones.md para la traza de decisiones).
+-- 2026-08-09, HU-20/HU-21/HU-35 del 2026-08-10 (ficha de paciente extendida + historial
+-- clínico + login con Google), y HU-14b/HU-25/HU-26 del 2026-08-12 (bandeja de notificaciones
+-- con destinatario/leído + preferencias de notificación, ver §2octies/§5quinquies) — ver
+-- 03-arquitectura/modelo-datos.md para el detalle completo de cada una y
+-- memory/proyectos/turnos-profesionales/decisiones.md para la traza de decisiones).
 -- Convenciones: GUID como PK, auditoría completa, soft delete donde corresponde (docs/06-modelo-datos.md §3)
 --
 -- ARCHIVO DUPLICADO A PROPÓSITO — mantener sincronizado. Este archivo es la fuente de verdad del
@@ -324,14 +326,130 @@ CREATE TABLE pago (
   modificado_en   TIMESTAMPTZ
 );
 
+-- ============================================================================
+-- Bandeja de notificaciones — destinatario + leído (HU-14b/HU-25/HU-26, 2026-08-12, DBA)
+-- ============================================================================
+-- Hasta este ciclo `notificacion` era, en la práctica, un LOG interno ("se generó un aviso de
+-- tipo X para este turno": turno_id, tipo, enviado_en, creado_en) — sin ninguna columna que
+-- dijera A QUIÉN había que notificar, ni si ya lo vio. Alcanzaba para que Backend registrara que
+-- planeaba avisar (D4), pero no para una bandeja consultable por usuario (mapa-pantallas.md
+-- §5.15, tab "Notificaciones", HU-14b/HU-25) ni para "marcar como leída".
+--
+-- Investigado contra el código real (backend/src/routes/turnos.ts, backend/src/jobs/,
+-- backend/src/integraciones/notificaciones.ts) antes de modelar, no asumido:
+-- - Solo 2 call sites insertan acá HOY, los dos literal `tipo = 'confirmacion'`: POST /turnos (al
+--   reservar) y PATCH /:id/reprogramar (para el turno nuevo). PATCH /:id/cancelar NO inserta
+--   ninguna fila — gap real de Backend, no solo de modelado (ver recomendación más abajo).
+-- - No existe ningún job de recordatorio: `src/jobs/expirarPagosPendientes.ts` es el ÚNICO
+--   archivo en `src/jobs/` y expira pagos vencidos (turno/pago), no envía avisos. El
+--   `tipo = 'recordatorio'` que ya anticipaba el comentario original de esta columna — y la
+--   propia interfaz `NotificacionProvider.enviar(destinatarioUsuarioId, tipo, mensaje)` de
+--   `integraciones/notificaciones.ts`, que YA tiene un parámetro de destinatario pero nunca se
+--   invoca desde ningún endpoint — sigue sin ningún productor real.
+-- - ¿Para quién son las filas `confirmacion` que sí se insertan hoy? El wireframe resuelve la
+--   ambigüedad: los 3 ejemplos de la bandeja (mapa-pantallas.md §5.15) — "María Pérez confirmó su
+--   turno de las 10:00", "Recordatorio: turno con Juan Ramírez en 1 hora", "Sofía Cano canceló su
+--   turno de las 16:00" — están redactados en 3ra persona sobre la acción del CLIENTE: es la
+--   bandeja del PROFESIONAL. HU-26 (§5.14) lista "nueva reserva" como sub-ítem "[solo
+--   Profesional]" de "Citas y recordatorios", distinto de "confirmación" (que HU-14 describe del
+--   lado del cliente). Conclusión aplicada acá: las filas `confirmacion` que ya insertan
+--   POST /turnos y PATCH /reprogramar SON, hoy, el aviso de "nueva reserva"/"turno reprogramado"
+--   PARA EL PROFESIONAL de ese turno — se backfillean así en `004_notificaciones.sql`
+--   (`turno.profesional_id -> profesional.usuario_id`). No se renombra el label `'confirmacion'`
+--   del ENUM nuevo (ver abajo) precisamente para no romper esos 2 call sites, que quedan sin
+--   tocar en este ciclo (fuera de alcance de DBA).
+--
+-- `destinatario_usuario_id` — lo único que faltaba para que esto sea una bandeja real y no un
+-- log: a quién notifica. NULLABLE, no NOT NULL — mismo motivo exacto que `usuario.telefono`/
+-- `usuario.google_id` (ver esa tabla, más arriba): los 2 call sites que YA insertan en esta
+-- tabla (POST /turnos, PATCH /:id/reprogramar) siguen sin tocarse en este ciclo (fuera de alcance
+-- de DBA) y NO van a pasar esta columna en su INSERT — si fuera NOT NULL sin default, esos 2
+-- INSERT, hoy funcionando, empezarían a fallar (23502, not-null violation) apenas corra esta
+-- migración, en CUALQUIER ambiente (no solo Render: también un docker-compose/CI recién creado
+-- que corre `001_init.sql` de punta a punta). Postgres no permite un `DEFAULT` que derive el
+-- valor de OTRA columna del mismo INSERT (acá haría falta resolver `turno_id -> profesional.
+-- usuario_id`), así que un `DEFAULT` constante no es una opción — se evaluó también un trigger
+-- `BEFORE INSERT` que auto-completara `destinatario_usuario_id` cuando venga NULL, y se descarta
+-- por ahora: sería el primer trigger de todo este esquema, y este proyecto viene resolviendo
+-- sistemáticamente este tipo de derivación en la capa de aplicación, no con lógica implícita en
+-- la base de datos (mismo criterio que el fallback de `duracion_cita_min`, §2quater, o el gate de
+-- `es_rubro_salud`, más abajo) — se prefiere consistencia con ese criterio antes que resolver un
+-- caso puntual con una herramienta nueva. La policy de INSERT (ver sección RLS) acepta
+-- explícitamente `destinatario_usuario_id IS NULL` para no romper esos 2 call sites; el SELECT de
+-- la bandeja (`destinatario_usuario_id = app.usuario_id`) nunca muestra una fila con esa columna
+-- en NULL a nadie (`NULL = x` nunca es `true`) — fail-closed, no un dato mal mostrado. Seguimiento
+-- recomendado para un ciclo futuro (no implementado acá): una vez que Backend agregue esta columna
+-- a esos 2 INSERT y al nuevo de PATCH /:id/cancelar (ver recomendación más abajo), y confirmado
+-- que no queden filas NULL, agregar `ALTER TABLE notificacion ALTER COLUMN
+-- destinatario_usuario_id SET NOT NULL` en una migración incremental nueva.
+--
+-- `leido` — booleano simple, sin un `leido_en` dedicado: es el ÚNICO atributo mutable de esta
+-- fila aparte de su creación, así que el `modificado_en` genérico agregado acá (mismo criterio
+-- que `usuario`/`negocio`/`profesional`/`servicio`/`turno`/`pago`/`paciente`/`tratamiento`/
+-- `nota_medica`, todos con `modificado_en` en vez de un timestamp dedicado por columna) ya
+-- captura "cuándo se marcó" sin necesitar una columna extra para ese único caso.
+--
+-- Deliberadamente NO se guarda texto/nombre/hora "congelados" en la fila (ej. un `mensaje` con
+-- "María Pérez confirmó su turno de las 10:00" ya armado) — mismo criterio de "no duplicar una
+-- única fuente de verdad" que ya aplica este archivo a `tratamiento`/`nota_medica` (no repiten
+-- `negocio_id`/`profesional_id` de `paciente`, ver esa sección). Todo lo que necesita el texto de
+-- la bandeja (nombre del cliente, hora del turno) ya es derivable sin ambigüedad vía `turno_id`
+-- — `turno` nunca se borra físicamente (solo cambia `estado`), la referencia queda válida para
+-- siempre. El string final lo arma el Backend (ver recomendación de queries más abajo), no la
+-- base de datos — mismo principio que el fallback de `duracion_cita_min` (§2quater) o el gate de
+-- `es_rubro_salud` (más arriba): a nivel de aplicación, no de constraint.
+--
+-- `tipo` pasa de `TEXT` libre a ENUM (`tipo_notificacion`, declarado justo abajo): a diferencia
+-- de `genero`/`contacto_emergencia_relacion` (TEXT a propósito, contenido de UI que no controla
+-- lógica), acá sí hay lógica real que depende del valor exacto — qué plantilla de texto arma el
+-- Backend, y a futuro qué toggle de HU-26 lo gatea — mismo criterio que `rol_usuario`/
+-- `estado_turno`/`estado_pago`. Se agregan `'cancelacion'` y `'reprogramacion'` (nuevos, ningún
+-- código los usa todavía) junto a `'confirmacion'`/`'recordatorio'` (ya existían como convención
+-- informal, solo un comentario TEXT hasta este ciclo).
+--
+-- Recomendación para Backend (no implementada acá, fuera de alcance de DBA) — 3 INSERT que faltan
+-- para que la bandeja tenga contenido real, uno por evento:
+-- 1) PATCH /:id/cancelar (turnos.ts) — agregar, dentro de la misma transacción que hace el
+--    UPDATE turno SET estado = 'cancelado', un INSERT INTO notificacion con
+--    tipo = 'cancelacion' y destinatario_usuario_id = el usuario_id del profesional del turno
+--    (mismo JOIN turno -> profesional que ya resuelve `paciente` en POST /turnos).
+-- 2) PATCH /:id/reprogramar (turnos.ts) — el INSERT que ya existe (tipo='confirmacion', sin
+--    destinatario) pasa a necesitar destinatario_usuario_id (mismo JOIN); evaluar además si
+--    conviene tipo='reprogramacion' en vez de 'confirmacion' para que el texto no confunda una
+--    reprogramación con una reserva nueva (label ya disponible en el ENUM, decisión de Backend).
+-- 3) Job de recordatorio NUEVO (no existe archivo todavía) — recorrer turnos con
+--    estado IN ('pendiente_de_pago','confirmado') cuyo `inicio` cae dentro de la ventana de aviso
+--    (ej. ~1h, wireframe "Recordatorio: turno con Juan Ramírez en 1 hora") e insertar
+--    tipo='recordatorio' para el profesional; correr con `withTransaction(fn, { jobSistema: true
+--    })` (mismo patrón que expirarPagosPendientes.ts) — la policy
+--    `notificacion_insert_job_sistema` (ver sección RLS) ya está lista para ese caso. Necesita
+--    además una guarda anti-duplicados (ej. una columna o un SELECT previo que evite mandar el
+--    mismo recordatorio en cada corrida del intervalo) — no resuelta acá, es lógica de Backend.
+-- POST /turnos (turno nuevo) también necesita el mismo destinatario_usuario_id agregado a su
+-- INSERT ya existente (no es un evento nuevo, es la misma fila 'confirmacion' de siempre).
+CREATE TYPE tipo_notificacion AS ENUM ('confirmacion', 'recordatorio', 'cancelacion', 'reprogramacion');
+
 CREATE TABLE notificacion (
-  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  turno_id        UUID NOT NULL REFERENCES turno(id),
-  tipo            TEXT NOT NULL, -- 'confirmacion' | 'recordatorio'
-  enviado_en      TIMESTAMPTZ,
-  creado_en       TIMESTAMPTZ NOT NULL DEFAULT now()
+  id                       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  turno_id                 UUID NOT NULL REFERENCES turno(id),
+  tipo                     tipo_notificacion NOT NULL,
+  destinatario_usuario_id  UUID REFERENCES usuario(id),
+  leido                    BOOLEAN NOT NULL DEFAULT false,
+  enviado_en               TIMESTAMPTZ,
+  creado_en                TIMESTAMPTZ NOT NULL DEFAULT now(),
+  modificado_en            TIMESTAMPTZ
 );
+-- `idx_notificacion_turno`: sentido original de la tabla (log por turno), se mantiene.
+-- `idx_notificacion_destinatario`: la query dominante de la bandeja — "mis notificaciones, más
+-- nuevas primero" (WHERE destinatario_usuario_id = ? ORDER BY creado_en DESC) — `creado_en DESC`
+-- ya en el índice para no pagar un sort aparte; el agrupado "Hoy"/"Ayer" de mapa-pantallas.md
+-- §5.15 lo arma Backend/Mobile sobre ese mismo orden, no SQL.
+-- `idx_notificacion_destinatario_no_leida`: parcial (WHERE leido = false), para el badge/contador
+-- de no leídas sin escanear el historial completo — mismo patrón que `uq_turno_slot_activo`
+-- (índice parcial filtrado por estado activo, documento-arquitectura.md §4).
 CREATE INDEX idx_notificacion_turno ON notificacion (turno_id);
+CREATE INDEX idx_notificacion_destinatario ON notificacion (destinatario_usuario_id, creado_en DESC);
+CREATE INDEX idx_notificacion_destinatario_no_leida ON notificacion (destinatario_usuario_id) WHERE leido = false;
 
 -- ============================================================================
 -- Ficha de paciente extendida + historial clínico (HU-20/HU-21, 2026-08-10, DBA)
@@ -508,6 +626,86 @@ CREATE INDEX idx_nota_medica_paciente ON nota_medica (paciente_id);
 -- tablas nuevas:
 --   SELECT count(*) FROM tratamiento WHERE paciente_id = ?
 --   SELECT count(*) FROM nota_medica WHERE paciente_id = ?
+
+-- ============================================================================
+-- Preferencias de notificación (HU-26, 2026-08-12, DBA)
+-- ============================================================================
+-- Compartida Cliente/Profesional, mismo patrón que "Preferencias de privacidad de usuario"
+-- (HU-32, ciclo paralelo en `feature/configuracion-profesional`, todavía no mergeado a `main` al
+-- momento de este commit — ver motivo 2 más abajo). mapa-pantallas.md §5.14, 3 secciones: Canal
+-- (push/email/whatsapp), Tipo de aviso (citas y recordatorios / promociones y ofertas —
+-- "Mensajes" y "Reseñas y Calificaciones" quedan OCULTOS por decisión ya tomada de UX/UI, no se
+-- modelan acá) y Sonido y vibración. "Este es el único lugar de la app donde se activan/
+-- desactivan tipos de aviso y canales" (§5.14) — un solo toggle "Citas y recordatorios" cubre
+-- confirmación/recordatorio/cancelación/reprogramación/nueva-reserva a la vez, no 5 toggles
+-- separados: el wireframe no expone más granularidad que esa — modelar 5 columnas hubiera sido
+-- diseñar por encima de lo que pide la UI real.
+--
+-- Decisión de diseño (la pregunta central de este ciclo): ¿tabla nueva, o columnas nuevas en
+-- `usuario_preferencias` (la tabla de Privacidad, HU-32)? Elegida TABLA NUEVA, por 2 motivos
+-- independientes — ninguno alcanza solo:
+-- 1) (lógico) `usuario_preferencias` ya tiene nombre genérico ("preferencias", no
+--    "preferencias_privacidad"), lo que en principio invita a extenderla — pero Configuración
+--    (ver historial de commits: Perfil/Privacidad/Consultorio/Pagos/Reportes, y ahora
+--    Notificaciones) va camino a sumar más pantallas de ajustes de usuario. Agregar cada familia
+--    de toggles a una única tabla "cajón de sastre" degrada con el tiempo — visibilidad de perfil
+--    y canales de notificación no tienen ninguna relación funcional entre sí más que "son de
+--    configuración". Se traza acá el límite: `usuario_preferencias*` sirve para preferencias
+--    PLANAS (booleanos/enums escalares, sin sub-estructura ni historial propio) — el día que una
+--    pantalla de Configuración necesite algo con estado/historial propio (ej. WhatsApp,
+--    mapa-pantallas.md §5.16: estado de conexión + log de mensajes enviados, no un simple on/off)
+--    eso ya no calificaría para vivir acá y necesitaría su propia tabla, igual que esta.
+-- 2) (operativo — el que decide en la práctica) `usuario_preferencias` NO EXISTE en esta rama
+--    (`feature/notificaciones`, parada sobre `main`): la creó DBA en
+--    `feature/configuracion-profesional` (HU-32, commit 7a106e8), rama todavía no mergeada a
+--    `main`. Depender de ella acá (`ALTER TABLE usuario_preferencias ADD COLUMN ...`) hubiera
+--    acoplado esta migración al orden y al éxito de un merge ajeno todavía en curso — riesgo
+--    operativo real, no hipotético, para una migración que además tiene que poder aplicarse a
+--    mano contra Render (ver `004_notificaciones.sql`). Una tabla propia, sin ninguna referencia
+--    a `usuario_preferencias`, es 100% autocontenida: se prueba/migra en esta rama sin importar
+--    en qué orden termine mergeándose respecto a HU-32.
+-- Nombre `usuario_preferencias_notificacion` (no `notificacion_preferencias`): comparte a
+-- propósito el prefijo exacto de `usuario_preferencias` — dos tablas hermanas de la misma familia
+-- conceptual ("las preferencias de este usuario"), separadas por los 2 motivos de arriba, no dos
+-- conceptos sin relación. Cuando se mergeen ambas ramas, si conviene consolidarlas en una sola
+-- tabla queda a criterio de un ciclo futuro (Director General IA/DBA) — no se decide acá, no hace
+-- falta para que ninguna de las dos funcione por separado.
+--
+-- Columnas — 1 booleano por control del wireframe, ya son atómicos, sin agrupar:
+--   Canal:             notif_canal_push / notif_canal_email / notif_canal_whatsapp (default
+--                       true — el wireframe muestra los 3 activados por defecto).
+--   Tipo de aviso:      notif_citas_recordatorios (default true), notif_promociones (default
+--                       false — "Promociones y Ofertas" aparece apagado por defecto).
+--   Sonido y vibración: notif_sonido, notif_vibracion (default true).
+-- Prefijo `notif_` en las 7 (a diferencia de las columnas de `usuario_preferencias`, que no
+-- llevan prefijo `privacidad_`): acá sí se justifica — convención barata que compensa que esta
+-- tabla puede terminar conviviendo, tras el merge, con otras familias de preferencias en el mismo
+-- espacio de nombres visual (`\d usuario_preferencias*`).
+--
+-- Sin `creado_por`/`modificado_por` (mismo motivo que `usuario_preferencias`, HU-32): la fila es
+-- propiedad exclusiva de `usuario_id`, y RLS (ver más abajo) ya solo permite que ese mismo usuario
+-- la escriba — `modificado_por` sería 100% redundante con `usuario_id` bajo esa policy. Sin
+-- `eliminado_en` (mismo motivo): un ajuste de preferencias no se "da de baja" — existe con sus
+-- valores actuales, o todavía no se creó la fila (ver recomendación de Backend abajo).
+--
+-- Recomendación para Backend (no implementada acá, fuera de alcance de DBA): ninguna fila se crea
+-- automáticamente al registrarse un usuario — igual que `usuario_preferencias` de HU-32, el
+-- endpoint de lectura (`GET /config/notificaciones` o el que se defina) debe devolver estos
+-- defaults cuando no exista fila todavía, o hacer un `INSERT ... ON CONFLICT (usuario_id) DO
+-- NOTHING` perezoso antes de leer — el UNIQUE de abajo ya lo permite sin duplicar filas.
+CREATE TABLE usuario_preferencias_notificacion (
+  id                          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  usuario_id                  UUID NOT NULL UNIQUE REFERENCES usuario(id),
+  notif_canal_push            BOOLEAN NOT NULL DEFAULT true,
+  notif_canal_email           BOOLEAN NOT NULL DEFAULT true,
+  notif_canal_whatsapp        BOOLEAN NOT NULL DEFAULT true,
+  notif_citas_recordatorios   BOOLEAN NOT NULL DEFAULT true,
+  notif_promociones           BOOLEAN NOT NULL DEFAULT false,
+  notif_sonido                BOOLEAN NOT NULL DEFAULT true,
+  notif_vibracion             BOOLEAN NOT NULL DEFAULT true,
+  creado_en                   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  modificado_en               TIMESTAMPTZ
+);
 
 -- ============================================================================
 -- Row Level Security — defensa en profundidad además de los checks de la API
@@ -995,6 +1193,121 @@ CREATE POLICY nota_medica_acceso_via_paciente ON nota_medica
         AND p.usuario_id = NULLIF(current_setting('app.usuario_id', true), '')::uuid
     )
   );
+
+-- ============================================================================
+-- RLS de la bandeja de notificaciones + preferencias de notificación (HU-14b/HU-25/HU-26,
+-- 2026-08-12, DBA)
+-- ============================================================================
+-- FORCE desde el primer commit para la tabla nueva (`usuario_preferencias_notificacion`) y, **por
+-- primera vez, también para `notificacion`**: existe desde la Fase 3 original sin ninguna policy
+-- — el gap de ownership de §5bis le aplicaba igual que a cualquier tabla sin FORCE, pero nadie lo
+-- había cerrado porque hasta este ciclo la tabla no tenía ninguna noción de "de quién es cada
+-- fila" (sin `destinatario_usuario_id` no había nada que proteger con RLS). Este bloque cierra
+-- además el "pendiente para una próxima iteración" que ya dejaba documentado la sección 5 de
+-- 03-arquitectura/modelo-datos.md sobre `notificacion` (sin `negocio_id` propio, necesitaría una
+-- política basada en subquery) — exactamente lo que se implementa acá.
+--
+-- `notificacion` — 3 policies, ninguna cubre todos los comandos (a diferencia de
+-- `usuario_preferencias_notificacion`, que sí tiene una única policy simétrica, más abajo):
+-- 1) SELECT/UPDATE ("ver mi bandeja"/"marcar como leída") — estrictamente acotado al propio
+--    destinatario (destinatario_usuario_id = app.usuario_id), sin excepción para staff del
+--    negocio ni para quien originó el evento — la bandeja es personal (mapa-pantallas.md §5.15).
+--    El WITH CHECK del UPDATE es simétrico al USING a propósito: impide que la fila cambie de
+--    dueño vía un UPDATE que conserve el resto de las columnas — mismo patrón que
+--    `usuario_preferencias_acceso_propio` (HU-32) y `turno_acceso_negocio_o_cliente`.
+-- 2) INSERT ("generar un aviso") — necesariamente MÁS ancha que 1), y a propósito: verificado
+--    contra el código real de POST /turnos (turnos.ts) que el actor que ejecuta el INSERT casi
+--    nunca es el propio destinatario. Ejemplo concreto: un cliente reserva → el contexto RLS de
+--    esa transacción es `app.usuario_id = <cliente>` (todo el handler corre con
+--    `requireAuth('cliente')`) → pero el destinatario de la notificación es el PROFESIONAL de ese
+--    turno. Una policy de INSERT acotada como la de 1) HABRÍA ROTO ese INSERT, ya existente y
+--    funcionando, en cuanto RLS tuviera efecto real — exactamente la regresión que este ciclo
+--    tiene que evitar (no se toca código de Backend, la policy tiene que acomodar el código TAL
+--    COMO ESTÁ). En vez de replicar acá el truco que sí usa POST /turnos para `paciente` (un
+--    `SELECT set_config('app.usuario_id', <otro usuario>, true)` a mitad de transacción, ver ese
+--    archivo), la policy verifica que TANTO el actor COMO el destinatario sean participantes del
+--    MISMO turno (`turno_id`): el actor con el mismo criterio ancho que ya usa
+--    `turno_acceso_negocio_o_cliente` (el cliente dueño, o cualquier staff del negocio), el
+--    destinatario con un criterio más angosto a propósito (el cliente dueño, o específicamente el
+--    profesional ASIGNADO a ese turno — no cualquier staff), para que nadie pueda insertar una
+--    notificación dirigida a un tercero ajeno al turno referenciado. Acepta además
+--    `destinatario_usuario_id IS NULL` explícitamente — necesario para que los 2 call sites que
+--    hoy insertan sin esa columna (POST /turnos, PATCH /:id/reprogramar, sin tocar en este ciclo)
+--    sigan funcionando exactamente igual que antes de esta migración (ver comentario junto a
+--    `destinatario_usuario_id` en `CREATE TABLE notificacion`, más arriba) — no relaja nada para
+--    una fila que SÍ trae destinatario, esas siguen validándose completas.
+-- 3) INSERT adicional para el futuro job de recordatorio (app.job_sistema = 'true') — mismo
+--    criterio que `turno_acceso_job_expiracion`: un job que recorre turnos de CUALQUIER
+--    cliente/negocio en un solo barrido no actúa "como" ningún usuario puntual, 2) no lo cubre.
+--    Sin scope adicional sobre qué turno/destinatario, mismo criterio que
+--    `turno_acceso_job_expiracion` — se confía en la lógica interna del job (privilegios de
+--    sistema, no de request HTTP). Ese job todavía no existe (ver recomendación junto a
+--    `CREATE TABLE notificacion` más arriba); policy dejada lista para cuando Backend lo
+--    implemente, mismo criterio que las funciones `SECURITY DEFINER` de más abajo (preparadas
+--    antes de que el código las use).
+-- No hay policy de DELETE — mismo motivo que `negocio_administrador`: ningún endpoint/HU de este
+-- ciclo borra notificaciones (mapa-pantallas.md §5.15 no muestra ninguna acción de descarte);
+-- queda como extensión futura documentada, no implementada.
+ALTER TABLE notificacion ENABLE ROW LEVEL SECURITY;
+ALTER TABLE notificacion FORCE ROW LEVEL SECURITY; -- ver nota junto a `profesional`, más arriba en este archivo
+
+CREATE POLICY notificacion_select_propia ON notificacion
+  FOR SELECT USING (destinatario_usuario_id = NULLIF(current_setting('app.usuario_id', true), '')::uuid);
+
+CREATE POLICY notificacion_update_propia_marcar_leida ON notificacion
+  FOR UPDATE
+  USING (destinatario_usuario_id = NULLIF(current_setting('app.usuario_id', true), '')::uuid)
+  WITH CHECK (destinatario_usuario_id = NULLIF(current_setting('app.usuario_id', true), '')::uuid);
+
+CREATE POLICY notificacion_insert_evento_turno ON notificacion
+  FOR INSERT WITH CHECK (
+    -- El actor participa del turno referenciado (mismo criterio que turno_acceso_negocio_o_cliente).
+    EXISTS (
+      SELECT 1 FROM turno t
+      WHERE t.id = notificacion.turno_id
+        AND (
+          t.cliente_id = NULLIF(current_setting('app.usuario_id', true), '')::uuid
+          OR EXISTS (
+            SELECT 1 FROM negocio_administrador na
+            WHERE na.negocio_id = t.negocio_id
+              AND na.usuario_id = NULLIF(current_setting('app.usuario_id', true), '')::uuid
+          )
+          OR EXISTS (
+            SELECT 1 FROM negocio_profesional np
+            JOIN profesional p ON p.id = np.profesional_id
+            WHERE np.negocio_id = t.negocio_id
+              AND p.usuario_id = NULLIF(current_setting('app.usuario_id', true), '')::uuid
+          )
+        )
+    )
+    -- El destinatario es el cliente dueño o el profesional ASIGNADO a ese turno — más angosto a
+    -- propósito que el chequeo de arriba, ver comentario de esta sección. `IS NULL` explícito:
+    -- compat con los 2 call sites que hoy insertan sin destinatario (ver arriba).
+    AND (
+      notificacion.destinatario_usuario_id IS NULL
+      OR EXISTS (
+        SELECT 1 FROM turno t
+        JOIN profesional p ON p.id = t.profesional_id
+        WHERE t.id = notificacion.turno_id
+          AND (t.cliente_id = notificacion.destinatario_usuario_id OR p.usuario_id = notificacion.destinatario_usuario_id)
+      )
+    )
+  );
+
+CREATE POLICY notificacion_insert_job_sistema ON notificacion
+  FOR INSERT WITH CHECK (
+    current_setting('app.job_sistema', true) = 'true'
+  );
+
+-- `usuario_preferencias_notificacion` — policy única simétrica, mismo patrón exacto que
+-- `usuario_preferencias_acceso_propio` (HU-32): sin JOIN, cada usuario lee/edita únicamente su
+-- propia fila.
+ALTER TABLE usuario_preferencias_notificacion ENABLE ROW LEVEL SECURITY;
+ALTER TABLE usuario_preferencias_notificacion FORCE ROW LEVEL SECURITY; -- ver nota junto a `profesional`, más arriba en este archivo
+
+CREATE POLICY usuario_preferencias_notificacion_acceso_propio ON usuario_preferencias_notificacion
+  USING (usuario_id = NULLIF(current_setting('app.usuario_id', true), '')::uuid)
+  WITH CHECK (usuario_id = NULLIF(current_setting('app.usuario_id', true), '')::uuid);
 
 -- ============================================================================
 -- Funciones SECURITY DEFINER — reemplazo preparado para `turno_select_publico` (DBA, 2026-08-09,

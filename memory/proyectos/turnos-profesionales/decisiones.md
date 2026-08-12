@@ -821,3 +821,71 @@ ahí mismo, mismo patrón que ya usaron DBA/Security para las suyas). Resumen pa
   worktree aislado en vez de en el directorio de trabajo principal — ver
   `08-despliegue/google-oauth.md` para el detalle; se deja anotado acá por si vuelve a pasar en un
   ciclo futuro.
+
+## Modelado de bandeja de notificaciones + preferencias de notificación (HU-14b/HU-25/HU-26) — DBA (2026-08-12)
+
+Rama `feature/notificaciones`, parada sobre `main` (previa a `feature/configuracion-profesional`,
+ver nota de coordinación entre ramas más abajo). Detalle completo en
+`03-arquitectura/modelo-datos.md` §2octies/§5quinquies. Resumen para reutilizar:
+
+- **Investigación previa contra el código real (no asumida) — el hallazgo central del ciclo.**
+  `notificacion` existía desde la Fase 3 original como un LOG (`turno_id`, `tipo`, `enviado_en`,
+  `creado_en`), sin destinatario ni estado de leído. Verificado contra `backend/src/`: solo 2 call
+  sites insertan hoy (`POST /turnos`, `PATCH /:id/reprogramar`, los 2 con `tipo = 'confirmacion'`
+  literal); `PATCH /:id/cancelar` NO inserta nada; no existe ningún job de recordatorio
+  (`src/jobs/` solo tiene `expirarPagosPendientes.ts`, que expira pagos, no envía avisos); y la
+  interfaz `NotificacionProvider.enviar(destinatarioUsuarioId, tipo, mensaje)` de
+  `integraciones/notificaciones.ts` nunca se invoca desde ningún endpoint. El wireframe
+  (`mapa-pantallas.md` §5.15) confirma que las filas `confirmacion` existentes son, hoy, avisos
+  para el PROFESIONAL del turno (redactadas en 3ra persona sobre la acción del cliente) — se
+  backfillean así en `004_notificaciones.sql`.
+- **Bandeja — se extiende `notificacion` (no tabla nueva).** Se agregan
+  `destinatario_usuario_id` (UUID, **nullable a propósito** — mismo motivo que
+  `usuario.telefono`/`google_id`: los 2 call sites existentes no se tocan en este ciclo y no van a
+  pasar esa columna; NOT NULL sin default habría roto esos 2 INSERT, hoy funcionando, en
+  CUALQUIER ambiente apenas corriera la migración), `leido` (BOOLEAN, default `false`) y
+  `modificado_en`. `tipo` pasa de `TEXT` libre a ENUM `tipo_notificacion` (se agregan
+  `'cancelacion'`/`'reprogramacion'`, sin renombrar `'confirmacion'` para no romper código
+  existente). Deliberadamente NO se guarda texto armado — se deriva vía `turno_id` en Backend.
+- **RLS de `notificacion` por primera vez** — la tabla nunca la tuvo, y la propia
+  `modelo-datos.md` §5 ya lo dejaba anotado como pendiente ("necesitaría una política basada en
+  subquery, no incluida en este slice"). La policy de INSERT tuvo que diseñarse alrededor del
+  código existente, no al revés: verificado que `POST /turnos` inserta la notificación con
+  `app.usuario_id` = el CLIENTE (nunca cambia a la identidad del profesional para esa sentencia,
+  a diferencia de lo que sí hace para `paciente` más abajo en el mismo handler) — la policy de
+  INSERT permite que cualquier participante del turno (cliente o staff) notifique a cualquier
+  OTRO participante del MISMO turno, y acepta explícitamente `destinatario_usuario_id IS NULL`
+  para no bloquear los 2 INSERT existentes.
+- **Preferencias de notificación (HU-26) — tabla NUEVA, `usuario_preferencias_notificacion`, NO
+  columnas en `usuario_preferencias`.** Se evaluó extender (mismo patrón que Privacidad/HU-32,
+  y `usuario_preferencias` ya tiene nombre genérico) pero se decidió tabla propia por 2 motivos:
+  (1) lógico — evitar que `usuario_preferencias*` degrade en un "cajón de sastre" a medida que
+  Configuración suma pantallas; (2) **operativo, el que decide en la práctica** —
+  `usuario_preferencias` la creó DBA en `feature/configuracion-profesional` (HU-32, commit
+  7a106e8), rama todavía no mergeada a `main` al momento de este ciclo, así que esa tabla NO
+  EXISTE en `feature/notificaciones`. Depender de ella habría acoplado esta migración al orden y
+  éxito de un merge ajeno en curso. La tabla nueva comparte el prefijo (`usuario_preferencias_`)
+  a propósito — misma familia conceptual, sin dependencia estructural entre ambas.
+- **Nota de coordinación entre ramas (relevante para quien mergee `feature/notificaciones` y
+  `feature/configuracion-profesional`, en cualquier orden):** ninguna de las 2 tablas nuevas de
+  este ciclo referencia `usuario_preferencias` (HU-32) — 100% autocontenidas, sin importar el
+  orden del merge. La migración incremental de este ciclo se numeró **`004_notificaciones.sql`**
+  (no `003_*`, que ya lo usa HU-32 en la otra rama) para que ambas ramas no registren un mismo
+  número al mergear. Si en un ciclo futuro conviene consolidar `usuario_preferencias` y
+  `usuario_preferencias_notificacion` en una sola tabla, queda a criterio del Director General
+  IA/DBA — no se resuelve acá.
+- **Recomendación para Backend — 3 INSERT concretos que faltan para que la bandeja tenga
+  contenido real** (no implementado en este ciclo, fuera de alcance de DBA): 1) `PATCH
+  /:id/cancelar` (turnos.ts) — agregar `INSERT INTO notificacion` con `tipo = 'cancelacion'` y
+  `destinatario_usuario_id` resuelto vía `turno.profesional_id -> profesional.usuario_id`; 2)
+  `POST /turnos`/`PATCH /:id/reprogramar` — agregar `destinatario_usuario_id` al INSERT que ya
+  existe (mismo JOIN); 3) job de recordatorio nuevo (no existe archivo todavía) — recorrer turnos
+  próximos a iniciar e insertar `tipo = 'recordatorio'`, corriendo con
+  `withTransaction(fn, { jobSistema: true })` (mismo patrón que `expirarPagosPendientes.ts`) — la
+  policy `notificacion_insert_job_sistema` ya está lista para ese caso.
+- **No verificado contra un Postgres real** (mismo caveat de siempre — sin `psql`/Docker en este
+  entorno). SQL revisado con cuidado (balance de paréntesis verificado programáticamente sobre
+  las líneas de código, excluyendo comentarios). Prioridad para quien retome Backend: correr
+  `004_notificaciones.sql` contra un ambiente de prueba antes que Render, con foco en confirmar
+  empíricamente que la policy de INSERT deja pasar los 2 call sites existentes tal como están hoy
+  (sin `destinatario_usuario_id`).
