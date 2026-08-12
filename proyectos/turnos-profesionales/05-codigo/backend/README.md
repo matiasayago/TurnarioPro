@@ -64,6 +64,10 @@ prueba de concurrencia desde la UI, sin instalar Flutter.
   cada 60s, ventana configurable con `EXPIRACION_PAGO_MIN`) — libera el slot si Mercado Pago no
   confirma el pago a tiempo.
 - Endpoints `/dev/*` (seed + forzar expiración) solo activos fuera de `NODE_ENV=production`.
+- **Configuración del lado Profesional** (Perfil, Privacidad, Consultorio, Pagos, Reportes — ver
+  sección dedicada más abajo): `GET/PATCH /usuario/perfil`, `GET/PATCH /usuario/privacidad`,
+  `GET/PATCH /negocios/:id`, `GET /profesionales/:id/servicios`,
+  `PATCH /profesionales/:id/servicios/:servicioId`, `GET /profesionales/:id/reportes`.
 
 ## Row Level Security (Postgres)
 
@@ -337,3 +341,68 @@ que sigue funcionando exactamente igual, sin cambios, para quien no usa Google.
 No probado end-to-end: todavía no existe un `GOOGLE_CLIENT_ID` real (DevOps está resolviendo el
 alta de credenciales OAuth en Google Cloud Console, ver backlog.md HU-35). Verificado con
 `npx tsc --noEmit` (sin errores).
+
+## Configuración del lado Profesional (Perfil, Privacidad, Consultorio, Pagos, Reportes)
+
+Completa 5 pantallas de Configuración que hasta este ciclo eran placeholder "Próximamente"
+(ver `../04-diseno/mapa-pantallas.md` §5.11/§5.11bis). Antes de escribir código se relevó qué ya
+existía — 2 de los 5 bloques reusan/extienden endpoints ya existentes en vez de crear todo de
+cero (ver el detalle de cada uno).
+
+- **Editar Perfil** — `GET/PATCH /usuario/perfil`. Router nuevo, `src/routes/usuario.ts`, montado
+  en `/usuario` (ver ese archivo para el razonamiento completo de nombre/ubicación — no existía
+  ningún endpoint genérico de "mi perfil" antes). Cualquier rol autenticado, siempre sobre uno
+  mismo. Campos editables: `nombre`, `telefono` (columna ya existente en `usuario`). `email` es
+  de **solo lectura** en este ciclo — es el identificador único de login; cambiarlo implica
+  validar colisión de unicidad y, para cuentas vinculadas a Google (HU-35), desincronización con
+  el email real de esa cuenta — fuera de alcance de esta ronda. `usuario` no tiene RLS (gap ya
+  documentado, preexistente) — mismo patrón que auth.ts: `pool.query` directo, sin transacción.
+- **Privacidad** — `GET/PATCH /usuario/privacidad` (mismo router). Opera sobre
+  `usuario_preferencias` (HU-32, DBA — ver `001_init.sql`/`003_privacidad_usuario.sql`). La fila
+  puede no existir para una cuenta creada antes de este ciclo (DBA no puso alta automática): el
+  GET devuelve los defaults de la tabla (`publico`/`true`/`true`) en vez de `404`; el PATCH es
+  upsert (`INSERT ... ON CONFLICT (usuario_id) DO UPDATE`), mismo patrón que
+  `PATCH /profesionales/:id/pacientes/:pacienteId`. `usuario_preferencias` SÍ tiene RLS FORCE — a
+  diferencia de Perfil, tanto el GET como el PATCH van con `withTransaction` y contexto
+  (`usuarioId`): sin `app.usuario_id` seteado, la policy devolvería 0 filas siempre, incluso para
+  una cuenta que ya personalizó su privacidad.
+- **Configuración de Consultorio** — `PATCH /negocios/:id` (nuevo) + `GET /negocios/:id` (nuevo,
+  público — no existía un detalle de negocio puntual, solo el listado `GET /negocios`; se agregó
+  para que Mobile pueda prefillear el formulario sin traer la lista completa). Edita
+  `nombre`/`rubro`/`ubicacion` (ya existentes en `negocio`). Solo `administrador`, y solo sobre su
+  propio negocio (`req.auth.negocio_id`, mismo patrón RN9 que el resto de `negocios.ts`).
+  `es_rubro_salud` queda explícitamente fuera de este PATCH (no estaba en el alcance del ciclo, y
+  cambiarlo tiene implicancias de producto que exceden un campo más de un formulario descriptivo).
+- **Configuración de Pagos (Precios y Señas)** — `GET /profesionales/:id/servicios` (nuevo — no
+  existía un listado de "mis servicios asociados con su seña actual") +
+  `PATCH /profesionales/:id/servicios/:servicioId` (nuevo). El alta de la primera asociación
+  sigue siendo `POST /profesionales/:id/servicios` (sin cambios — ya era upsert-friendly, `ON
+  CONFLICT ... DO UPDATE`, así que técnicamente ya soportaba editar; el PATCH nuevo es más angosto
+  a propósito: no re-verifica membresía del negocio en cada edición y responde `404` en vez de
+  crear si la asociación no existe todavía).
+- **Reportes y Estadísticas** — `GET /profesionales/:id/reportes` (nuevo). HU-28/E10, v1
+  simplificada, **lado Profesional únicamente en este ciclo** (no se construye la vista de
+  negocio/administrador, HU-28 la pide pero la consigna de este ciclo la difiere explícitamente).
+  Devuelve `turnos_totales`, `turnos_completados`, `turnos_cancelados`, `monto_facturado`,
+  filtrables por período (`desde`/`hasta` sobre `turno.inicio`) y `servicio_id` — los 3 criterios
+  de aceptación básicos que ya cerró HU-28 (`02-backlog/backlog.md`). Fuera de esta v1 (documentado
+  en el propio código, no un olvido): exportar y métricas avanzadas (ambos explícitamente fuera de
+  alcance en HU-28), y el filtro "por profesional" (no aplica — el endpoint ya está scopeado a
+  uno). `turnos_completados`/`monto_facturado` reusan la misma derivación que ya recomienda DBA
+  para "Completadas" en HU-21 (`estado = 'confirmado' AND fin < now()` — `estado_turno` no tiene
+  un valor `'completado'` propio); `turnos_totales` excluye `estado = 'reprogramado'` (decisión
+  propia, no explícita en HU-28: la fila vieja de un turno reprogramado no debe contarse junto a
+  la fila nueva que representa la misma cita real).
+
+Contrato completo de cada endpoint (verbo, ruta, body, response, códigos de error) documentado en
+los comentarios de `src/routes/usuario.ts`, `src/routes/negocios.ts` y
+`src/routes/profesionales.ts`, junto a cada handler.
+
+Verificado con `npx tsc --noEmit` y `npm run build` (sin errores). **No verificado end-to-end
+contra un servidor real en este ciclo**: la única base disponible para pruebas manuales
+(`DATABASE_URL` de Render en `.env`) no fue alcanzable por red desde este entorno de desarrollo
+(`ECONNRESET` en cada intento de conexión, confirmado con una prueba de conectividad directa
+aislada del código de la app — no es un bug de este código, es una restricción de red del
+entorno). Pendiente para quien corra esto en un entorno con salida de red real: correr
+`npm run dev` y ejercitar los 6 endpoints de arriba (o el smoke test manual que se haya armado)
+antes de dar por buena la integración end-to-end.
