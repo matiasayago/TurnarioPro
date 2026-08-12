@@ -337,3 +337,77 @@ que sigue funcionando exactamente igual, sin cambios, para quien no usa Google.
 No probado end-to-end: todavía no existe un `GOOGLE_CLIENT_ID` real (DevOps está resolviendo el
 alta de credenciales OAuth en Google Cloud Console, ver backlog.md HU-35). Verificado con
 `npx tsc --noEmit` (sin errores).
+
+## Notificaciones — bandeja + configuración granular (HU-14b/HU-25/HU-26)
+
+Ver `../database/migrations/001_init.sql` (bloques "Bandeja de notificaciones" y "Preferencias
+de notificación", DBA) y `004_notificaciones.sql` (delta aplicado a mano contra Render) para el
+modelo de datos completo: `notificacion` gana `destinatario_usuario_id` / `leido` /
+`modificado_en` y `tipo` pasa a ENUM (`tipo_notificacion`); tabla nueva
+`usuario_preferencias_notificacion` (7 booleanos). Router nuevo `src/routes/notificaciones.ts`,
+montado en `/notificaciones` — ver la nota de diseño al inicio de ese archivo sobre por qué no
+`/usuario/notificaciones` (`src/routes/usuario.ts` no existe en esta rama; lo crea en paralelo
+`feature/configuracion-profesional`, todavía no mergeada, con otro contenido).
+
+- **3 INSERT completados/agregados en `src/routes/turnos.ts`** (gap que DBA dejó documentado en
+  `001_init.sql`, bloque "Bandeja de notificaciones", como recomendación para Backend):
+  `POST /turnos` y `PATCH /turnos/:id/reprogramar` ahora completan `destinatario_usuario_id` (el
+  profesional del turno) en el INSERT de `notificacion` que ya existía; `PATCH
+  /turnos/:id/cancelar` no insertaba ninguna notificación — se agrega, `tipo='cancelacion'`,
+  mismo destinatario. Ninguno de los 3 necesita cambiar de identidad de RLS (a diferencia del
+  alta de `paciente` en `POST /turnos`): los 3 corren autenticados como `cliente`, y la policy
+  `notificacion_insert_evento_turno` (`004_notificaciones.sql`) ya contempla que el cliente
+  inserte con destinatario = el profesional del turno.
+- **`GET /notificaciones`** — bandeja del usuario autenticado (cualquier rol, sobre sí mismo),
+  `[{ id, tipo, leido, creado_en, turno_id, mensaje }, ...]`, más nuevas primero. `mensaje` es el
+  texto en español ya armado (`src/dominio/notificaciones.ts`, `armarMensajeNotificacion` — JOIN
+  `turno` + `usuario` (cliente) + `profesional` + `usuario` (profesional); sin texto congelado en
+  la fila, mismo criterio documentado por DBA). **No agrupa "Hoy"/"Ayer"** (mapa-pantallas.md
+  §5.15): devuelve una lista plana ordenada por `creado_en DESC`, mismo criterio ya establecido
+  en este backend para listas similares (`GET /turnos/mios`, `GET /clientes/:id/historial`).
+  "Hoy"/"Ayer" es relativo a la zona horaria del dispositivo, que el backend no conoce (no viaja
+  en el JWT) — agrupar acá asumiría una zona horaria fija; Mobile agrupa con su propio reloj
+  local sobre `creado_en` (ISO-8601 completo).
+- **`PATCH /notificaciones/:id/leer`** — marca una notificación propia como leída. `404` uniforme
+  si no existe o no es propia (no se distingue: acá no hay ningún caso de uso que necesite
+  diferenciar 403/404, a diferencia de `turnos.ts`).
+- **`PATCH /notificaciones/leer-todas`** — marca todas las no leídas del usuario autenticado,
+  responde `{ actualizadas: number }`.
+- **`GET /notificaciones/configuracion` / `PATCH /notificaciones/configuracion`** (HU-26,
+  mapa-pantallas.md §5.14) — mismo patrón lazy-upsert que `GET`/`PATCH /usuario/privacidad`
+  (HU-32, `feature/configuracion-profesional`): el GET devuelve los 7 defaults de fábrica si la
+  cuenta nunca guardó nada (nunca `404`); el PATCH hace `INSERT ... ON CONFLICT (usuario_id) DO
+  UPDATE` con el objeto de 7 booleanos completo (mismo criterio de "reenviar el formulario
+  entero" que el resto de los PATCH de configuración de este backend).
+- **Job nuevo: `src/jobs/recordarTurnosProximos.ts`**, mismo mecanismo que
+  `expirarPagosPendientes.ts` (`setInterval`, default 60s). Inserta `tipo='recordatorio'` para
+  turnos `pendiente_de_pago`/`confirmado` que arrancan dentro de la próxima hora
+  (`VENTANA_RECORDATORIO_MIN`, default 60 — ver `.env.example`) y todavía no tienen un
+  recordatorio insertado para ese turno.
+  - **Hallazgo de RLS encontrado al implementarlo, corregido en el propio job (no con una
+    migración nueva — cambio de esquema, fuera del alcance de Backend):** `notificacion` no tiene
+    ninguna policy de `SELECT` que reconozca `app.job_sistema` (solo la de `INSERT`,
+    `notificacion_insert_job_sistema`) — a diferencia de `turno`, que sí tiene una policy de
+    SELECT pública (`turno_select_publico`). Un `NOT EXISTS` contra `notificacion` corriendo solo
+    con `jobSistema: true` vería siempre 0 filas y duplicaría el recordatorio en cada corrida,
+    sin ningún error visible (RLS deniega en silencio). Se resuelve con la misma técnica que ya
+    usa `POST /turnos` para un problema análogo (cambiar `app.usuario_id` a mitad de
+    transacción): el job impersona al destinatario puntual de cada turno candidato justo antes de
+    su propio `INSERT ... WHERE NOT EXISTS`; bajo esa identidad, `notificacion_select_propia` sí
+    deja ver sus recordatorios ya existentes. Ver el comentario completo en el propio archivo.
+  - **Recomendación para DBA/Director General IA** (no implementada acá): una policy de SELECT
+    dedicada para `app.job_sistema` en `notificacion` (análoga a `turno_acceso_job_expiracion`)
+    sería más directa a nivel de esquema que esta impersonación por fila.
+  - **Recomendación para QA/Security:** este gap no lo detecta ningún test HTTP existente (RLS
+    deniega leyendo 0 filas, no tira error) — vale la pena agregar este escenario a
+    `../database/scripts/verificar_rls_postgres.sql` cuando exista.
+  - **`POST /dev/forzar-recordatorios`** (mismo criterio que el ya existente
+    `POST /dev/forzar-expiracion`, solo activo con `ENABLE_DEV_ROUTES=true`): corre el job ya
+    mismo, sin esperar el intervalo real, para poder probarlo a mano.
+- `notificacionProvider.enviar` (`src/integraciones/notificaciones.ts`) sigue sin invocarse desde
+  ningún endpoint, a propósito: sigue siendo un stub que solo loguea (D4 no resolvió todavía qué
+  proveedor de push real se usa) — conectar el "envío" real queda como decisión de un ciclo
+  futuro, no de este (que pedía bandeja + configuración + recordatorio, no delivery real).
+
+No probado end-to-end contra Render (sin acceso de red desde este entorno — mismo caveat que
+ciclos anteriores). Verificado con `npx tsc --noEmit` (sin errores).
