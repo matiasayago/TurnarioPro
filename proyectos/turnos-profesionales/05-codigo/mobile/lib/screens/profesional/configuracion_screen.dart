@@ -8,6 +8,13 @@ import '../../theme/app_radius.dart';
 import '../../theme/app_spacing.dart';
 import '../../theme/app_typography.dart';
 import '../../widgets/widgets.dart';
+import 'acerca_de_screen.dart';
+import 'ayuda_soporte_screen.dart';
+import 'configuracion_consultorio_screen.dart';
+import 'editar_perfil_screen.dart';
+import 'precios_senas_screen.dart';
+import 'privacidad_screen.dart';
+import 'reportes_screen.dart';
 
 /// Configuración (menú principal, Profesional) — reemplaza el ítem "Configuración" del bottom
 /// nav (antes apuntaba directo a `ProximamenteScreen`, ver `profesional_shell.dart`). Estructura
@@ -19,10 +26,19 @@ import '../../widgets/widgets.dart';
 /// ya existe como pestaña propia (brief de esta ronda) — empujar una segunda instancia con
 /// `Navigator.push` duplicaría la pantalla en la pila de navegación en vez de reusarla.
 ///
-/// Único apartado con lógica real más allá de esas dos: el selector de Tema, conectado a
-/// `ThemeController` (la infraestructura ya existía, ver `state/theme_controller.dart`) y
-/// "Cerrar Sesión" (real, mismo `Sesion.cerrarSesion()` que usa el resto de la app). Todo lo
-/// demás no tiene backend todavía y va a `ProximamenteScreen`.
+/// Además del selector de Tema (conectado a `ThemeController`, la infraestructura ya existía,
+/// ver `state/theme_controller.dart`) y "Cerrar Sesión" (real, mismo `Sesion.cerrarSesion()` que
+/// usa el resto de la app), esta ronda conecta 6 ítems más a datos reales — "Editar Perfil"
+/// (`editar_perfil_screen.dart`), "Privacidad y Seguridad" (`privacidad_screen.dart`),
+/// "Configuración de Consultorio" (`configuracion_consultorio_screen.dart`, de solo lectura, ver
+/// el comentario de esa clase), "Reportes y Estadísticas" (`reportes_screen.dart`, pantalla
+/// nueva) y, apuntando a la MISMA pantalla (`precios_senas_screen.dart`, Precios y Señas), tanto
+/// "Configuración de Pagos" (Panel Profesional) como "Pagos y Señas" (su propia sección) — ambos
+/// ítems son, en los hechos, el mismo backend (seña por servicio, HU-04b), sin wireframe propio
+/// separado que los distinga en `mapa-pantallas.md` §5.11bis. Se agregan además 2 pantallas
+/// estáticas sin backend, "Ayuda y Soporte" (`ayuda_soporte_screen.dart`) y "Acerca de"
+/// (`acerca_de_screen.dart`). El resto (Notificaciones, Turnario Pro · Suscripción, Idioma,
+/// Nueva Cita, Autorizaciones Médicas) sigue sin backend y va a `ProximamenteScreen`.
 class ConfiguracionScreen extends StatelessWidget {
   const ConfiguracionScreen({super.key, required this.onIrAHorarios, required this.onIrAPacientes});
 
@@ -52,7 +68,7 @@ class ConfiguracionScreen extends StatelessWidget {
                     _MenuTile(
                       icon: Icons.person_outline,
                       label: 'Editar Perfil',
-                      onTap: () => _irAProximamente(context, 'Editar Perfil'),
+                      onTap: () => _irA(context, const EditarPerfilScreen()),
                     ),
                     _MenuTile(
                       icon: Icons.notifications_outlined,
@@ -67,7 +83,7 @@ class ConfiguracionScreen extends StatelessWidget {
                     _MenuTile(
                       icon: Icons.privacy_tip_outlined,
                       label: 'Privacidad y Seguridad',
-                      onTap: () => _irAProximamente(context, 'Privacidad y Seguridad'),
+                      onTap: () => _irA(context, const PrivacidadScreen()),
                     ),
                   ],
                 ),
@@ -84,12 +100,12 @@ class ConfiguracionScreen extends StatelessWidget {
                     _MenuTile(
                       icon: Icons.help_outline,
                       label: 'Ayuda y Soporte',
-                      onTap: () => _irAProximamente(context, 'Ayuda y Soporte'),
+                      onTap: () => _irA(context, const AyudaSoporteScreen()),
                     ),
                     _MenuTile(
                       icon: Icons.info_outline,
                       label: 'Acerca de',
-                      onTap: () => _irAProximamente(context, 'Acerca de'),
+                      onTap: () => _irA(context, const AcercaDeScreen()),
                     ),
                   ],
                 ),
@@ -107,17 +123,17 @@ class ConfiguracionScreen extends StatelessWidget {
                     _MenuTile(
                       icon: Icons.insert_chart_outlined,
                       label: 'Reportes y Estadísticas',
-                      onTap: () => _irAProximamente(context, 'Reportes y Estadísticas'),
+                      onTap: () => _irA(context, const ReportesScreen()),
                     ),
                     _MenuTile(
                       icon: Icons.payments_outlined,
                       label: 'Configuración de Pagos',
-                      onTap: () => _irAProximamente(context, 'Configuración de Pagos'),
+                      onTap: () => _irA(context, const PreciosSenasScreen()),
                     ),
                     _MenuTile(
                       icon: Icons.storefront_outlined,
                       label: 'Configuración de Consultorio',
-                      onTap: () => _irAProximamente(context, 'Configuración de Consultorio'),
+                      onTap: () => _irA(context, const ConfiguracionConsultorioScreen()),
                     ),
                     _MenuTile(
                       icon: Icons.medical_information_outlined,
@@ -130,10 +146,17 @@ class ConfiguracionScreen extends StatelessWidget {
                 _MenuSection(
                   title: 'Pagos y Señas',
                   children: [
+                    // Misma pantalla que "Configuración de Pagos" de arriba (Panel Profesional)
+                    // — ver el comentario de clase de `ConfiguracionScreen`: ambos ítems son, en
+                    // los hechos, el mismo backend de seña por servicio (HU-04b), sin un segundo
+                    // endpoint para "Reservas online con seña" a nivel negocio ni para
+                    // "Historial de Señas" (los otros 2 sub-ítems que muestra
+                    // `mapa-pantallas.md` §5.11bis en esta sección) — esos quedan fuera de esta
+                    // ronda por falta de contrato de backend.
                     _MenuTile(
                       icon: Icons.account_balance_wallet_outlined,
                       label: 'Pagos y Señas',
-                      onTap: () => _irAProximamente(context, 'Pagos y Señas'),
+                      onTap: () => _irA(context, const PreciosSenasScreen()),
                     ),
                   ],
                 ),
@@ -159,6 +182,13 @@ class ConfiguracionScreen extends StatelessWidget {
       context,
       MaterialPageRoute(builder: (_) => ProximamenteScreen(titulo: titulo, showBackButton: true)),
     );
+  }
+
+  /// Empuja una pantalla real (con backend o estática) — mismo `Navigator.push` que
+  /// [_irAProximamente], sin el envoltorio de `ProximamenteScreen`. Los 6 ítems conectados a
+  /// datos reales + las 2 pantallas estáticas nuevas de esta ronda usan este helper.
+  void _irA(BuildContext context, Widget pantalla) {
+    Navigator.push(context, MaterialPageRoute(builder: (_) => pantalla));
   }
 }
 
