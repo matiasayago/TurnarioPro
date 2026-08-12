@@ -36,6 +36,16 @@ export const horaSchema = z
   .string()
   .regex(/^([01]\d|2[0-3]):([0-5]\d)$/, 'Debe tener formato HH:MM (24hs)');
 
+/**
+ * `visibilidad_perfil` (HU-32, Privacidad — ver src/routes/usuario.ts): mismos 3 valores que el
+ * ENUM `visibilidad_perfil_usuario` de la base (database/migrations/001_init.sql /
+ * 003_privacidad_usuario.sql). Vive acá, no local a usuario.ts, por el mismo criterio que
+ * `diaSemanaSchema`/`horaSchema` de arriba: un primitivo de dominio validado contra un ENUM real
+ * de la base — no un objeto compuesto específico de un único endpoint (esos quedan locales a
+ * cada router, ver `configuracionProfesionalSchema` en profesionales.ts como ejemplo).
+ */
+export const visibilidadPerfilSchema = z.enum(['publico', 'solo_contactos', 'privado']);
+
 /** duracion_min, monto_sena, precio_referencia y similares: números positivos. */
 export const montoPositivoSchema = z.number().positive('Debe ser un número mayor a 0');
 

@@ -821,3 +821,78 @@ ahí mismo, mismo patrón que ya usaron DBA/Security para las suyas). Resumen pa
   worktree aislado en vez de en el directorio de trabajo principal — ver
   `08-despliegue/google-oauth.md` para el detalle; se deja anotado acá por si vuelve a pasar en un
   ciclo futuro.
+
+## Configuración del lado Profesional (Perfil, Privacidad, Consultorio, Pagos, Reportes) — Backend (2026-08-12)
+
+Completa 5 pantallas de Configuración que eran placeholder "Próximamente" (rama
+`feature/configuracion-profesional`, sobre la tabla `usuario_preferencias` que DBA ya había
+modelado y commiteado, HU-32). Detalle completo del contrato de cada endpoint en los comentarios
+de `05-codigo/backend/src/routes/usuario.ts` (nuevo) / `negocios.ts` / `profesionales.ts`, y
+resumen en `05-codigo/backend/README.md` ("Configuración del lado Profesional..."). Resumen para
+reutilizar:
+
+- **Se investigó antes de escribir código, como pedía la consigna** — 2 de los 5 bloques
+  reutilizan/extienden algo que ya existía en vez de crearse de cero:
+  `POST /profesionales/:id/servicios` (HU-04b) ya era upsert (`ON CONFLICT ... DO UPDATE`), así
+  que el bloque de Precios y Señas solo necesitó un GET nuevo (listado con la seña actual) y un
+  PATCH más angosto para edición explícita, sin duplicar la lógica de alta.
+- **Router nuevo `usuario.ts`, montado en `/usuario`** (Perfil + Privacidad) — no existía ningún
+  endpoint de "mi propio perfil" antes de este ciclo. Decisión de nombre documentada en el propio
+  archivo: prefijo singular `usuario` (no `usuarios` plural, porque nunca opera sobre un tercero
+  ni expone un listado — los routers plurales existentes sí exponen colecciones) y NO `cuenta`
+  (pese a que `mapa-pantallas.md` agrupa Perfil+Privacidad bajo un menú de UI llamado "Cuenta") —
+  se prioriza que el prefijo identifique la tabla sin ambigüedad, mismo criterio que
+  negocios/profesionales/turnos.
+- **Privacidad (`usuario_preferencias`) — cuidado explícito con RLS también en el GET, no solo en
+  el PATCH.** La tabla tiene RLS FORCE con policy `usuario_id = app.usuario_id`; un `pool.query`
+  directo en el GET habría devuelto 0 filas SIEMPRE (sin `app.usuario_id` seteado), mintiendo
+  "está en default de fábrica" para una cuenta que en realidad ya personalizó su privacidad. Los
+  dos hándlers van con `withTransaction` + contexto, no solo el de escritura.
+- **Reportes (HU-28/E10) — v1 explícitamente acotada al lado Profesional este ciclo** (la
+  consigna difirió a propósito la vista de negocio/administrador que también pide HU-28). 3
+  definiciones elegidas, no dichas letra por letra en el backlog, documentadas en el propio
+  código: (1) "completado"/"monto facturado" reusan la misma derivación que ya recomendó DBA para
+  HU-21 (`estado = 'confirmado' AND fin < now()`, ver `001_init.sql`) — `estado_turno` no tiene
+  un valor `'completado'` propio; (2) "monto facturado" = suma de `servicio.precio_referencia`
+  (el precio del servicio, tal cual pide el backlog), no la seña; (3) `turnos_totales` excluye
+  `estado = 'reprogramado'` (decisión propia): la fila vieja de un turno reprogramado (HU-13) no
+  debe contarse junto con la fila nueva que representa la misma cita real, o se duplicaría.
+- **Bug evitado por revisión de precedente, no por prueba:** Postgres devuelve `COUNT(*)` como
+  `bigint`, que el driver `pg` de este proyecto parsea como STRING salvo un type parser custom
+  que `db.ts` no tiene para ese OID — un SQL `COUNT`/`SUM` agregado habría devuelto
+  `turnos_totales: "3"` en vez de `3` en el JSON. Se evitó por completo: siguiendo el mismo
+  patrón que ya usa HU-21 en este archivo (empujar el booleano/comparación a SQL vía `now()`,
+  agregar en JS con `.filter()`/`.reduce()`), no se escribió ningún `COUNT`/`SUM` en SQL.
+- **`GET /negocios/:id` nuevo** (no existía detalle de un negocio puntual, solo el listado
+  completo `GET /negocios`) — público, mismos datos que ya expone el listado, para que
+  Configuración de Consultorio pueda prefillear sin traer todo el listado y filtrar del lado
+  cliente.
+- **`negocio`/`profesional_servicio` verificados en el DDL real antes de asumir RLS** (instrucción
+  explícita de la consigna): ninguna de las dos tablas tiene `ALTER TABLE ... ENABLE ROW LEVEL
+  SECURITY` en `001_init.sql` — a diferencia de `usuario_preferencias`. Los 3 endpoints que las
+  escriben (`PATCH /negocios/:id`, `PATCH /profesionales/:id/servicios/:servicioId`) igual pasan
+  por `withTransaction` con contexto, no por necesidad de RLS sino por consistencia con el resto
+  de cada archivo (`negocios.ts`/`profesionales.ts` ya envuelven TODA escritura así, incluso
+  antes de este ciclo, sobre tablas que tampoco siempre tienen RLS) — documentado explícitamente
+  en el código para que quede claro que es una elección de estilo/forward-compat, no un
+  malentendido sobre qué protege RLS hoy.
+- **No verificado end-to-end en este ciclo — causa raíz distinta a la de ciclos anteriores.**
+  Ciclos previos de DBA no podían verificar contra Postgres real por falta de Docker/psql en el
+  entorno; este ciclo SÍ tenía acceso a un Postgres real ya migrado (`DATABASE_URL` de Render en
+  `.env`, confirmado que ya corrió la migración de `usuario_preferencias`), pero **la conexión de
+  red desde este entorno hacia ese host se resetea siempre** (`ECONNRESET`, confirmado con una
+  prueba de conectividad aislada de 3 intentos directos con el driver `pg`, sin pasar por la app
+  — no fue un hallazgo teórico ni una única falla transitoria) — dos intentos de arrancar el
+  servidor local contra esa base también murieron por lo mismo (excepción no controlada dentro de
+  `runMigrations()`, que `createApp()` invoca sin `await` ni `.catch()` — fragilidad preexistente
+  de `src/app.ts`/`src/db.ts`, no introducida ni corregida en este ciclo, fuera del alcance
+  autorizado). Mitigado con revisión estática exhaustiva (compilación limpia con `tsc --noEmit` +
+  `npm run build`, y cada query/patrón contrastado línea por línea contra un equivalente ya
+  probado en este mismo código — upsert, RLS-con-contexto, derivación de "completado", etc.).
+  **Pendiente real para quien retome esto con salida de red disponible:** correr `npm run dev`
+  (o el próximo intento del mismo entorno, si la restricción de red era puntual de esta sesión) y
+  ejercitar los 6 endpoints nuevos de punta a punta antes de darlos por definitivos — no se
+  agregó ningún script nuevo a `scripts/*.mjs` por el mismo motivo (no se puede commitear un test
+  que nunca se corrió ni una sola vez).
+- **No tocado:** `mapa-pantallas.md` (UX/UI) ni `05-codigo/mobile/` (instrucción explícita de la
+  consigna — Mobile construye después sobre esto, en paralelo con otro agente).
