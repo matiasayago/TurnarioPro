@@ -202,6 +202,23 @@ flutter run -d chrome --web-hostname localhost --web-port 7357 \
   (`assets/branding/google_logo.png`, asset propio publicado por Google para este uso — ver
   developers.google.com/identity/branding-guidelines).
 
+## 🆕 Configuración del lado Profesional: Perfil, Privacidad, Consultorio, Pagos, Reportes
+
+Conecta 6 ítems de `configuracion_screen.dart` (antes `ProximamenteScreen`) a los 9 endpoints
+nuevos de Backend (`usuario.ts`/`negocios.ts`/`profesionales.ts`, ver
+`memory/proyectos/turnos-profesionales/decisiones.md`) y agrega 2 pantallas estáticas. Detalle
+completo en el doc comment de cada pantalla nueva, todas en
+`lib/screens/profesional/`: `editar_perfil_screen.dart`, `privacidad_screen.dart`,
+`configuracion_consultorio_screen.dart` (de solo lectura — el backend soporta edición vía
+`PATCH /negocios/:id`, pero exige rol `administrador`, que esta app todavía no tiene UI propia
+para representar), `precios_senas_screen.dart` (guardado por fila, no un botón general),
+`reportes_screen.dart` (pantalla nueva, con selector de período Todo/7 días/Mes/Año),
+`ayuda_soporte_screen.dart` y `acerca_de_screen.dart` (estáticas, sin backend). "Configuración de
+Pagos" (Panel Profesional) y "Pagos y Señas" (su propia sección) navegan a la misma pantalla
+(`precios_senas_screen.dart`) — mismo backend real (seña por servicio, HU-04b) detrás de ambos
+ítems. `flutter analyze` corrido localmente (SDK disponible en este entorno): limpio, sin
+hallazgos nuevos.
+
 ## Pantallas implementadas (ver mapa completo en `04-diseno/mapa-pantallas.md`)
 
 **Cliente:** Login (+ Google, HU-35, solo Web — ver sección propia arriba), `ClienteShell` (bottom
@@ -218,8 +235,12 @@ capturaron, quedan fuera de HU-35. Notificaciones y Configuración (Cliente): pl
 **Profesional:** Dashboard (HU-27, nueva), Gestión de Horarios (HU-05 + HU-16 + HU-18, reemplaza a
 "Definir Disponibilidad"), Agenda semanal (HU-06, reubicada), Excepciones (HU-15), Mis Clientes
 (HU-10) y Configuración de Servicios (HU-04b) — estas dos últimas ya no están en la navegación
-activa (ver arriba), Historial de Visitas (HU-11). Pacientes/WhatsApp/Notificaciones/Configuración:
-placeholders "Próximamente".
+activa (ver arriba), Historial de Visitas (HU-11), Gestión de Pacientes + Ficha de Paciente
+(HU-10+HU-19, HU-20). Configuración: menú real (Tema, Cerrar Sesión, Editar Perfil, Privacidad y
+Seguridad, Configuración de Consultorio, Precios y Señas, Reportes y Estadísticas, Ayuda y
+Soporte, Acerca de — ver sección "🆕 Configuración del lado Profesional" arriba).
+WhatsApp/Notificaciones/Idioma/Turnario Pro/Nueva Cita/Autorizaciones Médicas: placeholders
+"Próximamente".
 
 ## Simplificaciones deliberadas de este slice (no son bugs, son alcance reducido)
 

@@ -896,3 +896,43 @@ reutilizar:
   que nunca se corrió ni una sola vez).
 - **No tocado:** `mapa-pantallas.md` (UX/UI) ni `05-codigo/mobile/` (instrucción explícita de la
   consigna — Mobile construye después sobre esto, en paralelo con otro agente).
+
+## Configuración del lado Profesional (Perfil, Privacidad, Consultorio, Pagos, Reportes) — Mobile (2026-08-12)
+
+Consume los 9 endpoints del bloque de Backend de arriba desde `configuracion_screen.dart`
+(`05-codigo/mobile/lib/screens/profesional/`), conectando 6 ítems del menú a datos reales y
+agregando 2 pantallas estáticas — detalle completo en el doc comment de `ConfiguracionScreen` y
+en cada pantalla nueva. Resumen para reutilizar:
+
+- **6 pantallas nuevas:** `editar_perfil_screen.dart`, `privacidad_screen.dart`,
+  `configuracion_consultorio_screen.dart`, `precios_senas_screen.dart`, `reportes_screen.dart`,
+  más las 2 estáticas `ayuda_soporte_screen.dart`/`acerca_de_screen.dart`.
+- **"Configuración de Pagos" (Panel Profesional) y "Pagos y Señas" (su propia sección) apuntan a
+  la MISMA pantalla** (`precios_senas_screen.dart`) — son, en los hechos, el mismo backend de
+  seña por servicio (HU-04b); no hay contrato para los otros sub-ítems que muestra
+  `mapa-pantallas.md` §5.11bis bajo "Pagos y Señas" (toggle "Reservas online con seña" a nivel
+  negocio, "Historial de Señas"), así que esos quedan sin construir.
+- **Configuración de Consultorio queda DE SOLO LECTURA a propósito** (no un recorte por tiempo):
+  `PATCH /negocios/:id` exige rol `administrador`, y esta pantalla solo es alcanzable desde
+  `ProfesionalShell` (siempre JWT de rol `profesional` → 403 garantizado). Documentado en el doc
+  comment de la clase para quien retome esto cuando exista un shell de Administrador en la app
+  (`main.dart` hoy cae a `LoginScreen` como placeholder para ese rol) — el backend ya soporta la
+  edición completa, solo falta la UI del lado correcto.
+- **Precios y Señas: guardado por fila**, no un botón general único — cada servicio es una
+  edición independiente contra `PATCH /profesionales/:id/servicios/:servicioId` (no hay PATCH en
+  lote), y un botón general obligaría a definir qué hacer si falla un servicio y otro no.
+- **Reportes y Estadísticas (pantalla nueva) incluye un selector de período** (Todo/7 días/Mes/Año,
+  `SegmentedButton`) calculado en el cliente sobre `DateTime.now()` y enviado como `desde`/`hasta`
+  en UTC ISO-8601 — mejora sobre el mínimo pedido (que solo exigía que la versión sin filtros
+  anduviera), agregada porque el costo era bajo (sin date picker, solo aritmética de fechas).
+- **`RadioListTile.groupValue`/`.onChanged` (Privacidad, visibilidad de perfil) se migraron a
+  `RadioGroup<String>`** — la API vieja está deprecada desde Flutter 3.32 (el SDK de este entorno
+  es 3.44.9) y `flutter analyze` la marca como `deprecated_member_use`; no es una preferencia de
+  estilo.
+- **`flutter analyze` corrido localmente y limpio** (SDK disponible en este entorno, a diferencia
+  de rondas de Backend anteriores): único hallazgo, el mismo `info` preexistente ya documentado en
+  `dashboard_screen.dart:270`, ajeno a este cambio.
+- **No tocado:** `05-codigo/backend/` ni `mapa-pantallas.md` (instrucción explícita de la
+  consigna). Tampoco se tocó `lib/screens/profesional/configuracion_servicios_screen.dart` (una
+  pantalla previa, más simple, ya huérfana de navegación desde antes de este ciclo — ver
+  `05-codigo/mobile/README.md` — no confundir con `precios_senas_screen.dart`, la nueva).
