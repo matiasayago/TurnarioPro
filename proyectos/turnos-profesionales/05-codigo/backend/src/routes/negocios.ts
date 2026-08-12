@@ -24,6 +24,20 @@ const altaServicioSchema = z.object({
   precio_referencia: montoPositivoSchema.nullable().optional(),
 });
 
+// Configuración de Consultorio (mapa-pantallas.md §5.11bis, "Panel Profesional > Configuración
+// de Consultorio", HU-31) — PATCH /:id de más abajo. `nombre`/`rubro`/`ubicacion` viajan TODOS
+// en el body (no parcial), mismo criterio de "reenviar el formulario completo" que
+// `fichaPacienteSchema`/`configuracionProfesionalSchema` en profesionales.ts: Mobile ya tiene el
+// valor actual de cada campo desde GET /:id (ver más abajo) y reenvía el formulario entero al
+// guardar. `nombre` requerido (columna NOT NULL en `negocio`); `rubro`/`ubicacion` nullable pero
+// NO `.optional()` — hay que poder mandar `null` explícito para vaciar un campo que antes tenía
+// valor, mismo motivo que en `fichaPacienteSchema`.
+const actualizarNegocioSchema = z.object({
+  nombre: z.string().min(1, 'nombre es requerido'),
+  rubro: z.string().nullable(),
+  ubicacion: z.string().nullable(),
+});
+
 // MEDIUM-1 (ver 07-seguridad/informe-seguridad.md): misma política mínima de contraseña que
 // registro-negocio/registro-cliente, aplicada acá también (alta de profesional por el admin).
 const altaProfesionalSchema = z.object({
@@ -41,6 +55,27 @@ negociosRouter.get(
       'SELECT id, nombre, rubro, ubicacion, es_rubro_salud FROM negocio WHERE eliminado_en IS NULL'
     );
     res.json(result.rows);
+  })
+);
+
+// HU-31: detalle de un negocio puntual. Configuración de Consultorio (Mobile) lo usa para
+// prefillear el formulario de edición antes del PATCH de más abajo, pero es público — mismos
+// datos que YA expone GET / para TODOS los negocios sin login (HU-00b); esto solo acota a una
+// fila en vez de forzar a Mobile a traer la lista completa y filtrar del lado cliente. Mismo
+// criterio de "público por diseño" que el resto de las lecturas de este archivo. `404` si no
+// existe o está soft-deleted (`eliminado_en`), mismo filtro que ya aplica GET /.
+negociosRouter.get(
+  '/:id',
+  asyncHandler(async (req, res) => {
+    const paramsParsed = negocioIdParamsSchema.safeParse(req.params);
+    if (!paramsParsed.success) return respuestaValidacionFallida(res, paramsParsed.error);
+    const result = await pool.query(
+      'SELECT id, nombre, rubro, ubicacion, es_rubro_salud FROM negocio WHERE id = $1 AND eliminado_en IS NULL',
+      [req.params.id]
+    );
+    const negocio = result.rows[0];
+    if (!negocio) return res.status(404).json({ error: 'Negocio no encontrado' });
+    res.json(negocio);
   })
 );
 
@@ -218,5 +253,59 @@ negociosRouter.post(
       case 'ok':
         return res.status(201).json({ id: resultado.id });
     }
+  })
+);
+
+// HU-31: Configuración de Consultorio — el administrador edita los datos descriptivos de SU
+// PROPIO negocio (RN9 aplicado vía claim del JWT, no del parámetro — mismo patrón que
+// POST /:id/servicios y POST /:id/profesionales de arriba). Contrato: PATCH /negocios/:id, body
+// { nombre: string, rubro: string | null, ubicacion: string | null } -> 200
+// { id, nombre, rubro, ubicacion, es_rubro_salud } | 400 datos inválidos | 403 rol distinto de
+// administrador o negocio ajeno | 404 negocio inexistente/eliminado.
+//
+// `es_rubro_salud` queda A PROPÓSITO fuera de este PATCH — no está en el alcance que definió
+// este ciclo ("nombre, rubro, ubicacion"). Ese flag gatea si se muestran los campos extendidos de
+// `paciente` (D11/RN15, ver ../database/migrations/001_init.sql) y cambiarlo tiene implicancias
+// de producto que exceden un campo más de un formulario descriptivo — se deja para que Product
+// Manager/CTO IA decidan explícitamente si corresponde exponerlo, y en tal caso probablemente
+// con su propio flujo de confirmación, no como parte de este PATCH.
+//
+// `withTransaction` con contexto pese a que `negocio` HOY NO TIENE Row Level Security habilitada
+// (verificado en database/migrations/001_init.sql — no hay ningún `ALTER TABLE negocio ENABLE
+// ROW LEVEL SECURITY`, a diferencia de negocio_administrador/negocio_profesional/servicio/etc.
+// más abajo en ese mismo archivo): se mantiene igual por consistencia con el resto de ESTE
+// archivo, que envuelve toda escritura en `withTransaction` sin excepción (ver POST
+// /:id/servicios y POST /:id/profesionales arriba, donde tampoco todas las tablas tocadas tienen
+// RLS) — y como defensa en profundidad/forward-compat si `negocio` gana RLS en un ciclo futuro
+// (mismo espíritu que `ContextoRls.negocioId` en src/db.ts: "se deja disponible... aunque hoy
+// ninguna policy lo use directamente").
+negociosRouter.patch(
+  '/:id',
+  requireAuth('administrador'),
+  asyncHandler(async (req: AuthedRequest, res) => {
+    const paramsParsed = negocioIdParamsSchema.safeParse(req.params);
+    if (!paramsParsed.success) return respuestaValidacionFallida(res, paramsParsed.error);
+    if (req.auth!.negocio_id !== req.params.id) {
+      return res.status(403).json({ error: 'No podés administrar recursos de otro negocio' });
+    }
+    const bodyParsed = actualizarNegocioSchema.safeParse(req.body);
+    if (!bodyParsed.success) return respuestaValidacionFallida(res, bodyParsed.error);
+    const { nombre, rubro, ubicacion } = bodyParsed.data;
+
+    const negocio = await withTransaction(
+      async (client) => {
+        const result = await client.query(
+          `UPDATE negocio SET nombre = $1, rubro = $2, ubicacion = $3, modificado_en = $4, modificado_por = $5
+           WHERE id = $6 AND eliminado_en IS NULL
+           RETURNING id, nombre, rubro, ubicacion, es_rubro_salud`,
+          [nombre, rubro, ubicacion, nowIso(), req.auth!.sub, req.params.id]
+        );
+        return result.rows[0];
+      },
+      { usuarioId: req.auth!.sub, negocioId: req.params.id }
+    );
+
+    if (!negocio) return res.status(404).json({ error: 'Negocio no encontrado' });
+    res.json(negocio);
   })
 );
