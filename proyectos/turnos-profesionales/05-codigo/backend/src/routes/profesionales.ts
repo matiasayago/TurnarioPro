@@ -87,6 +87,33 @@ const fichaPacienteSchema = z.object({
   activo: z.boolean(),
 });
 
+// Configuración de Pagos (Precios y Señas, mapa-pantallas.md §5.11bis "Panel Profesional >
+// Configuración de Pagos") — `:servicioId` para editar una asociación profesional↔servicio YA
+// EXISTENTE (ver PATCH /:id/servicios/:servicioId más abajo). Mismo criterio de nombrar el 2do
+// parámetro por lo que representa (no un genérico `:subId`) que `profesionalPacienteParamsSchema`
+// de arriba.
+const profesionalServicioParamsSchema = z.object({ id: uuidSchema, servicioId: uuidSchema });
+
+// Body de PATCH /:id/servicios/:servicioId — mismos 2 campos que ya acepta `asociarServicioSchema`
+// (requiere_sena/monto_sena), pero acá AMBOS requeridos (no `.optional()`): a diferencia de POST
+// /:id/servicios (que da de alta la asociación y puede razonablemente arrancar solo con
+// `requiere_sena` en su default `false`), este PATCH edita una fila que ya existe — Mobile ya
+// tiene los 2 valores actuales desde GET /:id/servicios (más abajo) para reenviar el formulario
+// completo, mismo criterio que `fichaPacienteSchema`/`configuracionProfesionalSchema`.
+const actualizarSenaSchema = z.object({
+  requiere_sena: z.boolean(),
+  monto_sena: montoPositivoSchema.nullable(),
+});
+
+// Reportes y Estadísticas (HU-28/E10) — filtros opcionales de GET /:id/reportes más abajo:
+// período (rango de fechas sobre `turno.inicio`) y servicio. Los 3 son independientes; sin
+// ninguno, el reporte cubre toda la agenda histórica del profesional.
+const reportesQuerySchema = z.object({
+  desde: fechaIsoSchema.optional(),
+  hasta: fechaIsoSchema.optional(),
+  servicio_id: uuidSchema.optional(),
+});
+
 // HU-04 / HU-04b: el profesional asocia un servicio a su agenda y configura si requiere seña.
 profesionalesRouter.post(
   '/:id/servicios',
@@ -735,5 +762,216 @@ profesionalesRouter.get(
           notas_medicas: resultado.notas_medicas,
         });
     }
+  })
+);
+
+// ============================================================================
+// Configuración de Pagos (Precios y Señas) — mapa-pantallas.md §5.11bis, "Panel Profesional >
+// Configuración de Pagos" (ícono magenta, HU-30 en el wireframe stub, pero el contenido real es
+// D2/RN10: la seña ya se configura por asociación profesional↔servicio, HU-04b — esto es la
+// vista de EDICIÓN posterior, no una historia numerada propia). Dos rutas: GET (listar con la
+// seña actual) + PATCH (editar una asociación puntual, sin recrearla). El alta de la primera
+// asociación sigue siendo POST /:id/servicios, más arriba en este archivo — no se toca.
+// ============================================================================
+
+// Contrato: GET /profesionales/:id/servicios -> 200 [{ servicio_id, nombre, duracion_min,
+// precio_referencia, negocio_id, negocio_nombre, requiere_sena, monto_sena }, ...] | 403 rol
+// distinto de profesional o `:id` ajeno.
+//
+// Lista TODOS los servicios que este profesional ya asoció (fila en `profesional_servicio`, la
+// crea HU-04b vía POST /:id/servicios) junto con su configuración de seña actual, para que
+// Mobile tenga qué mostrar antes de editar con el PATCH de abajo. Privado
+// (`requireAuth('profesional')` + `esPropioProfesional`) — a diferencia de
+// GET /negocios/:id/servicios (catálogo público del servicio de un negocio), esto expone
+// `requiere_sena`/`monto_sena`, información de cobro sin motivo para ser pública.
+//
+// Sin filtrar por negocio_id (mismo criterio ya documentado en GET /:id/clientes y GET
+// /:id/turnos, más arriba en este archivo: un profesional puede pertenecer a 2+ negocios, y esos
+// listados tampoco filtran por la "vista activa" del JWT) — se agrega igual `negocio_id`/
+// `negocio_nombre` por fila (vía JOIN) para que Mobile pueda agrupar/etiquetar si hace falta.
+profesionalesRouter.get(
+  '/:id/servicios',
+  requireAuth('profesional'),
+  asyncHandler(async (req: AuthedRequest, res) => {
+    const paramsParsed = profesionalIdParamsSchema.safeParse(req.params);
+    if (!paramsParsed.success) return respuestaValidacionFallida(res, paramsParsed.error);
+    if (!esPropioProfesional(req)) {
+      return res.status(403).json({ error: 'Solo podés ver tus propios servicios' });
+    }
+    const servicios = await withTransaction(
+      async (client) => {
+        const result = await client.query(
+          `SELECT
+             s.id AS servicio_id, s.nombre, s.duracion_min, s.precio_referencia,
+             s.negocio_id, n.nombre AS negocio_nombre,
+             ps.requiere_sena, ps.monto_sena
+           FROM profesional_servicio ps
+           JOIN servicio s ON s.id = ps.servicio_id
+           JOIN negocio n ON n.id = s.negocio_id
+           WHERE ps.profesional_id = $1 AND s.eliminado_en IS NULL
+           ORDER BY n.nombre ASC, s.nombre ASC`,
+          [req.params.id]
+        );
+        return result.rows;
+      },
+      { usuarioId: req.auth!.sub, negocioId: req.auth!.negocio_id }
+    );
+    res.json(servicios);
+  })
+);
+
+// Contrato: PATCH /profesionales/:id/servicios/:servicioId, body { requiere_sena: boolean,
+// monto_sena: number | null } -> 200 { servicio_id, requiere_sena, monto_sena } | 400 datos
+// inválidos | 403 rol distinto de profesional o `:id` ajeno | 404 no existe asociación previa
+// para ese (profesional, servicio).
+//
+// Edita requiere_sena/monto_sena de una asociación YA EXISTENTE, sin recrearla — distinto de
+// POST /:id/servicios de arriba: ese endpoint da de alta (y, de yapa, ya es upsert — `ON
+// CONFLICT ... DO UPDATE` — así que técnicamente Mobile podría reusarlo también para editar),
+// pero re-verifica en cada llamada que el profesional sea miembro activo del negocio del
+// servicio (2 SELECT adicionales) — innecesario para "ya existe la fila, solo cambio la seña", y
+// semánticamente un alta (201, verbo POST) no comunica bien una edición. Este PATCH es más
+// angosto a propósito: si la fila (profesional_id, servicio_id) no existe todavía, responde 404
+// y NO crea nada — usar POST /:id/servicios para la primera asociación.
+profesionalesRouter.patch(
+  '/:id/servicios/:servicioId',
+  requireAuth('profesional'),
+  asyncHandler(async (req: AuthedRequest, res) => {
+    const paramsParsed = profesionalServicioParamsSchema.safeParse(req.params);
+    if (!paramsParsed.success) return respuestaValidacionFallida(res, paramsParsed.error);
+    if (!esPropioProfesional(req)) {
+      return res.status(403).json({ error: 'Solo podés configurar tus propios servicios' });
+    }
+    const bodyParsed = actualizarSenaSchema.safeParse(req.body);
+    if (!bodyParsed.success) return respuestaValidacionFallida(res, bodyParsed.error);
+    const { requiere_sena, monto_sena } = bodyParsed.data;
+
+    const servicio = await withTransaction(
+      async (client) => {
+        const result = await client.query(
+          `UPDATE profesional_servicio SET requiere_sena = $1, monto_sena = $2
+           WHERE profesional_id = $3 AND servicio_id = $4
+           RETURNING servicio_id, requiere_sena, monto_sena`,
+          [requiere_sena, monto_sena, req.params.id, req.params.servicioId]
+        );
+        return result.rows[0];
+      },
+      { usuarioId: req.auth!.sub, negocioId: req.auth!.negocio_id }
+    );
+
+    if (!servicio) {
+      return res.status(404).json({
+        error: 'Todavía no asociaste este servicio — usá POST /profesionales/:id/servicios primero',
+      });
+    }
+    res.json(servicio);
+  })
+);
+
+// ============================================================================
+// Reportes y Estadísticas (HU-28/E10) — v1 SIMPLIFICADA, lado Profesional ÚNICAMENTE en este
+// ciclo. mapa-pantallas.md §7 marca esta pantalla como "Stub de navegación — contenido a diseñar
+// cuando Product Manager cierre alcance", así que este endpoint se diseña directamente a partir
+// del criterio de aceptación ya cerrado de HU-28 (02-backlog/backlog.md), no de un wireframe.
+// ============================================================================
+
+// Contrato: GET /profesionales/:id/reportes?desde=<ISO>&hasta=<ISO>&servicio_id=<uuid> (los 3
+// query params son opcionales e independientes) -> 200 { desde, hasta, servicio_id,
+// turnos_totales, turnos_completados, turnos_cancelados, monto_facturado } | 400 query inválida
+// | 403 rol distinto de profesional o `:id` ajeno.
+//
+// Devuelve las 4 métricas básicas que pide HU-28 ("turnos totales, turnos completados, turnos
+// cancelados, y monto facturado"), filtrables por período y servicio.
+//
+// Qué queda AFUERA de esta v1, a propósito (documentado, no un olvido):
+//   - Vista de negocio/administrador (todos los profesionales a la vez): HU-28 la pide, pero la
+//     consigna de este ciclo la difiere explícitamente. Cuando se construya, es un endpoint
+//     nuevo (ej. GET /negocios/:id/reportes), no una extensión de este.
+//   - Filtro "por profesional": no aplica ACÁ porque este endpoint ya está scopeado a un único
+//     profesional por diseño (`:id` + `esPropioProfesional`, RN7/D3) — ese filtro cobra sentido
+//     recién en la futura vista de negocio.
+//   - Exportar (CSV/PDF/etc.): HU-28 lo marca explícitamente "fuera de este alcance básico —
+//     candidato a una iteración posterior".
+//   - Métricas avanzadas (ocupación, ausentismo, pacientes nuevos vs. recurrentes): HU-28 las
+//     marca explícitamente fuera de este alcance básico también.
+//
+// Definiciones elegidas acá (no explícitas letra por letra en HU-28 — mismo criterio de "v1
+// simplificada, documentada explícitamente" ya usado en Gestión de Horarios):
+//   - `turnos_completados` / "monto facturado": reusa EXACTAMENTE la misma derivación que ya
+//     recomienda DBA para "Completadas" en HU-21 (ver 001_init.sql, comentario junto a
+//     `nota_medica`) y que ya implementa GET /:id/pacientes/:pacienteId/historial más arriba:
+//     `estado = 'confirmado' AND fin < now()`. `estado_turno` no tiene un valor 'completado'
+//     propio (mismo gap ya documentado por DBA) — esta es la mejor aproximación disponible sin
+//     rediseñar la máquina de estados de turno, fuera de alcance de este ciclo.
+//   - "monto facturado" = suma de `servicio.precio_referencia` (el precio del SERVICIO, tal cual
+//     dice HU-28 — "suma del precio de servicio de los turnos completados/pagados") de esos
+//     turnos completados — NO la seña (`pago.monto`/`profesional_servicio.monto_sena`), que en la
+//     práctica es un valor más chico: HU-28 pide explícitamente el precio del servicio, no lo
+//     efectivamente cobrado de seña.
+//   - `turnos_totales` EXCLUYE `estado = 'reprogramado'` (decisión propia, no dicha explícitamente
+//     en HU-28): reprogramar (HU-13) deja la fila vieja en ese estado y crea una fila NUEVA con
+//     el horario nuevo — contar ambas duplicaría la misma cita real. Sumando
+//     pendiente_de_pago + confirmado + cancelado ya se obtiene la cuenta real de citas distintas
+//     del período.
+//   - `turnos_cancelados`: `estado = 'cancelado'` sin más condición (incluye tanto cancelaciones
+//     manuales, HU-12, como expiraciones automáticas por falta de pago,
+//     src/jobs/expirarPagosPendientes.ts — ambas dejan el turno en el mismo estado; no hay forma
+//     de distinguirlas hoy sin un campo nuevo, fuera de alcance).
+//
+// Período: filtra por `turno.inicio` (fecha del turno), no por `creado_en` (fecha de la
+// reserva) — "reporte de mi agenda de tal período" se entiende naturalmente sobre cuándo
+// ocurrió/ocurre la cita, no sobre cuándo se reservó. Ambos extremos se normalizan con
+// `new Date(x).toISOString()` antes de llegar a la query (mismo criterio que `POST /turnos` en
+// turnos.ts) en vez de pasar el string crudo ya validado por `fechaIsoSchema` — evita cualquier
+// divergencia entre el parser (muy permisivo) de `Date` de JS y el de Postgres.
+profesionalesRouter.get(
+  '/:id/reportes',
+  requireAuth('profesional'),
+  asyncHandler(async (req: AuthedRequest, res) => {
+    const paramsParsed = profesionalIdParamsSchema.safeParse(req.params);
+    if (!paramsParsed.success) return respuestaValidacionFallida(res, paramsParsed.error);
+    if (!esPropioProfesional(req)) {
+      return res.status(403).json({ error: 'Solo podés ver el reporte de tu propia agenda' });
+    }
+    const queryParsed = reportesQuerySchema.safeParse(req.query);
+    if (!queryParsed.success) return respuestaValidacionFallida(res, queryParsed.error);
+    const { desde, hasta, servicio_id } = queryParsed.data;
+    const desdeIso = desde ? new Date(desde).toISOString() : null;
+    const hastaIso = hasta ? new Date(hasta).toISOString() : null;
+
+    const filas = await withTransaction(
+      async (client) => {
+        const result = await client.query(
+          `SELECT
+             t.estado,
+             (t.estado = 'confirmado' AND t.fin < now()) AS completado,
+             s.precio_referencia
+           FROM turno t
+           JOIN servicio s ON s.id = t.servicio_id
+           WHERE t.profesional_id = $1
+             AND ($2::timestamptz IS NULL OR t.inicio >= $2)
+             AND ($3::timestamptz IS NULL OR t.inicio <= $3)
+             AND ($4::uuid IS NULL OR t.servicio_id = $4)`,
+          [req.params.id, desdeIso, hastaIso, servicio_id ?? null]
+        );
+        return result.rows as { estado: string; completado: boolean; precio_referencia: number | null }[];
+      },
+      { usuarioId: req.auth!.sub, negocioId: req.auth!.negocio_id }
+    );
+
+    const completados = filas.filter((f) => f.completado);
+    const turnos_totales = filas.filter((f) => f.estado !== 'reprogramado').length;
+    const turnos_cancelados = filas.filter((f) => f.estado === 'cancelado').length;
+    const monto_facturado = completados.reduce((acc, f) => acc + (f.precio_referencia ?? 0), 0);
+
+    res.json({
+      desde: desdeIso,
+      hasta: hastaIso,
+      servicio_id: servicio_id ?? null,
+      turnos_totales,
+      turnos_completados: completados.length,
+      turnos_cancelados,
+      monto_facturado,
+    });
   })
 );

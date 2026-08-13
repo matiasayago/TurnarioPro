@@ -1394,3 +1394,184 @@ COMMENT ON FUNCTION turno_propio_para_gestion(UUID) IS
   'duración y el turno nuevo. No expone creado_en/modificado_en (ninguno de los dos handlers los '
   'usa). No adoptada por Backend todavía, ver 03-arquitectura/modelo-datos.md §5bis.';
 REVOKE EXECUTE ON FUNCTION turno_propio_para_gestion(UUID) FROM PUBLIC;
+
+-- ============================================================================
+-- Preferencias de privacidad de usuario (HU-32, 2026-08-11, DBA)
+-- ============================================================================
+-- Origen: HU-32 (E14, 02-backlog/backlog.md) — "Como cliente o profesional, quiero controlar la
+-- visibilidad de mi perfil (público/solo contactos/privado), si muestro mi estado en línea, y si
+-- comparto datos de uso con la plataforma... Es transversal a ambos roles, no una funcionalidad
+-- específica de un negocio." Wireframe en mapa-pantallas.md §5.13 (bloque "Privacidad" de la
+-- pantalla "Privacidad y Seguridad"), verificado contra una captura real de la app de referencia
+-- en §5.13bis (2026-08-07) — esa verificación confirma dos cosas relevantes para este modelado:
+-- (1) "Visibilidad de mi perfil" es un grupo de radio buttons de 3 opciones fijas, no un input
+-- libre; (2) el bloque "Seguridad de la cuenta" (contraseña, 2FA, biometría, sesiones,
+-- exportar/eliminar datos) que el mismo wireframe mostraba junto a "Privacidad" NO EXISTE en la
+-- app real — confirmado como adición de UX/UI sin HU propia, así que no se modela nada de eso acá
+-- (ni tabla ni columnas): si Product Manager le asigna una HU en un ciclo futuro, es modelado
+-- nuevo, no una extensión de esta tabla.
+--
+-- Un 4to control visible en la misma captura real, "Permitir Notificaciones" (entre "Mostrar
+-- Estado en Línea" y "Compartir Datos de Uso"), queda EXPLÍCITAMENTE fuera de este modelado —
+-- decisión de alcance para este ciclo, no un olvido: se superpone temáticamente con
+-- HU-26/Configuración de Notificaciones (mapa-pantallas.md §5.14, "único lugar de la app donde se
+-- activan/desactivan tipos de aviso y canales"), que todavía no se modeló. Modelarlo acá
+-- adelantaría/pisaría ese trabajo futuro. Cuando se modele HU-26, ese ciclo decide si ese toggle
+-- vive junto a la configuración granular de notificaciones (lo más consistente con "un solo lugar
+-- para switches de notificación", ya documentado en mapa-pantallas.md §5.14) o si en cambio
+-- necesita su propio campo acá — no se decide hoy.
+--
+-- DECISIÓN DE DISEÑO — ¿columnas en `usuario` o tabla `usuario_preferencias` separada 1:1?
+-- A diferencia de la decisión equivalente para `paciente` (2026-08-10, ver bloque "Ficha de
+-- paciente..." más arriba y modelo-datos.md §2quinquies), acá la cardinalidad NO fuerza la
+-- respuesta: HU-32 es explícitamente "transversal... no una funcionalidad específica de un
+-- negocio", y mapa-pantallas.md §5.13 confirma "pantalla y contenido idénticos para ambos roles
+-- (misma cuenta, mismas garantías de privacidad)" — un solo valor por `usuario`, sin scope por
+-- negocio/profesional/cliente como sí necesitaba `paciente`. Es decir, tanto "columnas en
+-- `usuario`" como "tabla 1:1" son estructuralmente válidas acá (a diferencia de lo que pasaba con
+-- `paciente`, donde una de las dos alternativas era directamente incompatible con los hechos) — la
+-- decisión se toma por otro criterio, no por cardinalidad forzada. Se elige TABLA SEPARADA
+-- (`usuario_preferencias`, 1:1 con `usuario` vía `usuario_id UNIQUE`) por 3 motivos:
+--
+-- 1) Separación de responsabilidades / crecimiento acotado: `usuario` es la tabla de
+--    identidad/autenticación — se consulta en cada login y la referencian por FK casi todas las
+--    demás tablas de este esquema (profesional, turno, paciente, negocio_administrador...). Sus
+--    columnas hoy son todas hechos de identidad (email, password_hash, google_id, telefono,
+--    nombre, rol). Las preferencias de privacidad/app son un concern independiente que ya se sabe
+--    va a seguir creciendo: HU-26 (Configuración de Notificaciones, mismo menú "Cuenta" que HU-32
+--    en mapa-pantallas.md §5.12/§5.14) queda para la próxima ronda a propósito (ver arriba), y el
+--    propio wireframe de §5.13 documenta un bloque adicional ("Seguridad de la cuenta") que, si
+--    algún ciclo futuro le asigna una HU propia, sería exactamente más columnas de este mismo tipo
+--    ("configuración de cuenta", no "identidad"). Una tabla separada absorbe ese crecimiento
+--    futuro sin seguir ensanchando `usuario` con columnas ajenas a autenticación cada vez que se
+--    agrega una preferencia nueva.
+-- 2) Precedente ya establecido en este mismo esquema: `profesional` (2026-08-06, §2ter) es
+--    exactamente este mismo patrón — una tabla satélite 1:1 con `usuario` (`usuario_id UNIQUE
+--    REFERENCES usuario(id)`), separada de `usuario` pese a ser 1:1, precisamente para no mezclar
+--    la identidad base con un concern distinto (ahí, "ser profesional"; acá, "mis preferencias de
+--    privacidad"). `usuario_preferencias` sigue la misma forma estructural: GUID propio
+--    (`id UUID PRIMARY KEY DEFAULT gen_random_uuid()`) + `usuario_id UNIQUE REFERENCES
+--    usuario(id)` para expresar el 1:1 — mismo patrón que `profesional`/`pago` en este archivo, en
+--    vez de usar `usuario_id` directamente como PK: nada referencia hoy una fila de esta tabla por
+--    su propio id, pero mantener la forma consistente con el resto del esquema evita una excepción
+--    sin motivo real, y no cierra la puerta si alguna vez algo necesitara referenciar una fila de
+--    preferencias en particular.
+-- 3) RLS como motivo de fondo, no solo de estilo — ver la conclusión siguiente.
+--
+-- CONCLUSIÓN SOBRE RLS DE `usuario` (pedida explícitamente antes de decidir, no asumida):
+-- confirmado leyendo este archivo completo que `usuario` HOY NO TIENE Row Level Security
+-- habilitada — no hay ningún `ALTER TABLE usuario ENABLE ROW LEVEL SECURITY` en ningún punto de
+-- este DDL (a diferencia de profesional/negocio_administrador/negocio_profesional/servicio/turno/
+-- paciente/tratamiento/nota_medica, que sí la tienen). Ya estaba señalado, para otro caso (editar
+-- nombre/email/teléfono vía "Editar Paciente"), en el comentario junto al `CREATE TABLE usuario`
+-- de más arriba: "`usuario` sigue sin RLS habilitada... esa escritura depende enteramente de que
+-- el endpoint la autorice bien en código de aplicación, sin ninguna capa de RLS de respaldo". Es
+-- una brecha real, preexistente, no introducida por este ciclo — y aplicaría igual a estas 3
+-- columnas si vivieran en `usuario`: quedarían con el mismo nivel de protección (ninguno a nivel
+-- de base de datos) que el resto de esa tabla, dependiendo 100% de que Backend nunca introduzca un
+-- bug que permita leer o escribir la fila de otro usuario. Para HU-32 específicamente (que ES la
+-- funcionalidad de privacidad) dejar sus datos en la tabla con menos defensa en profundidad de
+-- todo el esquema sería, como mínimo, una señal contradictoria. La tabla separada resuelve esto de
+-- forma limpia: `usuario_preferencias` es nueva, así que aplica desde el primer commit la lección
+-- ya documentada en §5bis/§5ter (FORCE ROW LEVEL SECURITY desde el día 1), sin necesitar
+-- auditar/blindar retroactivamente los múltiples call sites de escritura que ya existen hoy sobre
+-- `usuario` (registro-cliente, registro-negocio, alta-profesional, y el futuro login-google de
+-- HU-35) antes de poder habilitarle RLS con seguridad — ese es un trabajo real, más grande, y
+-- fuera del alcance de este ciclo. Habilitar RLS sobre `usuario` en sí (más allá de estas 3
+-- columnas) queda documentado como recomendación para un ciclo futuro de DBA/Backend, no resuelta
+-- ni bloqueada acá — mismo tratamiento que otras brechas ya reconocidas en este archivo (ej.
+-- `pago`/`notificacion` sin RLS, §5bis "Qué no se tocó").
+--
+-- Columnas — 3, una por control de HU-32/§5.13, en el mismo orden que el wireframe:
+--
+-- `visibilidad_perfil` — ENUM dedicado (`visibilidad_perfil_usuario`, declarado abajo), no TEXT
+-- libre. Se distingue a propósito del criterio ya usado para `paciente.genero`/
+-- `contacto_emergencia_relacion` (TEXT libre porque son "contenido de UI, no una regla de negocio
+-- que dependa de valores específicos"): acá, a diferencia de esos dos, el campo existe
+-- ESPECÍFICAMENTE para controlar qué puede ver otro usuario (público/solo contactos/privado) —
+-- mismo tipo de campo que `rol_usuario`/`estado_turno`/`estado_pago` (un conjunto cerrado de
+-- estados que gobierna comportamiento real), no un dato descriptivo abierto. La app real
+-- (§5.13bis) confirma que son exactamente 3 opciones fijas mostradas como radio buttons,
+-- reforzando que es un estado controlado, no texto libre de UI. Valores en minúscula sin tilde,
+-- mismo estilo que el resto de los ENUM de este archivo. **Dónde se aplica la restricción de
+-- visibilidad en sí (ej. qué endpoint deja de mostrar el perfil de un profesional "privado" a
+-- quien lo busca) NO se implementa en este ciclo** — ningún endpoint de este proyecto expone hoy
+-- un "perfil público" navegable de cliente/profesional más allá de lo que ya cubre `GET
+-- /negocios/:id/servicios/:servicioId/profesionales` (HU-08, que no filtra por esto); queda
+-- documentado para que Backend lo aplique cuando exista ese caso de uso concreto, mismo patrón que
+-- el gate de `es_rubro_salud` o el fallback de `duracion_cita_min` en este archivo.
+--
+-- `mostrar_estado_en_linea` / `compartir_datos_uso` — BOOLEAN simples, sin ambigüedad de UI (son
+-- toggles on/off tanto en el wireframe como en la captura real). `compartir_datos_uso` no lleva
+-- sufijo "_plataforma" pese a que el texto de HU-32 dice "compartir datos de uso CON LA
+-- PLATAFORMA" — se omite por ser la única plataforma posible en este esquema, mismo criterio de
+-- evitar redundancia ya aplicado en otras columnas de este archivo (ej. `es_rubro_salud`, no
+-- `negocio_es_de_rubro_salud`).
+--
+-- Defaults — `visibilidad_perfil = 'publico'`, `mostrar_estado_en_linea = true`,
+-- `compartir_datos_uso = true`. **Supuesto explícito, NO verificado contra evidencia de "alta de
+-- cuenta nueva"**: no hay wireframe ni captura del estado de una cuenta recién creada — se toman
+-- los mismos 3 valores "activado" que sí muestra la captura real de §5.13bis
+-- (`Screenshot_20260427_095421_Turnario.jpg`) para una cuenta EXISTENTE, asumiendo que reflejan el
+-- default de fábrica de la app de referencia y no una elección explícita que ese usuario haya
+-- hecho alguna vez — supuesto razonable pero no confirmable con la evidencia disponible hoy. Si en
+-- un ciclo futuro aparece evidencia de que una cuenta nueva arranca con otros valores, corregir
+-- estos `DEFAULT`, no solo la documentación.
+--
+-- Auditoría — SOLO `creado_en`/`modificado_en`, SIN `creado_por`/`modificado_por` (a diferencia de
+-- `negocio`/`servicio`/`paciente`/`tratamiento`/`nota_medica`, que sí los llevan). Decisión
+-- consciente, mismo criterio ya aplicado (sin explicitarlo hasta ahora) en `usuario` y
+-- `profesional`: son tablas de autogestión, donde la política de RLS de más abajo garantiza que
+-- quien escribe una fila es SIEMPRE el propio `usuario_id` de esa fila — `creado_por`/
+-- `modificado_por` serían siempre idénticos a `usuario_id`, un dato 100% redundante. Distinto es
+-- el caso de `paciente`/`tratamiento`/`nota_medica` (un profesional escribe sobre datos DE OTRA
+-- persona, el cliente) o `negocio`/`servicio` (un administrador puede no ser quien más tarde
+-- modifica), donde sí hace falta registrar explícitamente quién actuó porque puede no coincidir
+-- con el dueño del recurso.
+--
+-- Sin `eliminado_en` (soft delete): a diferencia de `paciente` (que sí lo lleva porque
+-- `tratamiento`/`nota_medica` referencian `paciente_id` y no hay que romper ese historial), ninguna
+-- otra tabla de este esquema referencia `usuario_preferencias.id` — no hay ningún historial que
+-- proteger. El ciclo de vida de esta fila está atado por completo al de `usuario`: si la cuenta se
+-- da de baja, estas preferencias dejan de tener sentido junto con ella (no hay ningún caso de uso
+-- de "preferencias históricas de una cuenta eliminada"). Sin `ON DELETE CASCADE` explícito en el
+-- FK, igual que el resto de las referencias a `usuario(id)` en este archivo (ninguna lo usa hoy) —
+-- consistente, no una omisión puntual de esta tabla.
+--
+-- Recomendación para Backend — cuándo se crea/actualiza la fila (no implementado acá, fuera de
+-- alcance de DBA, mismo patrón ya usado para la creación perezosa de `paciente`): no hace falta
+-- una fila para que una cuenta nueva "tenga" estos valores — mientras no exista fila para un
+-- `usuario_id` dado, la aplicación puede devolver los 3 `DEFAULT` de arriba sin tocar la base
+-- (0 filas = "todavía en default de fábrica, nunca personalizó nada"). El botón "Guardar" del
+-- footer real (3 botones, ver mapa-pantallas.md §5.13bis) es el punto natural para un
+-- `INSERT ... ON CONFLICT (usuario_id) DO UPDATE SET visibilidad_perfil = ..., ..., modificado_en
+-- = now()` (upsert; el `UNIQUE` de `usuario_id` de abajo ya lo habilita sin duplicar filas). Qué
+-- hace exactamente "Restablecer" (el 3er botón, naranja) no se resuelve acá: puede ser un
+-- `DELETE FROM usuario_preferencias WHERE usuario_id = ?` (vuelve a "sin fila" = defaults) o un
+-- `UPDATE` explícito a los mismos 3 valores — cualquiera de los dos es válido contra este esquema,
+-- decisión de Backend.
+CREATE TYPE visibilidad_perfil_usuario AS ENUM ('publico', 'solo_contactos', 'privado');
+
+CREATE TABLE usuario_preferencias (
+  id                       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  usuario_id               UUID NOT NULL UNIQUE REFERENCES usuario(id),
+  visibilidad_perfil       visibilidad_perfil_usuario NOT NULL DEFAULT 'publico',
+  mostrar_estado_en_linea  BOOLEAN NOT NULL DEFAULT true,
+  compartir_datos_uso      BOOLEAN NOT NULL DEFAULT true,
+  creado_en                TIMESTAMPTZ NOT NULL DEFAULT now(),
+  modificado_en            TIMESTAMPTZ
+);
+
+-- RLS — FORCE desde el primer commit (lección de §5bis/§5ter: cualquier tabla nueva la necesita
+-- desde el día 1, no solo ENABLE). Política única (sin `FOR`, aplica a SELECT/INSERT/UPDATE/
+-- DELETE) porque la regla es simétrica para los 4 comandos: "cada usuario solo lee/edita su propia
+-- fila" — mismo criterio de columna simple (`usuario_id = app.usuario_id`, sin JOIN) que
+-- `negocio_administrador_select_propio`/`profesional_update_propio_duracion_cita` más arriba, no
+-- el patrón `EXISTS` con JOIN que usan `paciente`/`tratamiento`/`nota_medica` (acá no hace falta:
+-- no hay negocio/profesional de por medio, la propiedad es directa contra `usuario_id`).
+ALTER TABLE usuario_preferencias ENABLE ROW LEVEL SECURITY;
+-- FORCE: ver nota junto a `profesional`, más arriba en este archivo, para el porqué completo.
+ALTER TABLE usuario_preferencias FORCE ROW LEVEL SECURITY;
+CREATE POLICY usuario_preferencias_acceso_propio ON usuario_preferencias
+  USING (usuario_id = NULLIF(current_setting('app.usuario_id', true), '')::uuid)
+  WITH CHECK (usuario_id = NULLIF(current_setting('app.usuario_id', true), '')::uuid);
