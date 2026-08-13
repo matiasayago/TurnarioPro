@@ -5,6 +5,7 @@ import 'configuracion_screen.dart';
 import 'dashboard_screen.dart';
 import 'gestion_horarios_screen.dart';
 import 'gestion_pacientes_screen.dart';
+import 'notificaciones_screen.dart';
 
 // Índices de pestaña del bottom nav de Profesional (orden real, ver `screens` en build() más
 // abajo) — con nombre para no repetir números mágicos al cambiar de pestaña desde
@@ -23,12 +24,13 @@ const int _tabPacientes = 2;
 /// nav y pasa a accederse desde el botón "Ver agenda >" del Dashboard
 /// (`mapa-pantallas.md` §4/§5.3).
 ///
-/// Pacientes usa la Gestión de Pacientes rediseñada (HU-10+HU-19, `mapa-pantallas.md` §5.8bis) y
-/// Configuración el menú real (§5.11bis) — a propósito no se reutiliza `MisClientesScreen`
-/// (versión anterior y más simple de "Mis Clientes"/HU-10, todavía en `mis_clientes_screen.dart`)
-/// para no mezclar el lenguaje visual viejo con el nuevo dentro del mismo shell. WhatsApp y
-/// Notificaciones siguen como placeholders (ver `widgets/proximamente_screen.dart`) — fuera de
-/// esta ronda.
+/// Pacientes usa la Gestión de Pacientes rediseñada (HU-10+HU-19, `mapa-pantallas.md` §5.8bis),
+/// Configuración el menú real (§5.11bis) y Notificaciones la bandeja real (HU-14b+HU-25, §5.15,
+/// ver `notificaciones_screen.dart`) — a propósito no se reutiliza `MisClientesScreen` (versión
+/// anterior y más simple de "Mis Clientes"/HU-10, todavía en `mis_clientes_screen.dart`) para no
+/// mezclar el lenguaje visual viejo con el nuevo dentro del mismo shell. WhatsApp sigue como
+/// placeholder (ver `widgets/proximamente_screen.dart`) — fuera de esta ronda (HU-24 bloqueada,
+/// ver `mapa-pantallas.md` §5.16).
 class ProfesionalShell extends StatefulWidget {
   const ProfesionalShell({super.key});
 
@@ -53,7 +55,7 @@ class _ProfesionalShellState extends State<ProfesionalShell> {
       const GestionHorariosScreen(),
       const GestionPacientesScreen(),
       const ProximamenteScreen(titulo: 'WhatsApp', emoji: '💬'),
-      const ProximamenteScreen(titulo: 'Notificaciones', emoji: '🔔'),
+      const NotificacionesScreen(),
       ConfiguracionScreen(
         onIrAHorarios: () => _irATab(_tabHorarios),
         onIrAPacientes: () => _irATab(_tabPacientes),

@@ -184,9 +184,28 @@ turnosRouter.post(
             );
           }
 
+          // HU-25 (ver database/migrations/001_init.sql, "Bandeja de notificaciones"): agrega
+          // destinatario_usuario_id — antes se insertaba sin esa columna (no existía hasta este
+          // ciclo), quedando en NULL y por lo tanto invisible para la bandeja
+          // (`notificacion_select_propia` nunca matchea `destinatario_usuario_id IS NULL`, ver
+          // 004_notificaciones.sql). El destinatario es el PROFESIONAL de este turno (mismo
+          // criterio confirmado por DBA contra el wireframe, mapa-pantallas.md §5.15: los 3
+          // ejemplos de la bandeja están redactados en 3ra persona sobre la acción del cliente —
+          // es la bandeja del profesional), usando el mismo `profesional.usuario_id` que ya
+          // resuelve el SELECT de arriba para el alta de `paciente`. No hace falta cambiar de
+          // identidad de RLS para ESTE INSERT (a diferencia del de `paciente`, más abajo):
+          // `app.usuario_id` sigue siendo el CLIENTE acá, y `notificacion_insert_evento_turno`
+          // (004_notificaciones.sql) ya contempla exactamente este caso — turno.cliente_id =
+          // app.usuario_id (1ra condición) + destinatario_usuario_id = profesional de ESTE turno
+          // (2da condición).
+          //
+          // `notificacionProvider.enviar` (integraciones/notificaciones.ts) sigue sin invocarse
+          // acá, a propósito: es un stub que solo loguea, sin ningún consumidor real todavía (D4
+          // no resolvió qué proveedor de push real se usa) — conectar el "envío" es una decisión
+          // de un ciclo futuro, no de este (que solo pide bandeja + configuración).
           await client.query(
-            'INSERT INTO notificacion (id, turno_id, tipo, creado_en) VALUES ($1, $2, $3, $4)',
-            [uuid(), turnoId, 'confirmacion', ts] // D4 — el envío real lo hace el proveedor de notificaciones (stub, ver notificaciones.ts)
+            'INSERT INTO notificacion (id, turno_id, tipo, destinatario_usuario_id, creado_en) VALUES ($1, $2, $3, $4, $5)',
+            [uuid(), turnoId, 'confirmacion', profesional!.usuario_id, ts]
           );
 
           // HU-19/HU-20 (ver 03-arquitectura/modelo-datos.md §2quinquies y backlog.md HU-19):
@@ -276,10 +295,31 @@ turnosRouter.patch(
         if (turno.cliente_id !== req.auth!.sub) return { tipo: 'prohibido' as const };
         if (dentroDeVentanaMinima(turno.inicio)) return { tipo: 'fuera_de_ventana' as const };
 
+        const ts = nowIso();
+
         await client.query("UPDATE turno SET estado = 'cancelado', modificado_en = $1 WHERE id = $2", [
-          nowIso(),
+          ts,
           req.params.id,
         ]);
+
+        // HU-25 (ver database/migrations/001_init.sql, "Bandeja de notificaciones",
+        // recomendación 1 para Backend): este handler no insertaba ninguna notificación — gap
+        // real, no solo de modelado. Mismo destinatario (el profesional del turno) y mismo JOIN
+        // que usan POST /turnos y PATCH /:id/reprogramar en este archivo. No hace falta cambiar
+        // de identidad de RLS para este INSERT (a diferencia del alta de `paciente` en
+        // POST /turnos): `app.usuario_id` sigue siendo el CLIENTE en toda esta transacción, y la
+        // policy `notificacion_insert_evento_turno` (004_notificaciones.sql) ya contempla
+        // exactamente este caso — turno.cliente_id = app.usuario_id (1ra condición) +
+        // destinatario_usuario_id = profesional de ESTE turno (2da condición).
+        const profesionalResult = await client.query('SELECT usuario_id FROM profesional WHERE id = $1', [
+          turno.profesional_id,
+        ]);
+        const profesional = profesionalResult.rows[0] as { usuario_id: string } | undefined;
+        await client.query(
+          'INSERT INTO notificacion (id, turno_id, tipo, destinatario_usuario_id, creado_en) VALUES ($1, $2, $3, $4, $5)',
+          [uuid(), req.params.id, 'cancelacion', profesional!.usuario_id, ts]
+        );
+
         return { tipo: 'ok' as const };
       },
       { usuarioId: req.auth!.sub, negocioId: req.auth!.negocio_id }
@@ -363,12 +403,16 @@ turnosRouter.patch(
           // reprogramar. Sin esto, reprogramar el turno de un profesional con override
           // configurado le devolvería silenciosamente la duración del servicio en vez de
           // mantener la duración con la que se reservó originalmente.
+          // `usuario_id` se agrega a este SELECT (antes solo `duracion_cita_min`) — hace falta
+          // para completar `destinatario_usuario_id` del INSERT de `notificacion` más abajo
+          // (HU-25). Sigue siendo el mismo profesional del turno viejo: reprogramar no cambia de
+          // profesional, solo de horario.
           const profesionalResult = await client.query(
-            'SELECT duracion_cita_min FROM profesional WHERE id = $1',
+            'SELECT duracion_cita_min, usuario_id FROM profesional WHERE id = $1',
             [turno.profesional_id]
           );
           const profesionalConfig = profesionalResult.rows[0] as
-            | { duracion_cita_min: number | null }
+            | { duracion_cita_min: number | null; usuario_id: string }
             | undefined;
           const duracionEfectivaMin = profesionalConfig?.duracion_cita_min ?? servicio!.duracion_min;
           const nuevoFinDate = new Date(nuevoInicioDate.getTime() + duracionEfectivaMin * 60_000);
@@ -398,9 +442,15 @@ turnosRouter.patch(
           // El pago (si existe) sigue al turno reprogramado — no se le vuelve a cobrar la seña.
           await client.query('UPDATE pago SET turno_id = $1 WHERE turno_id = $2', [nuevoTurnoId, turno.id]);
 
+          // HU-25 (mismo criterio que POST /turnos, ver ese comentario): agrega
+          // destinatario_usuario_id = el profesional de este turno. `tipo` se mantiene
+          // 'confirmacion' — el pedido explícito de este ciclo fue completar el destinatario, no
+          // cambiar el tipo; DBA ya dejó el label 'reprogramacion' disponible en el ENUM
+          // (001_init.sql) para cuando se decida adoptarlo, sin que este INSERT tenga que cambiar
+          // de forma para eso.
           await client.query(
-            'INSERT INTO notificacion (id, turno_id, tipo, creado_en) VALUES ($1, $2, $3, $4)',
-            [uuid(), nuevoTurnoId, 'confirmacion', ts]
+            'INSERT INTO notificacion (id, turno_id, tipo, destinatario_usuario_id, creado_en) VALUES ($1, $2, $3, $4, $5)',
+            [uuid(), nuevoTurnoId, 'confirmacion', profesionalConfig!.usuario_id, ts]
           );
 
           return { tipo: 'ok' as const, estadoFinal };
