@@ -19,6 +19,15 @@ Siguiendo el estándar de la empresa (`docs/06-modelo-datos.md` §3):
   asociación aparte) — el `NULL` en sí mismo representa "sin override", sin necesitar un booleano
   adicional. El fallback y su semántica exacta se documentan junto al campo: no se resuelve en la
   base de datos, lo aplica la capa de aplicación.
+- **Auditoría reducida en tablas de autogestión** (patrón ya presente desde Fase 3 en `Usuario`/
+  `Profesional`, formalizado como regla explícita en 2026-08-11 al aplicarlo de nuevo en
+  `UsuarioPreferencias` — ver §2septies): cuando una tabla solo puede ser escrita por el propio
+  sujeto de la fila (reforzado por una policy de RLS de "acceso propio" o, en el caso de `Usuario`,
+  por construcción del flujo de registro/login), se omiten `creado_por`/`modificado_por` — siempre
+  serían idénticos al identificador del sujeto, dato 100% redundante. La auditoría completa
+  (`creado_por`/`modificado_por` además de `creado_en`/`modificado_en`) se reserva para tablas
+  donde quien escribe la fila puede ser distinto de a quién pertenece el dato (`Negocio`,
+  `Servicio`, `Paciente`, `Tratamiento`, `NotaMedica`).
 - **Preferencias de usuario — tabla nueva vs. extender una `usuario_preferencias*` existente**
   (introducido 2026-08-12, HU-26 — ver §2octies): una tabla `usuario_preferencias*` sirve para
   preferencias PLANAS (booleanos/enums escalares, 1:1 con `usuario`, sin sub-estructura ni
@@ -48,6 +57,7 @@ Siguiendo el estándar de la empresa (`docs/06-modelo-datos.md` §3):
 | **Paciente** (HU-20, nueva 2026-08-10) | "Ficha" que un Profesional lleva de un Cliente, dentro de un Negocio — NO 1:1 con Usuario, ver §2quinquies (RN7/RN13/D3: privacidad por profesional). Campos básicos ya en Usuario (nombre/email/teléfono); acá viven fecha de nacimiento, género, dirección, alergias, contacto de emergencia, notas médicas generales (gateados a rubro salud, D11/RN15) y `activo` (D20/RN20, no gateado). | N:1 Negocio, N:1 Profesional, N:1 Usuario (cliente); 1:N Tratamiento, 1:N NotaMedica |
 | **Tratamiento** (HU-21/D8, nueva 2026-08-10) | Proceso de seguimiento asociado a un Paciente, independiente de un turno puntual (descripción, fecha de inicio, fecha de fin opcional). Privado por profesional (RN13), heredado de `Paciente` — ver §2quinquies. | N:1 Paciente |
 | **NotaMedica** (HU-21/D8, nueva 2026-08-10) | Anotación clínica/de seguimiento asociada a un Paciente, independiente de un turno puntual (fecha, texto). Privado por profesional (RN13), heredado de `Paciente` — ver §2quinquies. | N:1 Paciente |
+| **UsuarioPreferencias** (HU-32, nueva 2026-08-11) | Preferencias de privacidad de la cuenta — tabla satélite 1:1 con Usuario (visibilidad de perfil, mostrar estado en línea, compartir datos de uso con la plataforma), transversal a ambos roles. NO gateada por negocio/profesional — ver §2septies. | 1:1 Usuario |
 | **UsuarioPreferenciasNotificacion** (HU-26, nueva 2026-08-12) | Preferencias de notificación de un Usuario — 3 canales (push/email/whatsapp), 2 tipos de aviso (citas y recordatorios / promociones) y 2 de sonido/vibración, los 7 booleanos planos. Compartida Cliente/Profesional. Tabla propia, NO columnas en `UsuarioPreferencias` (HU-32, ciclo paralelo) — ver §2octies para el porqué. | 1:1 Usuario |
 
 *(Historial de visitas sigue sin ser una entidad propia: es una consulta de `Turno` filtrada por
@@ -595,7 +605,138 @@ esta migración) y coincide con la app de referencia, pero vale la pena señalar
 sin RLS habilitada, así que hoy esa escritura depende enteramente de que el endpoint la autorice
 bien en código de aplicación.
 
+## 2septies. Preferencias de privacidad de usuario (HU-32) — 2026-08-11
+
+**Origen.** El CEO aprobó avanzar con las pantallas de Configuración del lado Profesional que
+todavía faltaban. HU-32 (E14, `02-backlog/backlog.md`): "Como cliente o profesional, quiero
+controlar la visibilidad de mi perfil (público/solo contactos/privado), si muestro mi estado en
+línea, y si comparto datos de uso con la plataforma... Es transversal a ambos roles, no una
+funcionalidad específica de un negocio." Wireframe en `mapa-pantallas.md` §5.13 (bloque
+"Privacidad" de la pantalla "Privacidad y Seguridad"), verificado contra una captura real de la
+app de referencia en §5.13bis (2026-08-07).
+
+**Alcance — qué NO se modela en este ciclo, y por qué.** Esa misma verificación (§5.13bis)
+confirma que el bloque "Seguridad de la cuenta" (cambiar contraseña, verificación en dos pasos,
+biometría, sesiones activas, descargar/eliminar mis datos) que el wireframe original mostraba
+junto a "Privacidad" **no existe en la app real** — ya estaba documentado como adición de UX/UI
+sin HU propia; esta verificación lo confirma, así que no se modela nada de eso acá. Tampoco se
+modela el 4to control que sí aparece en la captura real, "Permitir Notificaciones" (entre
+"Mostrar Estado en Línea" y "Compartir Datos de Uso"): se superpone temáticamente con
+HU-26/Configuración de Notificaciones (`mapa-pantallas.md` §5.14, todavía sin modelar) — hacerlo
+acá adelantaría ese trabajo futuro. Cuando se modele HU-26 se decide si ese toggle vive junto a la
+configuración granular de notificaciones o si necesita su propio campo; no se resuelve hoy.
+
+### ¿Columnas en `usuario` o tabla `usuario_preferencias` separada 1:1?
+
+A diferencia de la decisión equivalente para `Paciente` (§2quinquies), acá la cardinalidad **no
+fuerza la respuesta**: HU-32 es explícitamente transversal ("no una funcionalidad específica de un
+negocio") y `mapa-pantallas.md` §5.13 confirma "pantalla y contenido idénticos para ambos roles
+(misma cuenta, mismas garantías de privacidad)" — un solo valor por `Usuario`, sin el scope por
+negocio/profesional/cliente que sí necesitaba `Paciente`. Tanto "columnas en `usuario`" como
+"tabla 1:1" son estructuralmente válidas acá (a diferencia de `Paciente`, donde una de las dos
+alternativas era directamente incompatible con los hechos) — la decisión se toma por otro
+criterio, no por cardinalidad forzada.
+
+**Se elige tabla separada, `usuario_preferencias`** (1:1 vía `usuario_id UNIQUE REFERENCES
+usuario(id)`), por 3 motivos:
+
+1. **Separación de responsabilidades / crecimiento acotado.** `usuario` es la tabla de
+   identidad/autenticación — se consulta en cada login y la referencian por FK casi todas las
+   demás tablas del esquema. Sus columnas hoy son todas hechos de identidad (email,
+   password_hash, google_id, telefono, nombre, rol). Las preferencias de privacidad/app son un
+   concern independiente que ya se sabe va a seguir creciendo (HU-26 queda para la próxima ronda
+   a propósito; el propio wireframe de §5.13 documenta un bloque adicional, "Seguridad de la
+   cuenta", que si algún ciclo futuro recibe HU propia sería exactamente más columnas de este
+   mismo tipo). Una tabla separada absorbe ese crecimiento sin seguir ensanchando `usuario`.
+2. **Precedente ya establecido en este esquema.** `Profesional` (§2ter) es exactamente este mismo
+   patrón: tabla satélite 1:1 con `usuario`, separada pese a ser 1:1, para no mezclar la identidad
+   base con un concern distinto. `usuario_preferencias` sigue la misma forma estructural — GUID
+   propio + `usuario_id UNIQUE`, mismo patrón que `Profesional`/`Pago` en este esquema, en vez de
+   usar `usuario_id` directo como PK.
+3. **RLS como motivo de fondo, no solo de estilo** — ver conclusión siguiente.
+
+### Conclusión sobre RLS de `usuario` (pedida explícitamente antes de decidir, no asumida)
+
+Confirmado leyendo `05-codigo/database/migrations/001_init.sql` completo: `usuario` **hoy no
+tiene Row Level Security habilitada** — no hay ningún `ALTER TABLE usuario ENABLE ROW LEVEL
+SECURITY` en ese archivo (a diferencia de profesional/negocio_administrador/negocio_profesional/
+servicio/turno/paciente/tratamiento/nota_medica, que sí la tienen). Es una brecha real,
+preexistente (ya señalada en el comentario junto al `CREATE TABLE usuario`, a propósito de editar
+nombre/email/teléfono desde "Editar Paciente": "`usuario` sigue sin RLS habilitada... esa
+escritura depende enteramente de que el endpoint la autorice bien en código de aplicación, sin
+ninguna capa de RLS de respaldo"), no introducida por este ciclo.
+
+Esa brecha aplicaría igual a las 3 columnas de HU-32 si vivieran directamente en `usuario`: misma
+protección (ninguna a nivel de base de datos) que el resto de esa tabla, dependiendo 100% de que
+Backend nunca introduzca un bug de autorización. Para HU-32 específicamente — que **es** la
+funcionalidad de privacidad — dejar sus datos en la tabla con menos defensa en profundidad de todo
+el esquema sería, como mínimo, una señal contradictoria. La tabla separada resuelve esto de forma
+limpia: al ser nueva, aplica desde el primer commit la lección ya documentada en §5bis/§5ter
+(`FORCE ROW LEVEL SECURITY` desde el día 1 — ver §5quater), sin necesitar auditar/blindar
+retroactivamente los múltiples call sites de escritura que ya existen hoy sobre `usuario`
+(registro-cliente, registro-negocio, alta-profesional, y el futuro login-google de HU-35) antes de
+poder habilitarle RLS con seguridad — trabajo real, más grande, fuera del alcance de este ciclo.
+
+**Habilitar RLS sobre `usuario` en sí (más allá de estas 3 columnas) queda documentado como
+recomendación para un ciclo futuro de DBA/Backend — no resuelto ni bloqueado acá**, mismo
+tratamiento que otras brechas ya reconocidas en este documento (`pago`/`notificacion` sin RLS,
+§5bis "Qué no se tocó").
+
+### Columnas
+
+Mismo orden que el wireframe (`mapa-pantallas.md` §5.13):
+
+- **`visibilidad_perfil`** — ENUM dedicado (`visibilidad_perfil_usuario`: `publico` /
+  `solo_contactos` / `privado`), no TEXT libre. Se distingue a propósito del criterio ya usado
+  para `paciente.genero`/`contacto_emergencia_relacion` (TEXT libre por ser "contenido de UI, no
+  una regla de negocio que dependa de valores específicos"): acá el campo existe
+  específicamente para controlar qué puede ver otro usuario — mismo tipo de campo que
+  `rol_usuario`/`estado_turno`/`estado_pago` (conjunto cerrado que gobierna comportamiento real),
+  reforzado por la app real (§5.13bis), que confirma exactamente 3 opciones fijas como radio
+  buttons. **Dónde se aplica la restricción de visibilidad en sí no se implementa en este
+  ciclo** — ningún endpoint del proyecto expone hoy un "perfil público" navegable más allá de
+  `GET /negocios/:id/servicios/:servicioId/profesionales` (HU-08, que no filtra por esto); queda
+  documentado para que Backend lo aplique cuando exista ese caso de uso, mismo patrón que el gate
+  de `es_rubro_salud` o el fallback de `duracion_cita_min`.
+- **`mostrar_estado_en_linea`** / **`compartir_datos_uso`** — `BOOLEAN` simples (toggles on/off
+  tanto en el wireframe como en la captura real).
+
+**Defaults — `visibilidad_perfil = 'publico'`, `mostrar_estado_en_linea = true`,
+`compartir_datos_uso = true`. Supuesto explícito, NO verificado contra evidencia de "alta de
+cuenta nueva":** no hay wireframe ni captura del estado de una cuenta recién creada — se toman los
+mismos 3 valores "activado" que sí muestra la captura real de §5.13bis
+(`Screenshot_20260427_095421_Turnario.jpg`) para una cuenta **existente**, asumiendo que reflejan
+el default de fábrica de la app de referencia y no una elección explícita de ese usuario —
+razonable pero no confirmable con la evidencia disponible hoy.
+
+**Auditoría — solo `creado_en`/`modificado_en`, sin `creado_por`/`modificado_por`** (a diferencia
+de `negocio`/`servicio`/`paciente`/`tratamiento`/`nota_medica`) — ver regla formalizada en §1
+("Auditoría reducida en tablas de autogestión"): la policy de RLS de §5quater garantiza que quien
+escribe una fila es siempre el propio `usuario_id` de esa fila, así que `creado_por`/
+`modificado_por` serían siempre idénticos a `usuario_id` — dato redundante.
+
+**Sin `eliminado_en` (soft delete):** a diferencia de `paciente` (que lo lleva porque
+`tratamiento`/`nota_medica` referencian `paciente_id` y no hay que romper ese historial), ninguna
+otra tabla de este esquema referencia `usuario_preferencias.id` — no hay historial que proteger.
+El ciclo de vida de esta fila está atado por completo al de `usuario`.
+
+**Recomendación para Backend — cuándo se crea/actualiza la fila** (no implementado acá, mismo
+patrón ya usado para la creación perezosa de `Paciente`): no hace falta una fila para que una
+cuenta nueva "tenga" estos valores — mientras no exista fila para un `usuario_id` dado, la
+aplicación puede devolver los 3 `DEFAULT` de arriba sin tocar la base (0 filas = "todavía en
+default de fábrica"). El botón "Guardar" del footer real (3 botones, ver `mapa-pantallas.md`
+§5.13bis) es el punto natural para un `INSERT ... ON CONFLICT (usuario_id) DO UPDATE SET ...`
+(upsert; el `UNIQUE` de `usuario_id` ya lo habilita). Qué hace exactamente "Restablecer" (el 3er
+botón) no se resuelve acá — `DELETE` de la fila o `UPDATE` explícito a los mismos 3 valores son
+ambos válidos contra este esquema; decisión de Backend.
+
+Detalle línea por línea (columnas, tipo, defaults) en
+`05-codigo/database/migrations/001_init.sql` (bloque "Preferencias de privacidad de usuario") y
+en `05-codigo/database/migrations/003_privacidad_usuario.sql` (mismo contenido, delta para
+aplicar a mano contra Render — ver **§4**). RLS en **§5quater**.
+
 ## 2octies. Bandeja de notificaciones + preferencias de notificación (HU-14b/HU-25/HU-26) — 2026-08-12
+
 
 **Origen.** El CEO pidió explícitamente construir Notificaciones en este ciclo (había quedado
 afuera de la ronda anterior de Configuración). Cubre 2 HU relacionadas pero distintas — UX/UI ya
@@ -739,6 +880,7 @@ Usuario ── Profesional ──< NegocioProfesional >── Negocio
                  ├── Disponibilidad
                  ├── ExcepcionDisponibilidad
                  └── ProfesionalServicio ── Servicio ── Negocio (N:1)
+Usuario ── UsuarioPreferencias (1:1, HU-32 — ver §2septies)
 
 Negocio ── Turno ── Usuario (cliente)
                  ├── Pago
@@ -749,6 +891,12 @@ Usuario ── UsuarioPreferenciasNotificacion (1:1)
 
 (`──< X >──` denota una relación N:M resuelta por la tabla de asociación `X`, con PK compuesta
 por las dos claves foráneas que conecta.)
+
+**Nota de mantenimiento (2026-08-11):** este diagrama tampoco se había actualizado con
+`Paciente`/`Tratamiento`/`NotaMedica` (§2quinquies, 2026-08-10) — gap preexistente, detectado al
+tocar este diagrama para agregar `UsuarioPreferencias`, no corregido acá por quedar fuera del
+alcance de HU-32 (este ciclo). Queda señalado para no perpetuarlo en silencio; la tabla de
+entidades de §2 y el bloque de RLS (§5ter) sí están al día para esas 3 entidades.
 
 ## 4. Script de creación (DDL inicial)
 
@@ -773,16 +921,32 @@ para que Backend/DevOps lo apliquen al levantar el entorno de desarrollo.
 > secuencia de migraciones numeradas con tabla de control, en vez de un único script gateado por
 > la existencia de `usuario`.
 
+> **Nota operativa (2026-08-11, DBA) — mismo patrón, ahora con
+> `003_privacidad_usuario.sql`.** El mismo gap sigue vigente (Render producción ya corrió su
+> migración, `runMigrations()` sigue gateada por "¿ya existe `usuario`?"), así que la tabla
+> `usuario_preferencias` de HU-32 (§2septies) tiene el mismo problema que HU-20/HU-21/HU-35 en el
+> ciclo anterior: editar `001_init.sql` (ya hecho, ambas copias) no alcanza para que Render la
+> reciba en el próximo deploy. El delta para aplicar a mano vive en
+> [`05-codigo/database/migrations/003_privacidad_usuario.sql`](../05-codigo/database/migrations/003_privacidad_usuario.sql)
+> — mismo comando `psql "$DATABASE_URL" -f 003_privacidad_usuario.sql`, mismas garantías de
+> idempotencia/reversibilidad que 002 (ver el propio header del archivo). Aplicado y verificado
+> contra Render real por el Director General IA (2026-08-12, ver §5quater y el propio README del
+> backend). Sigue en pie la misma recomendación de seguimiento para Backend/DevOps del párrafo
+> anterior — cada ciclo que agrega esquema nuevo después del primer deploy de Render va a
+> necesitar su propio archivo `00N_...sql` mientras `runMigrations()` no soporte una secuencia
+> numerada con tabla de control.
+>
 > **Nota operativa (2026-08-12, DBA) — por qué el siguiente archivo incremental es
 > `004_notificaciones.sql` y no `003_*`.** Mismo mecanismo que la nota de arriba (`001_init.sql`
 > se actualizó igual, pero no alcanza para Render). El número "003" ya está tomado, en paralelo,
 > por `003_privacidad_usuario.sql` (HU-32, `feature/configuracion-profesional`, todavía no
-> mergeada a `main`) — se reserva "004" acá para que ambas ramas no registren un "003" distinto
-> que colisione al mergear. A diferencia de `002`/`003`, este archivo NO depende de que el
-> anterior haya corrido: la tabla nueva que agrega (`usuario_preferencias_notificacion`, ver
-> §2octies) es autocontenida a propósito, sin ninguna referencia a `usuario_preferencias` (la
-> tabla de `003`) — se puede aplicar contra Render sin importar el orden en que se mergeen ambos
-> ciclos. Ver
+> mergeada a `main` al momento de escribir esta nota) — se reserva "004" acá para que ambas ramas
+> no registren un "003" distinto que colisione al mergear. A diferencia de `002`/`003`, este
+> archivo NO depende de que el anterior haya corrido: la tabla nueva que agrega
+> (`usuario_preferencias_notificacion`, ver §2octies) es autocontenida a propósito, sin ninguna
+> referencia a `usuario_preferencias` (la tabla de `003`) — se puede aplicar contra Render sin
+> importar el orden en que se mergeen ambos ciclos. Aplicado y verificado contra Render real por
+> el Director General IA (2026-08-12). Ver
 > [`05-codigo/database/migrations/004_notificaciones.sql`](../05-codigo/database/migrations/004_notificaciones.sql).
 
 ## 5. Row Level Security (Postgres, producción)
@@ -1102,6 +1266,33 @@ checklist:
   HU-35 en este ciclo. Explícitamente NO bloqueante de Fases 3–5 (mismo criterio que el resto de
   esta adenda) — sí queda como parte del checklist antes de producción con datos reales.
 
+## 5quater. RLS de `usuario_preferencias` (HU-32, DBA, 2026-08-11)
+
+Aplicando la misma lección de §5bis/§5ter: **tabla nueva, `FORCE ROW LEVEL SECURITY` desde el
+primer commit**, no solo `ENABLE`.
+
+**Criterio — más simple que `paciente`/`tratamiento`/`nota_medica` (§5ter): una única policy,
+sin `FOR`, aplica a los 4 comandos (SELECT/INSERT/UPDATE/DELETE) por columna directa
+(`usuario_id = app.usuario_id`), sin `JOIN`.** No hace falta el patrón `EXISTS` contra
+`negocio_profesional`/`profesional` que usa `paciente`: acá no hay negocio ni profesional de por
+medio, la propiedad es directa entre la fila y el usuario dueño de la cuenta — mismo criterio de
+columna simple ya usado en `negocio_administrador_select_propio` y
+`profesional_update_propio_duracion_cita` (§5bis), no el criterio con `JOIN` de §5ter. Cada
+usuario lee/edita únicamente su propia fila; no hay ninguna vía de acceso para administradores,
+otros profesionales, ni el propio Backend fuera del contexto `SET LOCAL app.usuario_id` de la
+transacción autenticada del dueño.
+
+Ver la conclusión completa sobre por qué `usuario` en sí (a diferencia de esta tabla nueva) sigue
+sin RLS habilitada, y por qué eso no se resuelve en este ciclo, en **§2septies**. Detalle línea
+por línea de la policy en `05-codigo/database/migrations/001_init.sql` (bloque "Preferencias de
+privacidad de usuario") y en `003_privacidad_usuario.sql` (misma policy, envuelta en un bloque
+`DO` con guard contra `pg_policy` para que ese script sea reintentable — ver su propio header).
+**Verificado contra un Postgres real** por el Director General IA (2026-08-12): aplicado contra
+Render producción y confirmado con contexto RLS real (`set_config('app.usuario_id', ...)`) que
+cada cuenta solo ve/edita su propia fila. `verificar_rls_postgres.sql` todavía no cubre esta
+tabla (mismo gap que ya tiene para `paciente`/`tratamiento`/`nota_medica`) — pendiente para un
+ciclo futuro de QA/Security.
+
 ## 5quinquies. RLS de la bandeja de notificaciones + preferencias de notificación (HU-14b/HU-25/HU-26, DBA, 2026-08-12)
 
 Cierra un gap que la propia sección 5 de este documento ya dejaba anotado como pendiente ("`pago`
@@ -1157,6 +1348,12 @@ ambiente de prueba antes que contra Render producción, con foco particular en e
 `POST /turnos`/`PATCH /:id/reprogramar` tal como están hoy (sin `destinatario_usuario_id`), para
 confirmar empíricamente que la policy de compatibilidad (`IS NULL`) realmente los deja pasar.
 
+**Verificado contra un Postgres real** por el Director General IA (2026-08-12): reserva de turno
+→ INSERT de `confirmacion` pasa la policy; cancelación → INSERT de `cancelacion` pasa la policy;
+lectura de la bandeja con contexto real (`set_config('app.usuario_id', ...)`) muestra solo las
+notificaciones propias. La policy de compatibilidad `IS NULL` y el criterio de INSERT amplio
+(actor ≠ destinatario) quedaron confirmados end-to-end, no solo en el diseño.
+
 ## 6. Índices críticos
 
 - `uq_turno_slot_activo` sobre `(profesional_id, inicio)` filtrado por estado activo —
@@ -1188,6 +1385,11 @@ confirmar empíricamente que la policy de compatibilidad (`IS NULL`) realmente l
   - Índices `idx_tratamiento_paciente`/`idx_nota_medica_paciente` sobre `paciente_id` — cubren
     tanto el listado del historial enriquecido (HU-21) como los conteos de los stat cards
     "Tratamientos"/"Notas médicas".
+- **Nuevo 2026-08-11 (HU-32, ver §2septies):** `UNIQUE (usuario_id)` en `usuario_preferencias` —
+  además de expresar el 1:1 con `usuario`, es en sí misma el índice que cubre la única consulta
+  de lectura de esta tabla (`WHERE usuario_id = ?`, resolver "mis preferencias" al abrir la
+  pantalla de Privacidad y Seguridad) por igualdad exacta — no hace falta ningún índice
+  adicional. Mismo criterio ya aplicado a `profesional.usuario_id UNIQUE` (Fase 3 original).
 - **Nuevo 2026-08-12 (HU-14b/HU-25/HU-26, ver §2octies):**
   - `idx_notificacion_destinatario` sobre `(destinatario_usuario_id, creado_en DESC)` en
     `notificacion` — cubre la query dominante de la bandeja ("mis notificaciones, más nuevas

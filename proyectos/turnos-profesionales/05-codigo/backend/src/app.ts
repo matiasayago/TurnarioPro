@@ -8,6 +8,7 @@ import { profesionalesRouter } from './routes/profesionales';
 import { turnosRouter } from './routes/turnos';
 import { clientesRouter } from './routes/clientes';
 import { notificacionesRouter } from './routes/notificaciones';
+import { usuarioRouter } from './routes/usuario';
 import { devRouter } from './routes/dev';
 
 export function createApp() {
@@ -62,6 +63,7 @@ export function createApp() {
   app.use('/turnos', turnosRouter);
   app.use('/clientes', clientesRouter);
   app.use('/notificaciones', notificacionesRouter);
+  app.use('/usuario', usuarioRouter);
 
   // HIGH-4 (ver 07-seguridad/informe-seguridad.md): estas rutas NO tienen autenticación propia
   // (seed de datos + preview web del flujo, para poder probar el golden path sin instalar
