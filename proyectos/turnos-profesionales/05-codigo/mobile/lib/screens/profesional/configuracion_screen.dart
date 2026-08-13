@@ -11,6 +11,7 @@ import '../../widgets/widgets.dart';
 import 'acerca_de_screen.dart';
 import 'ayuda_soporte_screen.dart';
 import 'configuracion_consultorio_screen.dart';
+import 'configuracion_notificaciones_screen.dart';
 import 'editar_perfil_screen.dart';
 import 'precios_senas_screen.dart';
 import 'privacidad_screen.dart';
@@ -28,17 +29,18 @@ import 'reportes_screen.dart';
 ///
 /// Además del selector de Tema (conectado a `ThemeController`, la infraestructura ya existía,
 /// ver `state/theme_controller.dart`) y "Cerrar Sesión" (real, mismo `Sesion.cerrarSesion()` que
-/// usa el resto de la app), esta ronda conecta 6 ítems más a datos reales — "Editar Perfil"
+/// usa el resto de la app), esta pantalla conecta a datos reales — "Editar Perfil"
 /// (`editar_perfil_screen.dart`), "Privacidad y Seguridad" (`privacidad_screen.dart`),
-/// "Configuración de Consultorio" (`configuracion_consultorio_screen.dart`, de solo lectura, ver
-/// el comentario de esa clase), "Reportes y Estadísticas" (`reportes_screen.dart`, pantalla
-/// nueva) y, apuntando a la MISMA pantalla (`precios_senas_screen.dart`, Precios y Señas), tanto
+/// "Notificaciones" (HU-26, `mapa-pantallas.md` §5.14, ver `configuracion_notificaciones_screen.
+/// dart`), "Configuración de Consultorio" (`configuracion_consultorio_screen.dart`, de solo
+/// lectura, ver el comentario de esa clase), "Reportes y Estadísticas" (`reportes_screen.dart`)
+/// y, apuntando a la MISMA pantalla (`precios_senas_screen.dart`, Precios y Señas), tanto
 /// "Configuración de Pagos" (Panel Profesional) como "Pagos y Señas" (su propia sección) — ambos
 /// ítems son, en los hechos, el mismo backend (seña por servicio, HU-04b), sin wireframe propio
 /// separado que los distinga en `mapa-pantallas.md` §5.11bis. Se agregan además 2 pantallas
 /// estáticas sin backend, "Ayuda y Soporte" (`ayuda_soporte_screen.dart`) y "Acerca de"
-/// (`acerca_de_screen.dart`). El resto (Notificaciones, Turnario Pro · Suscripción, Idioma,
-/// Nueva Cita, Autorizaciones Médicas) sigue sin backend y va a `ProximamenteScreen`.
+/// (`acerca_de_screen.dart`). El resto (Turnario Pro · Suscripción, Idioma, Nueva Cita,
+/// Autorizaciones Médicas) sigue sin backend y va a `ProximamenteScreen`.
 class ConfiguracionScreen extends StatelessWidget {
   const ConfiguracionScreen({super.key, required this.onIrAHorarios, required this.onIrAPacientes});
 
@@ -73,7 +75,10 @@ class ConfiguracionScreen extends StatelessWidget {
                     _MenuTile(
                       icon: Icons.notifications_outlined,
                       label: 'Notificaciones',
-                      onTap: () => _irAProximamente(context, 'Notificaciones'),
+                      onTap: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(builder: (_) => const ConfiguracionNotificacionesScreen()),
+                      ),
                     ),
                     _MenuTile(
                       icon: Icons.workspace_premium_outlined,

@@ -3,6 +3,7 @@ import bcrypt from 'bcryptjs';
 import { v4 as uuid } from 'uuid';
 import { nowIso, withTransaction } from '../db';
 import { expirarPagosPendientesVencidos } from '../jobs/expirarPagosPendientes';
+import { recordarTurnosProximos } from '../jobs/recordarTurnosProximos';
 import { asyncHandler } from '../middleware/asyncHandler';
 
 /**
@@ -120,5 +121,16 @@ devRouter.post(
   asyncHandler(async (_req, res) => {
     const cantidad = await expirarPagosPendientesVencidos();
     res.json({ turnos_expirados: cantidad });
+  })
+);
+
+// Mismo motivo que /forzar-expiracion, arriba: fuerza una corrida del job de recordatorios
+// (HU-14b/HU-25) ya mismo, para poder probarlo sin depender del reloj real ni de
+// VENTANA_RECORDATORIO_MIN/el intervalo de setInterval.
+devRouter.post(
+  '/forzar-recordatorios',
+  asyncHandler(async (_req, res) => {
+    const cantidad = await recordarTurnosProximos();
+    res.json({ recordatorios_insertados: cantidad });
   })
 );
