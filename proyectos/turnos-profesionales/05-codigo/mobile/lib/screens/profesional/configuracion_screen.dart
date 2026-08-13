@@ -8,6 +8,7 @@ import '../../theme/app_radius.dart';
 import '../../theme/app_spacing.dart';
 import '../../theme/app_typography.dart';
 import '../../widgets/widgets.dart';
+import 'configuracion_notificaciones_screen.dart';
 
 /// Configuración (menú principal, Profesional) — reemplaza el ítem "Configuración" del bottom
 /// nav (antes apuntaba directo a `ProximamenteScreen`, ver `profesional_shell.dart`). Estructura
@@ -19,9 +20,10 @@ import '../../widgets/widgets.dart';
 /// ya existe como pestaña propia (brief de esta ronda) — empujar una segunda instancia con
 /// `Navigator.push` duplicaría la pantalla en la pila de navegación en vez de reusarla.
 ///
-/// Único apartado con lógica real más allá de esas dos: el selector de Tema, conectado a
-/// `ThemeController` (la infraestructura ya existía, ver `state/theme_controller.dart`) y
-/// "Cerrar Sesión" (real, mismo `Sesion.cerrarSesion()` que usa el resto de la app). Todo lo
+/// El selector de Tema, conectado a `ThemeController` (la infraestructura ya existía, ver
+/// `state/theme_controller.dart`), "Cerrar Sesión" (real, mismo `Sesion.cerrarSesion()` que usa
+/// el resto de la app) y, ahora, "Notificaciones" (HU-26, `mapa-pantallas.md` §5.14, ver
+/// `configuracion_notificaciones_screen.dart`) son los únicos ítems con lógica real. Todo lo
 /// demás no tiene backend todavía y va a `ProximamenteScreen`.
 class ConfiguracionScreen extends StatelessWidget {
   const ConfiguracionScreen({super.key, required this.onIrAHorarios, required this.onIrAPacientes});
@@ -57,7 +59,10 @@ class ConfiguracionScreen extends StatelessWidget {
                     _MenuTile(
                       icon: Icons.notifications_outlined,
                       label: 'Notificaciones',
-                      onTap: () => _irAProximamente(context, 'Notificaciones'),
+                      onTap: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(builder: (_) => const ConfiguracionNotificacionesScreen()),
+                      ),
                     ),
                     _MenuTile(
                       icon: Icons.workspace_premium_outlined,
