@@ -4,7 +4,7 @@ import { v4 as uuid } from 'uuid';
 import { pool, nowIso, withTransaction } from '../db';
 import { requireAuth, AuthedRequest } from '../auth';
 import { asyncHandler } from '../middleware/asyncHandler';
-import { calcularSlotsDisponibles } from '../dominio/disponibilidad';
+import { calcularSlotsDisponibles, inicioDelDiaLocal } from '../dominio/disponibilidad';
 import {
   uuidSchema,
   fechaIsoSchema,
@@ -112,6 +112,34 @@ const reportesQuerySchema = z.object({
   desde: fechaIsoSchema.optional(),
   hasta: fechaIsoSchema.optional(),
   servicio_id: uuidSchema.optional(),
+});
+
+// HU-23 (v1, P1 — backlog.md, "Ampliación del backlog"): carga manual de un turno por el propio
+// profesional (ej. el paciente llamó por teléfono o se presentó sin reserva previa) — body de
+// `POST /:id/turnos` más abajo.
+//
+// `paciente_id`: MISMA convención que `profesionalPacienteParamsSchema` de arriba — el
+// `usuario.id` del paciente, no `paciente.id` (Mobile ya lo tiene de `GET /:id/clientes`, que
+// expone `u.id` como `id` de cada fila, sin depender de que la fila `paciente` exista todavía).
+//
+// `cobrar_sena` (RN10, "Seña resuelta (CEO, 2026-08-06)" en backlog.md): la ÚNICA regla que esta
+// carga manual puede saltear, y solo si el profesional lo decide explícitamente en cada request
+// — overridea `profesional_servicio.requiere_sena` SOLO para este turno puntual, sin tocar la
+// configuración general del servicio (que sigue aplicando sin cambios en la autoreserva del
+// cliente, CU4). Requerido, no `.optional()` — mismo criterio ya usado en este archivo para
+// decisiones que el wireframe pide como control explícito (ver `actualizarSenaSchema`,
+// `fichaPacienteSchema.activo`): el propio criterio de aceptación de la HU pide "una opción
+// explícita... no un valor implícito", así que la API tampoco asume un default silencioso.
+//
+// Deliberadamente NO incluye "notas" (mencionado en la narrativa de la historia, "eligiendo
+// servicio, fecha, hora y agregando notas"): `turno` no tiene ninguna columna de texto libre para
+// esto y los criterios de aceptación cerrados de la HU no lo repiten como requisito — ver el
+// resumen de este endpoint para el Director General IA/DBA antes de agregar una columna nueva.
+const profesionalTurnoManualSchema = z.object({
+  paciente_id: uuidSchema,
+  servicio_id: uuidSchema,
+  inicio: fechaIsoSchema,
+  cobrar_sena: z.boolean(),
 });
 
 // HU-04 / HU-04b: el profesional asocia un servicio a su agenda y configura si requiere seña.
@@ -326,13 +354,27 @@ profesionalesRouter.get(
   })
 );
 
-// HU-06: agenda del profesional autenticado (turnos propios, para la pantalla de Agenda).
+// HU-06/HU-27: agenda del profesional autenticado (turnos propios, para la pantalla de Agenda y
+// las métricas del resumen del día del Dashboard). Acotada al negocio_id "vista activa" del JWT
+// (ver el chequeo y el filtro más abajo) — un profesional en 2+ negocios (N:M,
+// negocio_profesional) puede tener turnos de varios a la vez, y HU-27 pide explícitamente que
+// estas métricas se calculen "sobre los turnos... dentro del negocio actualmente seleccionado",
+// no mezclados de todos los negocios donde trabaja (bug encontrado por Mobile haciendo HU-27:
+// esta query filtraba antes solo por profesional_id, sin negocio_id).
 profesionalesRouter.get(
   '/:id/turnos',
   requireAuth('profesional'),
   asyncHandler(async (req: AuthedRequest, res) => {
     if (!esPropioProfesional(req)) {
       return res.status(403).json({ error: 'Solo podés ver tu propia agenda' });
+    }
+    // Sin negocio_id en el JWT (0 o 2+ negocios y todavía no eligió ninguno vía "cambiar de
+    // vista", ver auth.ts POST /entrar-a-negocio) no hay con qué acotar la agenda. Mobile ya evita
+    // esta llamada en ese caso (dashboard_screen.dart, _SinNegocioView, que muestra su propio
+    // estado "sin negocio" en vez de pedir la agenda), pero el endpoint responde 400 igual si lo
+    // invocan así de todos modos — nunca 200 con una mezcla de negocios ni adivinando cuál mostrar.
+    if (!req.auth!.negocio_id) {
+      return res.status(400).json({ error: 'Elegí un negocio primero para ver tu agenda' });
     }
     const turnos = await withTransaction(
       async (client) => {
@@ -341,15 +383,233 @@ profesionalesRouter.get(
            FROM turno t
            JOIN servicio s ON s.id = t.servicio_id
            JOIN usuario u ON u.id = t.cliente_id
-           WHERE t.profesional_id = $1 AND t.estado IN ('pendiente_de_pago','confirmado')
+           WHERE t.profesional_id = $1 AND t.negocio_id = $2
+             AND t.estado IN ('pendiente_de_pago','confirmado')
            ORDER BY t.inicio ASC`,
-          [req.params.id]
+          [req.params.id, req.auth!.negocio_id]
         );
         return result.rows;
       },
       { usuarioId: req.auth!.sub, negocioId: req.auth!.negocio_id }
     );
     res.json(turnos);
+  })
+);
+
+// HU-23 (v1, P1 — backlog.md, "Ampliación del backlog"): el profesional carga un turno
+// directamente para un paciente de su cartera (ej. llamó por teléfono, se presentó sin reserva
+// previa) — sin pasar por el flujo de autoreserva del cliente (CU4/`POST /turnos` en turnos.ts).
+//
+// Reusa el MISMO motor de disponibilidad y la MISMA garantía anti-doble-reserva que
+// `POST /turnos` (turnos.ts, HU-09/HU-09b): la grilla de 2 pasadas de `calcularSlotsDisponibles`
+// para RN1 (alineado a un slot publicado) + RN2 (libre), y el índice único parcial
+// `uq_turno_slot_activo` como última línea de defensa contra una carrera entre 2 requests. HU-23
+// pide expresamente "se aplican las mismas reglas de no solapamiento y duración por servicio que
+// en la reserva del cliente (RN1, RN2, RN3)... no es un camino que evite esas garantías" — la
+// ÚNICA excepción autorizada es la seña (RN10, ver `profesionalTurnoManualSchema` más arriba). La
+// lógica de validación (servicio/membresía/RN4/grilla) se duplica acá en vez de extraerse a un
+// helper compartido con turnos.ts a propósito: son ~30 líneas de glue code sencillo alrededor de
+// la MISMA función compartida (`calcularSlotsDisponibles`, que es donde vive la garantía real) —
+// no se justifica tocar el endpoint `POST /turnos` ya aprobado/probado (con su propio historial
+// de fixes de QA/Security) solo para deduplicar ese glue.
+//
+// A diferencia de `POST /turnos`, acá el actor autenticado YA ES el profesional del turno (no un
+// cliente reservando con un tercero) — simplifica el manejo de identidad RLS:
+//   - No hace falta resolver `profesional.usuario_id` por separado para notificacion/paciente: es
+//     literalmente `req.auth!.sub` (el propio profesional autenticado).
+//   - No hace falta ningún cambio de identidad a mitad de transacción (a diferencia de
+//     `POST /turnos`, que sí lo necesita para el alta de `paciente` — ver ese comentario extenso
+//     en turnos.ts): acá `withTransaction` ya corre con `usuarioId: req.auth!.sub` = el
+//     profesional dueño de la fila `paciente` (`paciente_acceso_propio_profesional` exige
+//     exactamente esa identidad), del turno (`turno_acceso_negocio_o_cliente` lo admite vía el
+//     3er OR, "staff activo del negocio") y de la notificación
+//     (`notificacion_insert_evento_turno` lo admite por el mismo motivo) — las 3 sentencias de la
+//     transacción pasan sus policies con la MISMA identidad, sin excepción.
+//
+// Contrato: POST /profesionales/:id/turnos, body { paciente_id: uuid, servicio_id: uuid,
+// inicio: ISO-8601, cobrar_sena: boolean } -> 201 { id, paciente_id, servicio_id, inicio, fin,
+// estado, requiere_pago, monto_sena } | 400 datos inválidos, o `inicio` no alineado a la grilla
+// de disponibilidad publicada (RN1) | 403 rol distinto de profesional o `:id` ajeno | 404
+// paciente/servicio inexistente, servicio de un negocio donde no trabajás, o todavía no asociaste
+// ese servicio a tu agenda (RN4) | 409 el horario ya está ocupado por otro turno/excepción (RN2).
+profesionalesRouter.post(
+  '/:id/turnos',
+  requireAuth('profesional'),
+  asyncHandler(async (req: AuthedRequest, res) => {
+    const paramsParsed = profesionalIdParamsSchema.safeParse(req.params);
+    if (!paramsParsed.success) return respuestaValidacionFallida(res, paramsParsed.error);
+    if (!esPropioProfesional(req)) {
+      return res.status(403).json({ error: 'Solo podés cargar turnos en tu propia agenda' });
+    }
+    const bodyParsed = profesionalTurnoManualSchema.safeParse(req.body);
+    if (!bodyParsed.success) return respuestaValidacionFallida(res, bodyParsed.error);
+    const { paciente_id, servicio_id, inicio, cobrar_sena } = bodyParsed.data;
+    const profesionalId = req.params.id;
+    const inicioDate = new Date(inicio);
+
+    // El paciente tiene que ser una cuenta `usuario` real con rol 'cliente' (mismo tipo de dato
+    // que `turno.cliente_id` siempre asumió) — se acepta cualquier cliente existente, no solo los
+    // que ya tienen fila `paciente`/turno previo con este profesional (mismo criterio que
+    // `POST /turnos`, que también permite reservar con un profesional nunca antes visitado): esta
+    // ruta cubre igual el caso "primer turno de un paciente nuevo para mí" — la fila `paciente` se
+    // da de alta automáticamente más abajo. 404 uniforme si no existe o si el id corresponde a
+    // otro rol (profesional/administrador), para no filtrar esa distinción a quien llama.
+    const pacienteResult = await pool.query('SELECT id FROM usuario WHERE id = $1 AND rol = $2', [
+      paciente_id,
+      'cliente',
+    ]);
+    if (!pacienteResult.rowCount) {
+      return res.status(404).json({ error: 'Paciente no encontrado' });
+    }
+
+    // Mismos 3 chequeos de integridad que `POST /turnos` (turnos.ts) — ver esos comentarios: el
+    // servicio existe, el profesional pertenece al negocio de ese servicio (N:M,
+    // modelo-datos.md §2ter) y el profesional asoció explícitamente ese servicio (RN4) — de paso
+    // trae `requiere_sena`/`monto_sena`, el default que `cobrar_sena` puede overridear (RN10).
+    const servicioResult = await pool.query('SELECT negocio_id, duracion_min FROM servicio WHERE id = $1', [
+      servicio_id,
+    ]);
+    const servicio = servicioResult.rows[0] as { negocio_id: string; duracion_min: number } | undefined;
+    if (!servicio) {
+      return res.status(404).json({ error: 'Servicio no encontrado' });
+    }
+
+    const esMiembroActivoResult = await pool.query(
+      'SELECT 1 FROM negocio_profesional WHERE negocio_id = $1 AND profesional_id = $2 AND activo = true',
+      [servicio.negocio_id, profesionalId]
+    );
+    if (!esMiembroActivoResult.rowCount) {
+      return res.status(404).json({ error: 'Este servicio no pertenece a un negocio en el que trabajás' });
+    }
+
+    const relacionResult = await pool.query(
+      'SELECT requiere_sena, monto_sena FROM profesional_servicio WHERE profesional_id = $1 AND servicio_id = $2',
+      [profesionalId, servicio_id]
+    );
+    const relacion = relacionResult.rows[0] as
+      | { requiere_sena: boolean; monto_sena: number | null }
+      | undefined;
+    if (!relacion) {
+      return res.status(404).json({ error: 'Todavía no asociaste este servicio a tu agenda (RN4)' });
+    }
+
+    // RN1/RN2 — misma grilla de 2 pasadas que `POST /turnos` (turnos.ts, ver el comentario
+    // extenso ahí): 1) `inicio` alineado a un slot publicado (`ignorarOcupacion: true`) -> si no,
+    // 400; 2) ese slot efectivamente libre -> si no, 409. HU-23 pide expresamente las mismas
+    // reglas RN1-RN3, así que esta carga manual no es un atajo para saltarse la grilla publicada.
+    const inicioIso = inicioDate.toISOString();
+    const ventanaDelDia = { desde: inicioDelDiaLocal(inicioDate), dias: 1, maxSlots: 500 };
+
+    const grilla = await calcularSlotsDisponibles(pool, profesionalId, servicio_id, {
+      ...ventanaDelDia,
+      ignorarOcupacion: true,
+    });
+    const alineadoAGrilla = grilla?.slots.includes(inicioIso) ?? false;
+    if (!alineadoAGrilla) {
+      return res.status(400).json({
+        error: 'El horario solicitado no corresponde a un slot de disponibilidad publicado por vos (RN1).',
+      });
+    }
+
+    const slotsLibres = await calcularSlotsDisponibles(pool, profesionalId, servicio_id, ventanaDelDia);
+    const estaLibre = slotsLibres?.slots.includes(inicioIso) ?? false;
+    if (!estaLibre) {
+      return res.status(409).json({
+        error: 'Ese horario ya no está disponible — se solapa con otro turno o excepción tuyo (RN2).',
+      });
+    }
+
+    // RN3/D10: misma duración ya validada por `estaLibre` arriba — ver el comentario largo en
+    // turnos.ts (POST /) sobre por qué se reusa `slotsLibres.duracionMin` en vez de recalcular a
+    // partir de `servicio.duracion_min` (evita una 2da fuente de verdad que se desincronice del
+    // slot que realmente se validó).
+    const finDate = new Date(inicioDate.getTime() + slotsLibres!.duracionMin * 60_000);
+
+    // RN10 (HU-23, "Seña resuelta" en backlog.md) — la única regla que esta carga manual puede
+    // saltear, y solo porque el profesional lo decidió explícitamente en este request:
+    // `cobrar_sena` gana siempre sobre `relacion.requiere_sena`, tanto para prender la seña donde
+    // el servicio no la pide como (el caso que motiva la historia) para apagarla donde sí la pide.
+    const cobrarSena = cobrar_sena;
+    const estadoInicial = cobrarSena ? 'pendiente_de_pago' : 'confirmado';
+    const turnoId = uuid();
+    const ts = nowIso();
+
+    try {
+      await withTransaction(
+        async (client) => {
+          await client.query(
+            `INSERT INTO turno (id, negocio_id, profesional_id, servicio_id, cliente_id, inicio, fin, estado, creado_en)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+            [
+              turnoId,
+              servicio.negocio_id,
+              profesionalId,
+              servicio_id,
+              paciente_id,
+              inicioDate.toISOString(),
+              finDate.toISOString(),
+              estadoInicial,
+              ts,
+            ]
+          );
+
+          if (cobrarSena) {
+            await client.query(
+              'INSERT INTO pago (id, turno_id, monto, estado, creado_en) VALUES ($1, $2, $3, $4, $5)',
+              [uuid(), turnoId, relacion.monto_sena ?? 0, 'pendiente', ts]
+            );
+          }
+
+          // HU-25: mismo criterio de "bandeja" que los 3 INSERT ya existentes en turnos.ts, pero
+          // acá el destinatario natural es el PACIENTE, no el profesional — es quien está
+          // ejecutando la acción, notificarse a sí mismo no aporta nada y, peor, el mensaje para
+          // destinatario≠cliente ("<nombre> confirmó su turno...") describiría mal lo que pasó:
+          // fue el profesional quien lo cargó, no el cliente. Es el primer productor real del
+          // lado `destinatarioEsCliente: true` de `armarMensajeNotificacion`
+          // (dominio/notificaciones.ts) — esa rama ya estaba prevista en el helper ("Hoy ningún
+          // productor real genera este caso") sin ningún INSERT que la alimentara todavía; el
+          // mensaje en sí no se arma acá (se deriva en cada GET /notificaciones, ver ese archivo),
+          // solo el evento con su destinatario correcto.
+          await client.query(
+            'INSERT INTO notificacion (id, turno_id, tipo, destinatario_usuario_id, creado_en) VALUES ($1, $2, $3, $4, $5)',
+            [uuid(), turnoId, 'confirmacion', paciente_id, ts]
+          );
+
+          // Alta automática de `paciente` — mismo mecanismo exacto que `POST /turnos` (turnos.ts,
+          // ver ese comentario extenso), pero sin el cambio de identidad RLS que esa ruta
+          // necesita: acá `app.usuario_id` YA es el profesional (ver comentario de arriba), la
+          // misma identidad que exige `paciente_acceso_propio_profesional`.
+          await client.query(
+            `INSERT INTO paciente (negocio_id, profesional_id, cliente_id, creado_en)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (negocio_id, profesional_id, cliente_id) DO NOTHING`,
+            [servicio.negocio_id, profesionalId, paciente_id, ts]
+          );
+        },
+        { usuarioId: req.auth!.sub, negocioId: req.auth!.negocio_id }
+      );
+    } catch (err: any) {
+      // Mismo código 23505 (unique_violation de `uq_turno_slot_activo`) que `POST /turnos` — ver
+      // ese comentario: última línea de defensa si 2 requests corren la misma ventana en paralelo
+      // (ej. el profesional carga un turno a mano justo cuando el cliente reserva ese mismo slot).
+      if (err?.code === '23505') {
+        return res.status(409).json({
+          error: 'Ese horario ya no está disponible — se solapa con otro turno tuyo (RN2).',
+        });
+      }
+      throw err;
+    }
+
+    res.status(201).json({
+      id: turnoId,
+      paciente_id,
+      servicio_id,
+      inicio: inicioDate.toISOString(),
+      fin: finDate.toISOString(),
+      estado: estadoInicial,
+      requiere_pago: cobrarSena,
+      monto_sena: relacion.monto_sena ?? null,
+    });
   })
 );
 
@@ -785,9 +1045,10 @@ profesionalesRouter.get(
 // GET /negocios/:id/servicios (catálogo público del servicio de un negocio), esto expone
 // `requiere_sena`/`monto_sena`, información de cobro sin motivo para ser pública.
 //
-// Sin filtrar por negocio_id (mismo criterio ya documentado en GET /:id/clientes y GET
-// /:id/turnos, más arriba en este archivo: un profesional puede pertenecer a 2+ negocios, y esos
-// listados tampoco filtran por la "vista activa" del JWT) — se agrega igual `negocio_id`/
+// Sin filtrar por negocio_id (mismo criterio ya documentado en GET /:id/clientes, más arriba en
+// este archivo: un profesional puede pertenecer a 2+ negocios, y esta lista tampoco filtra por la
+// "vista activa" del JWT) — a diferencia de GET /:id/turnos y GET /:id/reportes (ver esos
+// comentarios, HU-27/HU-28), que sí filtran por negocio_id. Se agrega igual `negocio_id`/
 // `negocio_nombre` por fila (vía JOIN) para que Mobile pueda agrupar/etiquetar si hace falta.
 profesionalesRouter.get(
   '/:id/servicios',
@@ -877,8 +1138,9 @@ profesionalesRouter.patch(
 
 // Contrato: GET /profesionales/:id/reportes?desde=<ISO>&hasta=<ISO>&servicio_id=<uuid> (los 3
 // query params son opcionales e independientes) -> 200 { desde, hasta, servicio_id,
-// turnos_totales, turnos_completados, turnos_cancelados, monto_facturado } | 400 query inválida
-// | 403 rol distinto de profesional o `:id` ajeno.
+// turnos_totales, turnos_completados, turnos_cancelados, monto_facturado } | 400 query inválida o
+// todavía no elegiste un negocio ("vista activa", ver GET /:id/turnos más arriba) | 403 rol
+// distinto de profesional o `:id` ajeno.
 //
 // Devuelve las 4 métricas básicas que pide HU-28 ("turnos totales, turnos completados, turnos
 // cancelados, y monto facturado"), filtrables por período y servicio.
@@ -933,6 +1195,13 @@ profesionalesRouter.get(
     if (!esPropioProfesional(req)) {
       return res.status(403).json({ error: 'Solo podés ver el reporte de tu propia agenda' });
     }
+    // HU-27/HU-28: mismo criterio (y mismo bug corregido, ver GET /:id/turnos más arriba) — un
+    // profesional en 2+ negocios ve el reporte acotado al negocio que tiene seleccionado como
+    // "vista activa", no su agenda combinada de todos los negocios donde trabaja. Mismo 400 si
+    // todavía no eligió ninguno.
+    if (!req.auth!.negocio_id) {
+      return res.status(400).json({ error: 'Elegí un negocio primero para ver el reporte' });
+    }
     const queryParsed = reportesQuerySchema.safeParse(req.query);
     if (!queryParsed.success) return respuestaValidacionFallida(res, queryParsed.error);
     const { desde, hasta, servicio_id } = queryParsed.data;
@@ -949,10 +1218,11 @@ profesionalesRouter.get(
            FROM turno t
            JOIN servicio s ON s.id = t.servicio_id
            WHERE t.profesional_id = $1
+             AND t.negocio_id = $5
              AND ($2::timestamptz IS NULL OR t.inicio >= $2)
              AND ($3::timestamptz IS NULL OR t.inicio <= $3)
              AND ($4::uuid IS NULL OR t.servicio_id = $4)`,
-          [req.params.id, desdeIso, hastaIso, servicio_id ?? null]
+          [req.params.id, desdeIso, hastaIso, servicio_id ?? null, req.auth!.negocio_id]
         );
         return result.rows as { estado: string; completado: boolean; precio_referencia: number | null }[];
       },
