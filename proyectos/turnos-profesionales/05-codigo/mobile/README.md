@@ -251,6 +251,63 @@ Verificado con `flutter analyze` (limpio) y visualmente sirviendo `flutter build
 `TypeError` en `dwds/src/injected/client.js` al deserializar un evento de debug — no bloquea builds
 de producción).
 
+## 🆕 Cambiar de negocio en el Dashboard del Profesional (HU-27) — selector multi-negocio
+
+Cierra el gap que dejaba abierto la ronda anterior (ver "Simplificaciones deliberadas" más abajo,
+ya actualizada): el backend ya soportaba que un profesional/administrador pertenezca a 2+
+negocios (generalización N:M, `responderLoginConNegocios` en `../backend/src/routes/auth.ts`),
+pero `login_screen.dart` todavía tomaba `resp['token']` sin distinguir ese caso, y el ícono
+"cambiar de vista" del Dashboard (`Icons.swap_horiz`, ya dibujado desde el rediseño "Turnario
+Pro") era un no-op a propósito.
+
+- `lib/state/sesion.dart`: modelo nuevo `NegocioMembresia` (`negocio_id`/`nombre`/`rol`, tal como
+  los devuelve el login) y campo `Sesion.negocios` — se carga una única vez en el login y se
+  reutiliza después (no hay endpoint propio de "mis negocios"). `Sesion.iniciarSesion` acepta
+  ahora `negocios` opcional (solo pisa la lista guardada cuando se pasa explícito) y hay un
+  método nuevo, `Sesion.entrarANegocio(negocioId, ...)`, que llama
+  `POST /auth/entrar-a-negocio` y reemite la sesión con el token que devuelve — lo usan tanto
+  `login_screen.dart` (elegir negocio la primera vez) como `dashboard_screen.dart` (cambiar de
+  negocio con la sesión ya iniciada).
+- `lib/widgets/selector_negocio.dart` (nuevo): picker de negocio compartido por los dos puntos de
+  entrada de abajo — pantalla completa (`AppModalSheet`), lista de negocios con el activo marcado
+  con un check.
+- `lib/screens/login_screen.dart`: `_login()`/`_iniciarConGoogle()` pasan ahora por un helper
+  común, `_completarLogin()` — si la respuesta trae `negocios` con 2+ elementos, abre el selector
+  ANTES de terminar de entrar (cancelar el selector deja al usuario en el login, sin sesión
+  iniciada); si trae una lista vacía (0 negocios), entra igual y el Dashboard muestra un estado
+  claro (ver abajo). El tercer lugar del archivo que también arma una sesión
+  (`_pedirPasswordParaVincular`, vinculación de cuenta de Google con contraseña, HU-35) queda **a
+  propósito** fuera de este cambio — combinar esa vinculación con 2+ negocios activos es un caso
+  borde muy poco probable, documentado en el propio código con el motivo.
+- `lib/screens/profesional/dashboard_screen.dart`: el ícono "cambiar de vista" del header ahora
+  es real — visible solo con `Sesion.tieneMultiplesNegocios` (2+ negocios; cero cambio visual con
+  uno solo, el caso común hoy), abre el mismo selector y, al elegir uno distinto, llama
+  `Sesion.entrarANegocio` y refresca. Caso "0 negocios" (cuenta todavía sin ningún negocio
+  activo): estado propio (`_SinNegocioView`) en vez de un dashboard vacío engañoso ("sin turnos
+  hoy" cuando en realidad no hay ningún negocio del que traerlos).
+- `lib/main.dart` (`_Router`): `ProfesionalShell` pasa a tener `key: ValueKey(sesion.negocioId)`
+  (dejó de ser `const`) — ninguna otra pestaña del bottom nav (Horarios, Pacientes, etc.) observa
+  cambios de `Sesion` hoy (cada una cachea su propio `Future` en `initState`), así que cambiar de
+  negocio recrea todo el subárbol del shell desde cero para que cada pestaña vuelva a pedir sus
+  datos ya scopeados al negocio nuevo. Sin cambio de negocio (caso común) la key es constante
+  durante toda la sesión, sin efecto sobre el comportamiento existente.
+
+**Verificado:** `flutter analyze` limpio (mismo único "info" preexistente y ajeno a este cambio
+que ya documentaba este README, en `dashboard_screen.dart`) y `flutter build web`. Verificación
+visual de punta a punta con `flutter build web` + servidor estático + capturas (mismo patrón que
+el resto de este README): ícono visible con 2+ negocios, selector con el negocio activo marcado,
+y el estado "0 negocios" — las tres con un `Sesion` seedeado a mano desde un entrypoint de debug
+temporal (`lib/main_debug_hu27.dart`, borrado antes de terminar), porque no había en este ciclo
+un usuario real con 2+ negocios cargado en la base para probar el flujo de login de punta a punta
+contra el backend real.
+
+**Gap de Backend detectado, no resuelto en este ciclo (fuera de alcance — este cambio es
+exclusivamente Mobile):** `GET /profesionales/:id/turnos` (`../backend/src/routes/profesionales.ts`)
+filtra por `profesional_id` pero no por el `negocio_id` del token — un profesional en 2+ negocios
+ve su agenda completa (todos sus negocios mezclados) sin importar cuál esté "activo", en vez de
+acotarse al negocio actualmente seleccionado como pide el criterio de aceptación de HU-27 ("Las
+métricas del resumen del día se calculan... dentro del negocio actualmente seleccionado").
+
 ## Pantallas implementadas (ver mapa completo en `04-diseno/mapa-pantallas.md`)
 
 **Cliente:** Login (+ Google, HU-35, solo Web — ver sección propia arriba), `ClienteShell` (bottom
@@ -264,7 +321,8 @@ y el botón de Google usan piezas del sistema de diseño nuevo. No incluye "Crea
 capturaron, quedan fuera de HU-35. Notificaciones y Configuración (Cliente): placeholders
 "Próximamente".
 
-**Profesional:** Dashboard (HU-27, nueva), Gestión de Horarios (HU-05 + HU-16 + HU-18, reemplaza a
+**Profesional:** Dashboard (HU-27, incluye selector "cambiar de vista" entre negocios — ver
+sección propia arriba), Gestión de Horarios (HU-05 + HU-16 + HU-18, reemplaza a
 "Definir Disponibilidad"), Agenda semanal (HU-06, reubicada), Excepciones (HU-15), Mis Clientes
 (HU-10) y Configuración de Servicios (HU-04b) — estas dos últimas ya no están en la navegación
 activa (ver arriba), Historial de Visitas (HU-11), Gestión de Pacientes + Ficha de Paciente
@@ -286,10 +344,8 @@ WhatsApp/Notificaciones/Idioma/Turnario Pro/Nueva Cita/Autorizaciones Médicas: 
   `../backend/src/integraciones/pagos.ts`).
 - Tema claro/oscuro: implementado de punta a punta en `lib/theme/` (ver sección de rediseño
   arriba), no se probó visualmente por no poder correr la app.
-- **Login (contraseña y Google) no maneja todavía la respuesta con `negocios: [...]`** que manda
-  el backend cuando un profesional/administrador tiene 0 o 2+ negocios activos (JWT sin
-  `negocio_id`, ver `responderLoginConNegocios` en `../backend/src/routes/auth.ts`) — tanto
-  `_login()` como el nuevo `_iniciarConGoogle()` de `login_screen.dart` toman `resp['token']` sin
-  distinguir ese caso, igual que ya hacía el login por contraseña antes de HU-35. Es el mismo gap
-  ya documentado en el backlog para HU-27 ("cambiar de vista" — implementado en Backend, falta el
-  selector en Mobile), no uno nuevo introducido por Google.
+- ~~Login (contraseña y Google) no maneja todavía la respuesta con `negocios: [...]`~~ — resuelto,
+  ver "🆕 Cambiar de negocio en el Dashboard del Profesional (HU-27)" arriba. Queda sin resolver
+  únicamente el caso combinado, muy poco probable, de vincular una cuenta de Google
+  (`_pedirPasswordParaVincular`) que además tenga 2+ negocios activos — documentado en el propio
+  código de `login_screen.dart`.
