@@ -5,6 +5,7 @@ import '../state/sesion.dart';
 import '../theme/app_radius.dart';
 import '../theme/app_spacing.dart';
 import '../widgets/google_sign_in_button.dart';
+import '../widgets/selector_negocio.dart';
 
 /// HU-01: login de cliente o profesional. El registro de negocio/administrador (HU-00a) y el
 /// registro de cliente (HU-01) se resuelven con pantallas propias no incluidas en este slice
@@ -40,7 +41,7 @@ class _LoginScreenState extends State<LoginScreen> {
         'email': email,
         'password': _passCtrl.text,
       });
-      sesion.iniciarSesion(resp['token'] as String, email: email);
+      await _completarLogin(sesion, resp, email);
     } catch (e) {
       setState(() => _error = e.toString());
     } finally {
@@ -53,11 +54,51 @@ class _LoginScreenState extends State<LoginScreen> {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(mensaje)));
   }
 
+  /// HU-27 ("cambiar de vista", `02-backlog/backlog.md`): procesa la respuesta de
+  /// `/auth/login`/`/auth/google` una vez ya autenticadas las credenciales — comparten esta
+  /// lógica [_login] e [_iniciarConGoogle], que reciben el mismo shape de respuesta
+  /// (`emitirLoginParaUsuario`, `../backend/src/routes/auth.ts`). No se aplica al 3er lugar de
+  /// este archivo que también llama `sesion.iniciarSesion` (confirmación de vinculación de
+  /// Google dentro de [_pedirPasswordParaVincular]) — ver el comentario puntual ahí.
+  /// - Sin `negocios` (caso común — un solo negocio, o rol cliente sin negocio): entra directo,
+  ///   sin ningún cambio de comportamiento respecto de antes de esta historia.
+  /// - `negocios` vacío (profesional/administrador todavía sin ningún negocio activo): entra
+  ///   igual — no hay nada para elegir. El Dashboard (`profesional/dashboard_screen.dart`)
+  ///   muestra un estado claro en vez de una pantalla en blanco, ver esa pantalla.
+  /// - `negocios` con 2+ elementos: pide elegir uno ANTES de entrar (ver
+  ///   `widgets/selector_negocio.dart`) y recién ahí llama `POST /auth/entrar-a-negocio` para
+  ///   obtener el token definitivo, ya con `negocio_id`. Si se cancela el selector, no entra —
+  ///   se queda en este login (mismo criterio que cualquier login incompleto).
+  Future<void> _completarLogin(Sesion sesion, Map<String, dynamic> resp, String email) async {
+    final negociosRaw = resp['negocios'] as List<dynamic>?;
+    if (negociosRaw == null) {
+      sesion.iniciarSesion(resp['token'] as String, email: email);
+      return;
+    }
+    final negocios = negociosRaw.map((n) => NegocioMembresia.fromApi(n as Map<String, dynamic>)).toList();
+    if (negocios.isEmpty) {
+      sesion.iniciarSesion(resp['token'] as String, email: email, negocios: negocios);
+      return;
+    }
+    final elegido = await elegirNegocio(context, negocios);
+    if (!mounted) return;
+    if (elegido == null) {
+      _mostrarAviso('Elegí un negocio para continuar.');
+      return;
+    }
+    await sesion.entrarANegocio(
+      elegido.negocioId,
+      tokenPrevio: resp['token'] as String,
+      email: email,
+      negocios: negocios,
+    );
+  }
+
   /// HU-35 — se dispara cuando [GoogleSignInButton] ya resolvió un login de Google exitoso
   /// (`idToken`/`email` vienen del propio SDK de Google, no del backend). A partir de acá el
   /// contrato es el mismo `ApiClient`/`Sesion` que usa [_login]:
-  /// - `200`/`201` con `{token}` (o `{token, negocios}`, mismo shape sin manejo especial que ya
-  ///   deja pasar [_login] hoy — ver `Sesion.iniciarSesion`) → sesión iniciada.
+  /// - `200`/`201` con `{token}` (o `{token, negocios}`, HU-27 — mismo manejo que [_login], ver
+  ///   [_completarLogin]) → sesión iniciada (o selector de negocio si corresponde).
   /// - `401`/`403`/`503` → error tal cual lo manda el backend (mismo patrón que [_login]).
   /// - `409` con `requiere_confirmacion_password: true` → ya existe una cuenta por contraseña con
   ///   ese email; pasa a [_pedirPasswordParaVincular] en vez de mostrarse como error.
@@ -70,7 +111,7 @@ class _LoginScreenState extends State<LoginScreen> {
     final sesion = context.read<Sesion>();
     try {
       final resp = await sesion.api.post('/auth/google', {'id_token': idToken});
-      sesion.iniciarSesion(resp['token'] as String, email: email);
+      await _completarLogin(sesion, resp, email);
     } on ApiException catch (e) {
       if (e.statusCode == 409 && e.body?['requiere_confirmacion_password'] == true) {
         if (mounted) await _pedirPasswordParaVincular(email, idToken);
@@ -113,6 +154,13 @@ class _LoginScreenState extends State<LoginScreen> {
                   'password': passwordCtrl.text,
                   'id_token': idToken,
                 });
+                // A propósito NO pasa por `_completarLogin` (HU-27): vincular Google + tener 2+
+                // negocios activos a la vez es una combinación de casos borde muy poco probable,
+                // y abrir acá el selector de negocio (pantalla completa) encima de este diálogo
+                // ya abierto agrega una complejidad de navegación anidada que esta ronda no
+                // ejercita. Si la respuesta trajera `negocios`, este `as String` sigue
+                // funcionando igual que antes de esta historia (mismo gap ya documentado en
+                // README.md de este proyecto).
                 sesion.iniciarSesion(resp['token'] as String, email: email);
                 if (dialogContext.mounted) Navigator.of(dialogContext).pop();
               } catch (e) {

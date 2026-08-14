@@ -11,7 +11,12 @@ import '../../widgets/widgets.dart';
 import 'agenda_screen.dart';
 
 /// Dashboard (Profesional) — HU-27, pantalla nueva (no reemplaza nada existente). Wireframe
-/// corregido completo en `mapa-pantallas.md` §5.2bis.
+/// corregido completo en `mapa-pantallas.md` §5.2bis. El ícono "cambiar de vista" del header
+/// (§5.2bis, pregunta abierta #6 del backlog, resuelta por el CEO 2026-08-06) ya tiene
+/// comportamiento real: alterna entre los negocios de `Sesion.negocios` (ver [_cambiarNegocio])
+/// — solo visible con 2+ negocios activos, cero cambio visual para el caso común (un profesional
+/// en un único negocio). El caso "0 negocios" (cuenta todavía sin ningún negocio activo) también
+/// se resuelve acá, ver [_SinNegocioView].
 class DashboardScreen extends StatefulWidget {
   const DashboardScreen({super.key});
 
@@ -32,10 +37,20 @@ class _DashboardScreenState extends State<DashboardScreen> {
   // inventar lógica de negocio en el cliente).
   final Set<String> _completadosLocalmente = {};
 
+  /// HU-27: `true` mientras `_cambiarNegocio` está en curso (llamada de red a
+  /// `POST /auth/entrar-a-negocio` + refetch) — deshabilita el ícono del header para evitar
+  /// disparar un segundo cambio antes de que termine el primero.
+  bool _cambiandoNegocio = false;
+
   @override
   void initState() {
     super.initState();
-    _futureTurnos = _cargarTurnos();
+    // HU-27: sin negocio activo (ver [_SinNegocioView] más abajo) no hay nada que pedirle a
+    // `/profesionales/:id/turnos` todavía scopeado — se evita el round-trip de red y se va
+    // directo al estado vacío.
+    final sesion = context.read<Sesion>();
+    _futureTurnos =
+        sesion.negocioId == null ? Future<List<_TurnoDashboard>>.value(const []) : _cargarTurnos();
   }
 
   Future<List<_TurnoDashboard>> _cargarTurnos() async {
@@ -59,10 +74,49 @@ class _DashboardScreenState extends State<DashboardScreen> {
     return fecha.year == hoy.year && fecha.month == hoy.month && fecha.day == hoy.day;
   }
 
+  /// HU-27 ("cambiar de vista"): abre el selector con los negocios de `Sesion.negocios` y, si se
+  /// elige uno distinto del activo, reemite la sesión contra ese negocio
+  /// (`Sesion.entrarANegocio`) y refresca esta pantalla. El resto de las pestañas del
+  /// `ProfesionalShell` (Horarios, Pacientes, etc. — cada una cachea su propio Future en
+  /// `initState`, no reacciona sola a cambios de `Sesion`) se refrescan por su cuenta: `main.dart`
+  /// (`_Router`) le da a `ProfesionalShell` una `key` atada a `Sesion.negocioId`, así que cambiar
+  /// de negocio recrea todo ese subárbol desde cero y cada pestaña vuelve a pedir sus datos ya
+  /// scopeados al negocio nuevo. El `mounted`/`setState` de acá defienden el caso en que esa
+  /// recreación todavía no ocurrió cuando este método sigue corriendo — la propia instancia
+  /// actual de este Dashboard también puede ser una de las que se recrean.
+  Future<void> _cambiarNegocio() async {
+    final sesion = context.read<Sesion>();
+    final elegido = await elegirNegocio(context, sesion.negocios, actualNegocioId: sesion.negocioId);
+    if (!mounted || elegido == null || elegido.negocioId == sesion.negocioId) return;
+
+    setState(() => _cambiandoNegocio = true);
+    try {
+      await sesion.entrarANegocio(elegido.negocioId);
+      if (!mounted) return;
+      // Estado local de "completadas" (ver comentario de `_completadosLocalmente` arriba): es
+      // una simulación por sesión, no persiste — al cambiar de negocio no debería seguir
+      // marcando como completados turnos que ya no corresponden a la agenda que se está viendo.
+      setState(() => _completadosLocalmente.clear());
+      await _refrescar();
+    } catch (e) {
+      if (mounted) _avisoNoDisponible(context, 'No se pudo cambiar de negocio: $e');
+    } finally {
+      if (mounted) setState(() => _cambiandoNegocio = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
+    final sesion = context.watch<Sesion>();
     final colors = AppColors.of(context);
     final fechaFormateada = _capitalize(DateFormat("EEEE, d 'de' MMMM 'de' yyyy", 'es').format(DateTime.now()));
+
+    // HU-27, caso "0 negocios" (cuenta profesional todavía sin ningún negocio activo, ver
+    // `login_screen.dart`/`_completarLogin`): estado propio en vez de un dashboard vacío que
+    // sugiere "sin turnos hoy" cuando en realidad no hay ningún negocio del que traerlos.
+    if (sesion.negocioId == null) {
+      return _SinNegocioView(fechaFormateada: fechaFormateada);
+    }
 
     return Scaffold(
       // §7.7bis: Dashboard usa header `surface` (blanco), no `primary` — corrección puntual
@@ -75,14 +129,20 @@ class _DashboardScreenState extends State<DashboardScreen> {
         title: '¡Hola!',
         subtitle: fechaFormateada,
         actions: [
-          IconButton(
-            // §7.7bis/§5.2bis: la captura real muestra este ícono de "cambiar de vista" en el
-            // header del Dashboard; su comportamiento sigue sin definir (HU-27, pregunta
-            // abierta #6 del backlog) — no-op a propósito.
-            icon: const Icon(Icons.swap_horiz),
-            tooltip: 'Cambiar de vista',
-            onPressed: () => _avisoNoDisponible(context, 'Cambiar de vista todavía no está definido.'),
-          ),
+          // HU-27: solo tiene sentido con 2+ negocios entre los que elegir — con uno solo (caso
+          // común hoy) no se muestra nada, cero cambio visual respecto de antes de esta historia.
+          if (sesion.tieneMultiplesNegocios)
+            IconButton(
+              icon: _cambiandoNegocio
+                  ? const SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.swap_horiz),
+              tooltip: 'Cambiar de vista',
+              onPressed: _cambiandoNegocio ? null : _cambiarNegocio,
+            ),
         ],
       ),
       body: RefreshIndicator(
@@ -169,6 +229,42 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   static String _capitalize(String s) => s.isEmpty ? s : '${s[0].toUpperCase()}${s.substring(1)}';
+}
+
+/// HU-27, caso "0 negocios" — cuenta profesional autenticada pero todavía sin ninguna membresía
+/// activa en `negocio_profesional` (ver el comentario de `DashboardScreen.build`). Mismo
+/// `AppHeader` que el dashboard real (para no perder el saludo/fecha), sin ícono de "cambiar de
+/// vista" (no hay nada entre qué elegir) ni el resto del contenido, que no tiene ningún negocio
+/// del que traer datos — mensaje simple en vez de una pantalla en blanco o un error críptico.
+class _SinNegocioView extends StatelessWidget {
+  const _SinNegocioView({required this.fechaFormateada});
+
+  final String fechaFormateada;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = AppColors.of(context);
+    return Scaffold(
+      appBar: AppHeader(variant: AppHeaderVariant.surface, title: '¡Hola!', subtitle: fechaFormateada),
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(AppSpacing.xl),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.storefront_outlined, size: 48, color: colors.textSecondary),
+              const SizedBox(height: AppSpacing.base),
+              Text(
+                'Todavía no estás vinculado a ningún negocio',
+                textAlign: TextAlign.center,
+                style: AppTypography.subtitle(context).copyWith(color: colors.textPrimary, fontWeight: FontWeight.w600),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 class _TurnoDashboard {
