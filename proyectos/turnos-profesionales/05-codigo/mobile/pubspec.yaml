@@ -19,6 +19,8 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^4.0.0
+  flutter_launcher_icons: ^0.14.4
+  flutter_native_splash: ^2.4.8
 
 flutter:
   uses-material-design: true
@@ -27,5 +29,12 @@ flutter:
   # developers.google.com/identity/branding-guidelines) — se bundlea localmente en vez de
   # referenciarlo por URL para no depender de red en cada render ni acoplar el login a que
   # Google siga sirviendo ese archivo en esa URL.
+  #
+  # Branding real de la app (logo provisto por el CEO, ver flutter_launcher_icons.yaml /
+  # flutter_native_splash.yaml para íconos/splash): se declara acá solo `icon.png`, que es el
+  # que además se usa en runtime vía `Image.asset` en `LoginScreen`. `adaptive-icon.png` y
+  # `splash-icon.png` (misma imagen) no se listan porque sólo los consumen los generadores de
+  # íconos/splash en build-time, no el código Dart en runtime.
   assets:
     - assets/branding/google_logo.png
+    - assets/icon/icon.png
