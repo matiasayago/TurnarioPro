@@ -11,6 +11,16 @@ import {
   passwordSchema,
   respuestaValidacionFallida,
 } from '../dominio/validacion';
+import {
+  LIMITE_PROFESIONALES_ACTIVOS_GRATIS,
+  LIMITE_TURNOS_CONFIRMADOS_MES_GRATIS,
+  contarProfesionalesActivos,
+  contarTurnosConfirmadosDelMes,
+  cuerpoLimitePlanAlcanzado,
+  obtenerEstadoSuscripcion,
+  tieneAccesoTurnarioPro,
+  verificarLimiteProfesionalesActivos,
+} from '../dominio/suscripciones';
 
 export const negociosRouter = Router();
 
@@ -36,6 +46,13 @@ const actualizarNegocioSchema = z.object({
   nombre: z.string().min(1, 'nombre es requerido'),
   rubro: z.string().nullable(),
   ubicacion: z.string().nullable(),
+});
+
+// HU-29 (Turnario Pro) — body de POST /:id/suscripcion (activación simulada), más abajo. Mismo
+// estilo que `visibilidadPerfilSchema` (dominio/validacion.ts): enum sin mensaje custom, zod ya
+// devuelve un error legible por campo vía `respuestaValidacionFallida`.
+const activarSuscripcionSchema = z.object({
+  periodo: z.enum(['mensual', 'anual']),
 });
 
 // MEDIUM-1 (ver 07-seguridad/informe-seguridad.md): misma política mínima de contraseña que
@@ -187,6 +204,17 @@ negociosRouter.post(
           return { tipo: 'email_tomado' as const };
         }
 
+        // HU-29 (Turnario Pro) — límite "1 profesional activo por negocio" del plan gratis. Se
+        // calcula UNA sola vez acá (no depende de nada resuelto más abajo, es información
+        // estática del negocio al momento del request) y se reusa en los 2 puntos de abajo donde
+        // este handler efectivamente SUMA un profesional activo (reactivar una membresía
+        // pausada, o crear una membresía — para un profesional ya existente o para uno nuevo).
+        // A propósito NO se aplica al branch `email_tomado` de arriba (ya cortado) ni a
+        // `inconsistencia`/`ya_activo` de abajo (ninguno de los dos hace crecer el conteo de
+        // profesionales activos de este negocio — bloquearlos igual sería más restrictivo de lo
+        // necesario).
+        const limiteProfesionales = await verificarLimiteProfesionalesActivos(client, req.params.id);
+
         if (existente) {
           const profesionalResult = await client.query('SELECT id FROM profesional WHERE usuario_id = $1', [
             existente.id,
@@ -208,6 +236,9 @@ negociosRouter.post(
           if (membresia?.activo) {
             return { tipo: 'ya_activo' as const };
           }
+          if (!limiteProfesionales.permitido) {
+            return { tipo: 'limite_alcanzado' as const, motivo: limiteProfesionales.motivo! };
+          }
           if (membresia) {
             // Ya había estado vinculado a este negocio pero la membresía estaba pausada
             // (activo=false) — se reanuda sin perder el vínculo/historial (ver diseño de
@@ -223,6 +254,10 @@ negociosRouter.post(
             );
           }
           return { tipo: 'ok' as const, id: profesional.id };
+        }
+
+        if (!limiteProfesionales.permitido) {
+          return { tipo: 'limite_alcanzado' as const, motivo: limiteProfesionales.motivo! };
         }
 
         await client.query(
@@ -248,6 +283,12 @@ negociosRouter.post(
         return res.status(409).json({ error: 'Email ya registrado' });
       case 'inconsistencia':
         return res.status(500).json({ error: 'No se pudo resolver la identidad profesional existente' });
+      case 'limite_alcanzado':
+        // HU-29 — 402 (no 403): ver el razonamiento completo en dominio/suscripciones.ts,
+        // `cuerpoLimitePlanAlcanzado`. El administrador SÍ está autorizado a dar de alta
+        // profesionales (pasó `requireAuth('administrador')` y el chequeo de RN9 de arriba) — lo
+        // que falla es el PLAN, no el rol/identidad.
+        return res.status(402).json(cuerpoLimitePlanAlcanzado(resultado.motivo));
       case 'ya_activo':
         return res.status(409).json({ error: 'Este profesional ya pertenece a este negocio' });
       case 'ok':
@@ -307,5 +348,190 @@ negociosRouter.patch(
 
     if (!negocio) return res.status(404).json({ error: 'Negocio no encontrado' });
     res.json(negocio);
+  })
+);
+
+// ============================================================================
+// Suscripción "Turnario Pro" (HU-29/E11, 2026-08-14) — ver dominio/suscripciones.ts para toda la
+// lógica de negocio compartida (acceso efectivo, conteo de uso, chequeo de límites) y
+// database/migrations/001_init.sql (bloque "Suscripción 'Turnario Pro'") / modelo-datos.md
+// §2novies para el modelado de datos (DBA).
+// ============================================================================
+
+// Contrato: GET /negocios/:id/plan -> 200 { negocio_id, plan, periodo, vencimiento, estado,
+// acceso_turnario_pro, turnos_confirmados_mes: { usados, limite, al_limite },
+// profesionales_activos: { usados, limite, al_limite } } | 400 :id inválido | 403 rol distinto de
+// administrador/profesional, o negocio ajeno | 404 negocio inexistente/eliminado.
+//
+// Auth: cualquier STAFF del negocio (administrador o profesional) — mismo criterio que la policy
+// `suscripcion_negocio_select_staff_del_negocio` (DBA, migrations/001_init.sql): un profesional
+// necesita poder ver el estado del plan de su negocio tanto como el administrador (Mobile: tarjeta
+// "Turnario Pro — 42/60 turnos este mes" en la pantalla de Configuración/Suscripción, visible para
+// ambos roles). `req.auth.negocio_id` es la "vista activa" del JWT (ver auth.ts) — mismo patrón
+// RN9 que el resto de este archivo (comparación directa contra `:id`, no una query aparte).
+//
+// `plan`/`periodo`/`vencimiento`/`estado` viajan SIEMPRE los 4 (no solo cuando
+// `plan = 'turnario_pro'`): mismo shape de respuesta sin importar el plan, más simple de consumir
+// para Mobile que 2 shapes distintas — `periodo`/`vencimiento` ya son `null` para 'gratis' por el
+// propio CHECK de la tabla, así que no se pierde ninguna información con este criterio.
+// `profesionales_activos` no lo pidió la consigna explícitamente para ESTE endpoint, pero se
+// agrega igual (mismo cálculo que ya usa el chequeo de límite de POST /:id/profesionales, sin
+// costo extra relevante) — es el otro límite del mismo plan, coherente con mostrar el estado
+// completo en una pantalla de "mi plan". `limite: null` = ilimitado (Turnario Pro activo).
+negociosRouter.get(
+  '/:id/plan',
+  requireAuth('administrador', 'profesional'),
+  asyncHandler(async (req: AuthedRequest, res) => {
+    const paramsParsed = negocioIdParamsSchema.safeParse(req.params);
+    if (!paramsParsed.success) return respuestaValidacionFallida(res, paramsParsed.error);
+    if (req.auth!.negocio_id !== req.params.id) {
+      return res.status(403).json({ error: 'No podés consultar el plan de otro negocio' });
+    }
+
+    const datos = await withTransaction(
+      async (client) => {
+        const estadoSuscripcion = await obtenerEstadoSuscripcion(client, req.params.id);
+        const proActivo = tieneAccesoTurnarioPro(estadoSuscripcion);
+        const turnosUsados = await contarTurnosConfirmadosDelMes(client, req.params.id, new Date());
+        const profesionalesActivos = await contarProfesionalesActivos(client, req.params.id);
+        return { estadoSuscripcion, proActivo, turnosUsados, profesionalesActivos };
+      },
+      { usuarioId: req.auth!.sub, negocioId: req.params.id }
+    );
+
+    const limiteTurnos = datos.proActivo ? null : LIMITE_TURNOS_CONFIRMADOS_MES_GRATIS;
+    const limiteProfesionales = datos.proActivo ? null : LIMITE_PROFESIONALES_ACTIVOS_GRATIS;
+
+    res.json({
+      negocio_id: req.params.id,
+      plan: datos.estadoSuscripcion.plan,
+      periodo: datos.estadoSuscripcion.periodo,
+      vencimiento: datos.estadoSuscripcion.vencimiento,
+      estado: datos.estadoSuscripcion.estado,
+      acceso_turnario_pro: datos.proActivo,
+      turnos_confirmados_mes: {
+        usados: datos.turnosUsados,
+        limite: limiteTurnos,
+        al_limite: limiteTurnos !== null && datos.turnosUsados >= limiteTurnos,
+      },
+      profesionales_activos: {
+        usados: datos.profesionalesActivos,
+        limite: limiteProfesionales,
+        al_limite: limiteProfesionales !== null && datos.profesionalesActivos >= limiteProfesionales,
+      },
+    });
+  })
+);
+
+// Contrato: POST /negocios/:id/suscripcion, body { periodo: 'mensual' | 'anual' } -> 200
+// { plan, periodo, vencimiento, estado } | 400 datos inválidos | 403 rol distinto de
+// administrador, o negocio ajeno.
+//
+// ACTIVACIÓN SIMULADA (MOCK) — mismo criterio que `MockPagoProvider`
+// (src/integraciones/pagos.ts): la plataforma real de cobro (Google Play Billing, solo Android en
+// v1 — ver 08-despliegue/google-play-billing.md) todavía no está integrada — la cuenta de Google
+// Play Developer ya existe, pero la verificación real de compra (validar un `purchaseToken` contra
+// la Android Publisher API, ver ese documento §6-7) es un ciclo futuro. Este endpoint activa el
+// plan DIRECTO, sin ningún cobro ni verificación real — cualquier administrador autenticado de su
+// propio negocio puede "comprar" Turnario Pro gratis mientras esto siga siendo el único camino.
+// Aceptable para este ciclo (mismo trade-off ya aceptado para Mercado Pago vía `MockPagoProvider`
+// desde Fase 4) porque no hay dinero real involucrado todavía en ningún punto del sistema.
+//
+// EL DÍA QUE EXISTA LA VERIFICACIÓN REAL: este endpoint se REEMPLAZA (no se extiende) por uno que
+// reciba y valide un `purchaseToken` real contra la Android Publisher API — DBA decidió
+// explícitamente NO modelar todavía columnas para eso (`purchase_token`, ver 001_init.sql,
+// "Deliberadamente NO se modela en este ciclo"), así que a propósito este handler NO agrega
+// ninguna columna/campo nuevo para guardarlo — se agregarán recién en esa migración futura.
+//
+// Upsert (`ON CONFLICT (negocio_id) DO UPDATE`), no INSERT liso: cubre tanto la primera activación
+// de un negocio (probablemente ya tiene fila 'gratis' por el backfill/DEFAULT, ver
+// migrations/001_init.sql) como una renovación/reactivación después de vencer o cancelar — mismo
+// criterio de "no asumir que la fila no existe" que el resto de upserts de este backend (ej.
+// `paciente`, `profesional_servicio`). `periodo`/`vencimiento`/`estado` se pisan siempre con el
+// valor nuevo; `plan` pasa a 'turnario_pro' incondicionalmente (si ya lo era, no cambia nada).
+negociosRouter.post(
+  '/:id/suscripcion',
+  requireAuth('administrador'),
+  asyncHandler(async (req: AuthedRequest, res) => {
+    const paramsParsed = negocioIdParamsSchema.safeParse(req.params);
+    if (!paramsParsed.success) return respuestaValidacionFallida(res, paramsParsed.error);
+    if (req.auth!.negocio_id !== req.params.id) {
+      return res.status(403).json({ error: 'No podés administrar la suscripción de otro negocio' });
+    }
+    const bodyParsed = activarSuscripcionSchema.safeParse(req.body);
+    if (!bodyParsed.success) return respuestaValidacionFallida(res, bodyParsed.error);
+    const { periodo } = bodyParsed.data;
+
+    // USD 9/mes, USD 86.40/año (20% off) — backlog.md HU-29/E11 y google-play-billing.md §5. El
+    // precio en sí NO se persiste (ver 001_init.sql, "Deliberadamente NO se modela..." — es
+    // configuración de producto, no un hecho transaccional mientras la activación sea simulada);
+    // se documenta acá solo como referencia de qué representa cada `periodo`.
+    const vencimiento = new Date();
+    if (periodo === 'mensual') {
+      vencimiento.setMonth(vencimiento.getMonth() + 1);
+    } else {
+      vencimiento.setFullYear(vencimiento.getFullYear() + 1);
+    }
+    const ts = nowIso();
+
+    const suscripcion = await withTransaction(
+      async (client) => {
+        const result = await client.query(
+          `INSERT INTO suscripcion_negocio (negocio_id, plan, periodo, vencimiento, estado, creado_en, creado_por)
+           VALUES ($1, 'turnario_pro', $2, $3, 'activa', $4, $5)
+           ON CONFLICT (negocio_id) DO UPDATE SET
+             plan = 'turnario_pro', periodo = excluded.periodo, vencimiento = excluded.vencimiento,
+             estado = 'activa', modificado_en = $4, modificado_por = $5
+           RETURNING plan, periodo, vencimiento, estado`,
+          [req.params.id, periodo, vencimiento.toISOString(), ts, req.auth!.sub]
+        );
+        return result.rows[0];
+      },
+      { usuarioId: req.auth!.sub, negocioId: req.params.id }
+    );
+
+    res.json(suscripcion);
+  })
+);
+
+// Contrato: PATCH /negocios/:id/suscripcion/cancelar -> 200 { plan, periodo, vencimiento, estado }
+// | 403 rol distinto de administrador, o negocio ajeno | 404 este negocio nunca se suscribió a
+// Turnario Pro (plan sigue en 'gratis', nada que cancelar).
+//
+// Opcional (punto 5 de esta ronda) — mismo criterio de "acceso efectivo" que documentó DBA
+// (001_init.sql / modelo-datos.md §2novies): cancelar SOLO cambia `estado` a 'cancelada' — NO
+// resetea `plan`/`periodo`/`vencimiento`. El negocio conserva el acceso a Turnario Pro hasta que
+// venza lo ya pagado (patrón común de SaaS: "cancelar" ≠ "perder acceso ya pagado de inmediato"),
+// y `plan = 'turnario_pro'` queda como registro histórico de "alguna vez se suscribió" incluso
+// después de vencer/cancelar (ver `tieneAccesoTurnarioPro`, dominio/suscripciones.ts, que ya evalúa
+// `estado`/`vencimiento` además de `plan` para decidir el acceso real). No reactiva nada si ya
+// estaba 'vencida' — el UPDATE es idempotente (cancelar 2 veces no falla, solo confirma el estado).
+negociosRouter.patch(
+  '/:id/suscripcion/cancelar',
+  requireAuth('administrador'),
+  asyncHandler(async (req: AuthedRequest, res) => {
+    const paramsParsed = negocioIdParamsSchema.safeParse(req.params);
+    if (!paramsParsed.success) return respuestaValidacionFallida(res, paramsParsed.error);
+    if (req.auth!.negocio_id !== req.params.id) {
+      return res.status(403).json({ error: 'No podés administrar la suscripción de otro negocio' });
+    }
+
+    const suscripcion = await withTransaction(
+      async (client) => {
+        const result = await client.query(
+          `UPDATE suscripcion_negocio SET estado = 'cancelada', modificado_en = $1, modificado_por = $2
+           WHERE negocio_id = $3 AND plan = 'turnario_pro'
+           RETURNING plan, periodo, vencimiento, estado`,
+          [nowIso(), req.auth!.sub, req.params.id]
+        );
+        return result.rows[0];
+      },
+      { usuarioId: req.auth!.sub, negocioId: req.params.id }
+    );
+
+    if (!suscripcion) {
+      return res.status(404).json({ error: 'Este negocio nunca se suscribió a Turnario Pro' });
+    }
+    res.json(suscripcion);
   })
 );

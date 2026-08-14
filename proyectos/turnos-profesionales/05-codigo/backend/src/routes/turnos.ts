@@ -6,6 +6,7 @@ import { requireAuth, AuthedRequest } from '../auth';
 import { asyncHandler } from '../middleware/asyncHandler';
 import { calcularSlotsDisponibles, inicioDelDiaLocal } from '../dominio/disponibilidad';
 import { uuidSchema, fechaIsoSchema, respuestaValidacionFallida } from '../dominio/validacion';
+import { LimitePlanGratisError, cuerpoLimitePlanAlcanzado, exigirLimiteTurnosConfirmadosDelMes } from '../dominio/suscripciones';
 
 export const turnosRouter = Router();
 
@@ -46,6 +47,11 @@ function dentroDeVentanaMinima(inicioTurno: string): boolean {
 // una única transacción con contexto RLS (`usuarioId`), sobre el MISMO client para las 3
 // sentencias — necesario porque `turno` tiene RLS de escritura (WITH CHECK exige
 // `cliente_id = app.usuario_id`).
+//
+// Contrato (agregado 2026-08-14, HU-29): además de los códigos ya documentados en el resto de
+// este comentario, responde 402 si el servicio NO requiere seña (el turno nacería directo en
+// 'confirmado') y el negocio (plan gratis) ya alcanzó el límite de 60 turnos confirmados este mes
+// — ver dominio/suscripciones.ts.
 turnosRouter.post(
   '/',
   requireAuth('cliente'),
@@ -161,6 +167,25 @@ turnosRouter.post(
     try {
       await withTransaction(
         async (client) => {
+          // HU-29 (Turnario Pro) — mismo criterio que `POST /profesionales/:id/turnos` (HU-23,
+          // ver ese comentario): este camino (servicio SIN seña) deja nacer el turno DIRECTO en
+          // 'confirmado', así que el chequeo del límite de 60 turnos confirmados/mes tiene que
+          // correr ACÁ, antes del INSERT — es el único momento en que se puede bloquear antes de
+          // que "cuente". El otro camino de este mismo endpoint (servicio CON seña, más abajo,
+          // `estadoInicial = 'pendiente_de_pago'`) difiere el chequeo al momento en que el pago
+          // se confirme — ver dominio/suscripciones.ts e integraciones/pagos.ts para el resto de
+          // los caminos documentados (incluido uno que, verificado contra este código, todavía no
+          // existe). Se salta completo si el negocio tiene Turnario Pro activo.
+          //
+          // Corre con `app.usuario_id` = CLIENTE (el cambio de identidad a la del profesional
+          // pasa recién más abajo, para el alta de `paciente`) — `obtenerEstadoSuscripcion`
+          // necesita la policy `[BACKEND] suscripcion_negocio_select_negocio_en_contexto`
+          // (migrations/001_init.sql, pendiente de ratificación por DBA) para poder leer el plan
+          // de este negocio bajo esa identidad; ver el razonamiento completo ahí.
+          if (estadoInicial === 'confirmado') {
+            await exigirLimiteTurnosConfirmadosDelMes(client, servicio.negocio_id, inicioDate);
+          }
+
           await client.query(
             `INSERT INTO turno (id, negocio_id, profesional_id, servicio_id, cliente_id, inicio, fin, estado, creado_en)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
@@ -244,6 +269,12 @@ turnosRouter.post(
         { usuarioId: req.auth!.sub }
       );
     } catch (err: any) {
+      // HU-29 — ver el comentario junto al chequeo más arriba y `cuerpoLimitePlanAlcanzado`
+      // (dominio/suscripciones.ts) para el razonamiento completo del 402 (en vez de 403): el
+      // cliente SÍ está autorizado a reservar, lo que falla es el plan del negocio.
+      if (err instanceof LimitePlanGratisError) {
+        return res.status(402).json(cuerpoLimitePlanAlcanzado(err.message));
+      }
       // Postgres (ver database/migrations/001_init.sql): code 23505 = unique_violation, lanzado
       // por el índice único parcial `uq_turno_slot_activo` si dos requests corren la misma
       // ventana de tiempo en paralelo (ver scripts/test-concurrent-booking.mjs). Ya no hay
@@ -416,6 +447,24 @@ turnosRouter.patch(
             | undefined;
           const duracionEfectivaMin = profesionalConfig?.duracion_cita_min ?? servicio!.duracion_min;
           const nuevoFinDate = new Date(nuevoInicioDate.getTime() + duracionEfectivaMin * 60_000);
+          // HU-29 (Turnario Pro) — revisado explícitamente si este endpoint necesita el chequeo
+          // del límite de 60 turnos confirmados/mes (el mismo turno "cambia de estado" acá, aunque
+          // técnicamente vía fila nueva + vieja marcada 'reprogramado'): NO lo necesita. Esta
+          // línea es la única que decide el estado del turno nuevo, y solo tiene 2 resultados —
+          // 'confirmado' SI Y SOLO SI el turno VIEJO YA estaba 'confirmado' (ya contaba para el
+          // límite antes de este PATCH); 'pendiente_de_pago' en cualquier otro caso (nunca
+          // 'confirmado' a partir de un turno que no lo era). Nunca crea un turno 'confirmado'
+          // NUEVO que no existiera ya — no hay transición pendiente_de_pago -> confirmado acá,
+          // a diferencia de POST /turnos y POST /profesionales/:id/turnos (ver esos comentarios).
+          // Límite conocido, no resuelto en este ciclo: si el turno viejo YA estaba 'confirmado'
+          // y se reprograma a OTRO mes calendario, el conteo de ese mes se "mueve" con él (sigue
+          // sumando 1 turno confirmado en total, pero ahora en el mes destino en vez del mes
+          // origen) — en el caso límite de un negocio ya al tope del mes destino, esto le permite
+          // superar transitoriamente los 60 de ESE mes por la vía de reprogramar en vez de crear.
+          // No bloqueado a propósito: mismo criterio de alcance que el resto de este ciclo (HU-29
+          // pide bloquear reservas/turnos NUEVOS al llegar al límite, no restringir la
+          // reprogramación de un turno ya pago/confirmado existente) — señalado acá para que
+          // Product Manager/CTO IA decidan si vale la pena cerrarlo en un ciclo futuro.
           const estadoFinal = turno.estado === 'confirmado' ? 'confirmado' : 'pendiente_de_pago'; // conserva el estado de pago (D2)
 
           await client.query("UPDATE turno SET estado = 'reprogramado', modificado_en = $1 WHERE id = $2", [
