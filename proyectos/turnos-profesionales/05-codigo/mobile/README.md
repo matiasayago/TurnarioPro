@@ -219,6 +219,38 @@ Pagos" (Panel Profesional) y "Pagos y Señas" (su propia sección) navegan a la 
 ítems. `flutter analyze` corrido localmente (SDK disponible en este entorno): limpio, sin
 hallazgos nuevos.
 
+## 🆕 Branding real de la app (ícono, ícono adaptativo de Android, splash, logo en login)
+
+Los 3 assets provistos por el CEO (`icon.png`, `adaptive-icon.png`, `splash-icon.png` — misma
+imagen, un ícono con degradado azul→violeta y una "T" fusionada con un motivo de reloj) viven en
+`assets/icon/` (fuente original sin procesar en `../../04-diseno/Iconos/`). Se integran vía dos
+paquetes estándar de Flutter en vez de tocar cada plataforma a mano:
+
+- `flutter_launcher_icons.yaml`: ícono nativo Android/iOS + favicon/PWA icons de `web/`.
+  `adaptive_icon_background` usa `#6C7FE0` (el mismo `AppPalette.primaryLight` de
+  `lib/theme/app_colors.dart`, no un hex inventado) porque los PNG del CEO no traen un foreground
+  aislado con transparencia. Este proyecto todavía **no tiene `android/`/`ios/`** (no se corrió
+  `flutter create --platforms=android,ios .`) — las secciones de esas plataformas quedan
+  configuradas igual, listas para cuando esas carpetas existan; ver el comentario al inicio del
+  archivo sobre por qué generar con Android/iOS habilitados falla en duro hoy (aborta antes de
+  llegar a `web`) y cómo se generó `web` en este estado transitorio.
+- `flutter_native_splash.yaml`: splash con el mismo logo, color `#F7F8FA` (= `scaffoldBackgroundColor`
+  claro) para que no haya salto de color al primer frame real. Sin variante dark configurada a
+  propósito — el PNG trae su fondo horneado en blanco opaco, no transparente (ver comentario en el
+  archivo).
+- `lib/screens/login_screen.dart`: el logo (`assets/icon/icon.png`) se muestra arriba del
+  formulario, envuelto en `ClipRRect(AppRadius.card)` — sin este wrapper, el fondo blanco opaco del
+  PNG se ve como un recorte cuadrado de esquinas filosas sobre el fondo oscuro del tema; con él se
+  lee como una tarjeta de logo intencional.
+- `web/` (favicon, `manifest.json`, `icons/`, `splash/`, `index.html`) quedó commiteado esta vez —
+  hasta ahora se mantenía fuera de git como herramienta local de verificación (sigue pendiente la
+  decisión sobre CI de Flutter Web, no relacionada con esto).
+
+Verificado con `flutter analyze` (limpio) y visualmente sirviendo `flutter build web` (el modo
+`flutter run -d web-server` está roto en este entorno por un bug de DWDS ajeno a este cambio —
+`TypeError` en `dwds/src/injected/client.js` al deserializar un evento de debug — no bloquea builds
+de producción).
+
 ## Pantallas implementadas (ver mapa completo en `04-diseno/mapa-pantallas.md`)
 
 **Cliente:** Login (+ Google, HU-35, solo Web — ver sección propia arriba), `ClienteShell` (bottom

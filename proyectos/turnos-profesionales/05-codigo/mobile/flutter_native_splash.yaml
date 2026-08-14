@@ -1,0 +1,29 @@
+# Config de `flutter_native_splash` — splash/pantalla de carga con el logo real
+# (`assets/icon/splash-icon.png`, ver `assets/icon/`).
+#
+# A diferencia de `flutter_launcher_icons.yaml` (ver ese archivo), este paquete SÍ chequea si
+# `android/`/`ios/` existen antes de tocarlos — si no existen, los saltea con un aviso por
+# consola en vez de fallar. Por eso acá no hace falta ningún workaround: se puede correr
+# `dart run flutter_native_splash:create` directamente contra este mismo archivo hoy (que hoy
+# solo tiene `web/` para generar) y, el día que existan `android/`/`ios/` (`flutter create
+# --platforms=android,ios .`), alcanza con volver a correrlo para que también se generen esas
+# plataformas — no hace falta tocar nada acá.
+#
+# No se configura variante dark (`color_dark`/`image_dark`/`android_12.color_dark`): los 3 PNG
+# que mandó el CEO ya traen el fondo del degradado "horneado" en blanco opaco (no transparente),
+# así que reutilizarlos en modo oscuro mostraría un recuadro blanco sobre fondo oscuro en vez de
+# una transición prolija — se prefirió dejar un único splash (claro) hasta contar con una
+# variante de logo pensada para fondo oscuro.
+flutter_native_splash:
+  # Mismo tono que `scaffoldBackgroundColor` en modo claro (`AppPalette.backgroundLight`,
+  # `lib/theme/app_colors.dart`) — evita un salto de color visible entre el splash y el primer
+  # frame real de la app.
+  color: "#F7F8FA"
+  image: assets/icon/splash-icon.png
+
+  # Splash nativo específico de Android 12+ (ver README del paquete) — mismo criterio que arriba,
+  # queda listo para cuando exista `android/`.
+  android_12:
+    color: "#F7F8FA"
+    icon_background_color: "#F7F8FA"
+    image: assets/icon/splash-icon.png
