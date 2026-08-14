@@ -2,3 +2,13 @@
 .packages
 build/
 .flutter-plugins-dependencies
+
+# Plataforma Android (generada con `flutter create --platforms=android .`, ver
+# ../08-despliegue/google-play-billing.md §3.1) — la keystore de firma de release (§3.3 del
+# mismo documento, todavía no generada en este ciclo) y sus credenciales NUNCA se commitean.
+# `android/.gitignore` (generado por Flutter) ya cubre estos mismos patrones alcance-abajo
+# (relativos a android/); se repiten acá, alcance-arriba, para que quede explícito también a
+# nivel raíz del proyecto Flutter y no dependa de que nadie edite/regenere ese archivo anidado.
+android/key.properties
+*.jks
+*.keystore

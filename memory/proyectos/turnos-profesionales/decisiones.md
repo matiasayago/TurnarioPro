@@ -1061,3 +1061,142 @@ para reutilizar:
   proveedor de push real se usa); conectar el "envío" real queda para un ciclo futuro.
 - No probado end-to-end contra Render (sin acceso de red desde este entorno — mismo caveat que
   ciclos anteriores). Verificado con `npx tsc --noEmit` (sin errores).
+
+## Plan de credenciales de Google Play Billing para "Turnario Pro" (HU-29/E11) — DevOps (2026-08-14)
+
+El CEO confirmó avanzar con HU-29. Plan completo en
+`proyectos/turnos-profesionales/08-despliegue/google-play-billing.md`, mismo formato/nivel de
+detalle que `08-despliegue/google-oauth.md` (HU-35). Resumen para reutilizar:
+
+- **A diferencia del ciclo de OAuth, acá no hay ningún código de HU-29 todavía** (verificado: cero
+  referencias en `03-arquitectura/modelo-datos.md` ni en `05-codigo/backend/src/`) — este
+  documento es el primer paso de la cadena, no uno más en paralelo a Backend ya construyendo. Por
+  eso este ciclo, a propósito, **no tocó `.env.example`/`render.yaml`/`backlog.md`** (nada del
+  lado de código consume todavía esas variables) — la lista de variables futuras queda planteada
+  en el documento (§7) para el próximo ciclo de DevOps, cuando Backend arranque la implementación
+  real.
+- **Secuencia real (mayormente secuencial, no paralela):** cuenta de Google Play Developer (CEO,
+  USD 25 único + verificación de identidad) → generar `android/` de forma permanente en
+  `05-codigo/mobile` (hoy solo existe `web/`, ver su README.md "Gap conocido") → confirmar
+  `applicationId` → keystore de firma (Play App Signing recomendado) → crear la app en Play
+  Console y subir un build firmado a Internal testing + configurar monetización (cuenta de pagos
+  de Google) → recién ahí se puede crear el producto de suscripción real → cuenta de servicio para
+  que Backend verifique compras server-side.
+- **`applicationId` recomendado, pendiente de confirmación del CEO, NO aplicado:**
+  `com.turnariopro.app` (coherente con el branding ya integrado en Mobile, todo en minúsculas).
+  Resolver esto desbloquea dos cosas a la vez: generar `android/` correctamente desde el inicio, y
+  el Client ID Android de OAuth que `google-oauth.md` §2 Paso 4 ya tenía pendiente por el mismo
+  motivo (mismo dato, dos consumidores).
+- **Precios exactos calculados (valores ya decididos por el CEO en `backlog.md`, solo se derivó el
+  número):** mensual USD 9.00; anual USD 86.40 (=9×12×0.80), equivalente a USD 7.20/mes, ahorro de
+  USD 21.60/año.
+- **Modelo vigente de Play Console (a verificar al ejecutar):** ya no son "2 SKU" independientes —
+  es 1 producto de suscripción (`turnario_pro`) con 2 "planes base" adentro (`mensual`/`anual`).
+  Combinados como `turnario_pro_mensual`/`turnario_pro_anual` para uso interno en código.
+- **Verificación server-side (Backend, no implementado en este ciclo):** mismo principio ya
+  aplicado en este proyecto (nunca confiar un valor sin re-derivarlo del servidor). Paralelo
+  directo con el flujo de HU-35: Mobile manda un `purchaseToken` (en vez de un ID token) a
+  Backend, que lo valida contra la Android Publisher API de Google usando una cuenta de servicio
+  propia (a diferencia de OAuth, que no necesita ninguna credencial de servidor). Recomendación
+  técnica: reusar `google-auth-library` (ya es dependencia del backend por HU-35) en vez de sumar
+  el paquete completo `googleapis` — mismo criterio ya aplicado en `google-oauth.md` §1.
+- **Ninguna cuenta, pago, keystore ni producto real se creó en este ciclo** — ningún agente de IA
+  puede crear la cuenta de Google Play Developer ni pagar los USD 25 (mismo tipo de límite ya
+  documentado para Render/Google Cloud/Apple Developer). Generar `android/` y la keystore de firma
+  sí son tareas técnicas delegables a un agente, pero tampoco se ejecutaron en este ciclo — la
+  consigna pedía únicamente el plan, no la ejecución.
+
+### Corrección el mismo día — cuenta y `applicationId` YA EXISTÍAN (Director General IA, 2026-08-14)
+
+El CEO compartió una captura real de su Google Play Console: la cuenta de Google Play Developer
+(Personal, "Matias Sayago") **ya existe** — el pago de los USD 25 y la decisión Personal/
+Organización de arriba ya están resueltos, no son un paso pendiente. Además, ya hay una app
+cargada con nombre "Turnario", paquete **`com.turnariopro.app`** (coincide con la recomendación
+de arriba, pero no por casualidad de que DevOps la haya "adivinado" — es un valor que ya existía),
+estado Borrador, 0 usuarios — confirmado por el CEO: es la **app hermana ya construida** (otro
+código, la que sirvió de inspiración visual para el rediseño de este proyecto). El CEO decidió
+explícitamente reusar ese mismo paquete para este proyecto en vez de crear uno nuevo. Detalle
+completo y el nuevo ítem detectado (deadline de verificación de desarrolladores de Android,
+30/09/2026) en `08-despliegue/google-play-billing.md` §1bis (agregado ahí, no se reescribió el
+resto del documento). Consecuencia práctica: el paso de generar `android/` (delegado a Mobile este
+mismo ciclo) ya puede usar `com.turnariopro.app` como valor definitivo, sin esperar ninguna otra
+confirmación del CEO.
+
+## Modelado de suscripción "Turnario Pro" (HU-29/E11) — DBA (2026-08-14)
+
+Rama `feature/configuracion-profesional` (continúa sobre el commit de HU-32, `7a106e8`). Modela el
+soporte de datos para el freemium por negocio de HU-29 — no toca Backend ni Mobile (ronda aparte).
+Detalle completo en `03-arquitectura/modelo-datos.md` §2novies/§5sexies. Resumen para reutilizar:
+
+- **Contexto verificado antes de modelar:** leído el plan de DevOps del mismo día
+  (`08-despliegue/google-play-billing.md`, ver entrada anterior en este archivo) — confirma que
+  `turnario_pro` es el ID de producto recomendado para Play Console con 2 "planes base"
+  (`mensual`/`anual`), que la verificación real usará `purchaseToken` contra la Android Publisher
+  API (no implementada por nadie todavía), y que el patrón esperado para este ciclo es
+  "diseñar/mockear en paralelo, sin esperar" (mismo criterio que `MockPagoProvider`) — sin
+  contradicciones con la consigna de este ciclo: ambos documentos usan el mismo vocabulario
+  (`mensual`/`anual`, `turnario_pro`) de forma independiente.
+- **Tabla nueva `suscripcion_negocio`, no columna `negocio.plan` sola.** Evaluadas ambas; se
+  descarta la columna porque el plan pago necesita 3 atributos más (`periodo`/`vencimiento`/
+  `estado`) que el gratis no usa — una columna sola de todos modos habría necesitado sumarlos ahí,
+  ensanchando `negocio` (identidad) con un concern de facturación ajeno. Tabla separada, 1:1 con
+  `negocio` vía `negocio_id UNIQUE` — mismo patrón estructural que `profesional`/`pago`/
+  `usuario_preferencias` (GUID propio, no `negocio_id` como PK directamente).
+- **3 ENUM nuevos, valores elegidos para coincidir literalmente con Play Console** (confirmado
+  contra `google-play-billing.md`, no una coincidencia): `plan_negocio` ('gratis'/'turnario_pro'),
+  `periodo_suscripcion` ('mensual'/'anual'), `estado_suscripcion_negocio`
+  ('activa'/'vencida'/'cancelada'). CHECK nuevo
+  (`ck_suscripcion_negocio_periodo_vencimiento_segun_plan`, mismo patrón que
+  `ck_usuario_password_o_google`) fuerza `periodo`/`vencimiento` NULL si y solo si
+  `plan = 'gratis'` — a nivel de base de datos, no solo documentado.
+- **Con `creado_por`/`modificado_por`, a diferencia de `usuario_preferencias*`.** El "dueño" es
+  `negocio_id`, pero `negocio_administrador` es N:M (puede haber más de 1 administrador) — quién
+  activó/canceló la suscripción no es deducible de `negocio_id` solo, y es una pregunta de
+  auditoría legítima para un dato de facturación. Mismo criterio que `negocio`/`paciente`.
+- **Decisión explícita de NO modelar el `purchaseToken`/precio todavía — la parte más deliberada
+  de este ciclo.** `pago.referencia_externa TEXT` (Fase 3 original) parece un precedente directo
+  para anticipar una columna "por si hace falta" — pero, verificado contra `backend/src/` (grep,
+  no asumido), esa columna NO tiene ningún consumidor real hoy, ni siquiera el propio
+  `MockPagoProvider` la escribe. Se decide no repetir ese patrón: la activación simulada de este
+  ciclo no produce ningún dato externo real que guardar. Cuando la verificación real de Google
+  Play exista (`google-play-billing.md` §6), agregar la columna en una migración incremental
+  futura — no antes. Tampoco se modela precio/monto (USD 9/USD 86.40 son configuración de
+  producto, no un hecho transaccional mientras la activación sea simulada).
+- **Default 'gratis' para negocios existentes — con backfill explícito, no solo convención.** A
+  diferencia de `usuario_preferencias` (donde "sin fila = default" alcanza porque el efecto de una
+  fila faltante es inerte), acá el concern puede BLOQUEAR una acción — se prefirió no depender de
+  que Backend recuerde tratar "sin fila" como 'gratis' en cada lectura. `001_init.sql` resuelve
+  los negocios NUEVOS solo con el `DEFAULT` de columna (no necesita backfill: una base nueva no
+  tiene negocios todavía). `005_suscripcion_negocio.sql` agrega el backfill real para Render
+  (`INSERT ... SELECT id FROM negocio ON CONFLICT DO NOTHING`), corrido ANTES de habilitar RLS en
+  la misma transacción (mismo orden que el backfill de `004_notificaciones.sql`) para no depender
+  de qué policy exista ni de los privilegios del rol que aplique el script. Regla general nueva,
+  agregada a `modelo-datos.md` §1, para reutilizar en futuros concerns con efecto restrictivo.
+- **RLS — 3 policies asimétricas, no una única simétrica.** Pedido explícito de esta ronda: lectura
+  para administrador Y profesional del negocio (para mostrar "gratis: 42/60 turnos este mes" en
+  Mobile), escritura solo para administrador. SELECT con el mismo criterio `EXISTS`/`OR` que
+  `turno_acceso_negocio_o_cliente` (sin la rama de cliente); INSERT/UPDATE con el mismo criterio
+  que `servicio_insert_admin_del_negocio`/`servicio_update_admin_del_negocio`; sin policy de
+  DELETE (ningún endpoint la necesita, fail-closed por default). FORCE desde el primer commit,
+  mismo criterio que toda tabla nueva desde §5bis.
+- **Índice nuevo sobre `turno` existente, no solo sobre la tabla nueva.** El límite de 60 turnos
+  confirmados/mes es, en la práctica, la query más caliente de todo HU-29 (corre en cada intento
+  de reserva de un negocio gratis) — se agrega `idx_turno_negocio_confirmado_inicio`, parcial
+  (`WHERE estado = 'confirmado'`) sobre `(negocio_id, inicio)`, mismo patrón que
+  `uq_turno_slot_activo`. Supuesto NO verificado, señalado para Backend: indexa por `inicio` (fecha
+  del turno), no `creado_en` — interpretación más consistente con "60, ~2/día" del backlog, pero
+  reversible en una sola línea si Backend/Product Manager deciden lo contrario. El otro límite ("1
+  profesional por negocio") no necesita índice nuevo — ya cubierto por la PK de
+  `negocio_profesional`.
+- **Alcance de este ciclo, por instrucción explícita: NO se tocó `backend/migrations/001_init.sql`**
+  (la copia operativa que sí lee `runMigrations()`), a diferencia del patrón habitual de este
+  proyecto de mantener ambas copias byte-idénticas en el mismo commit (ver el propio header de
+  `database/migrations/001_init.sql`, líneas 11-20). Las 2 copias quedan divergentes hasta que
+  Backend las sincronice en su próxima ronda — no bloquea Render (que de todos modos ignora
+  `001_init.sql` una vez migrada) pero sí a cualquier ambiente nuevo que arranque desde la copia
+  operativa. Documentado en el propio `005_suscripcion_negocio.sql` y en `modelo-datos.md` §4.
+- **No aplicado contra Render** (a diferencia de `003`/`004`, que sí lo fueron por el Director
+  General IA) — `005_suscripcion_negocio.sql` queda listo para revisión y aplicación manual, no
+  ejecutado en este ciclo por instrucción explícita ("dejalo listo nomás"). No verificado contra
+  un Postgres real por el mismo motivo de siempre (sin `psql`/Docker en este entorno) — balance de
+  paréntesis de ambos archivos SQL revisado programáticamente antes de entregar.
