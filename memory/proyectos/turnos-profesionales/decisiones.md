@@ -1200,3 +1200,27 @@ Detalle completo en `03-arquitectura/modelo-datos.md` §2novies/§5sexies. Resum
   ejecutado en este ciclo por instrucción explícita ("dejalo listo nomás"). No verificado contra
   un Postgres real por el mismo motivo de siempre (sin `psql`/Docker en este entorno) — balance de
   paréntesis de ambos archivos SQL revisado programáticamente antes de entregar.
+
+## HU-29 "Turnario Pro" — cierre de ciclo: PR #11 mergeado y desplegado a Render (2026-08-14)
+
+- **Migraciones 005 y 006 aplicadas contra Render** por el Director General IA (con aprobación
+  explícita del CEO en cada una, vía `AskUserQuestion`) — no por DBA ni Backend, mismo patrón que
+  `003`/`004`. Verificadas con impersonación de rol vía `set_config('app.usuario_id'/'app.negocio_id', ...)`
+  en transacciones de solo lectura (`ROLLBACK` al final, nunca `COMMIT` en scripts de verificación).
+- **PR #11 tuvo una regresión real en CI**, encontrada y corregida por el Director General IA (no
+  por Backend): `scripts/test-duracion-configurable.mjs` fallaba al dar de alta un segundo
+  profesional (paso de su propio setup, no relacionado a HU-29) porque el nuevo límite de 1
+  profesional activo por negocio gratis lo bloqueaba. Fix: activar Turnario Pro (mock) para ese
+  negocio de test antes de ese paso. Confirmado que ningún otro script de `scripts/` tenía el
+  mismo patrón antes de dar el fix por bueno.
+- **Desplegado a Render** (`2d8ffa5`, manual deploy vía dashboard, aprobado explícitamente por el
+  CEO) y verificado en vivo contra `https://turnos-profesionales-backend.onrender.com`:
+  `GET /negocios/:id/plan` responde 200 con la forma esperada (plan/periodo/vencimiento/estado/
+  acceso_turnario_pro/turnos_confirmados_mes/profesionales_activos); `POST /negocios/:id/suscripcion`
+  y `PATCH /negocios/:id/suscripcion/cancelar` devuelven 401 sin auth y 403 para un `profesional`
+  (ambos son admin-only) — autorización confirmada correcta en producción, no solo local.
+- **Pendiente, fuera de alcance de este ciclo**: conectar el flujo real de confirmación de pago de
+  Mercado Pago (nunca estuvo conectado a ningún endpoint — hallazgo de Backend, documentado en
+  `pagos.ts`) — a futuro debe llamar `exigirLimiteTurnosConfirmadosDelMes` en el mismo punto de
+  transición `pendiente_de_pago` → `confirmado`. Además: no existe UI real para el rol
+  `administrador` (activar/cancelar Turnario Pro hoy solo tiene endpoint, no pantalla Mobile).

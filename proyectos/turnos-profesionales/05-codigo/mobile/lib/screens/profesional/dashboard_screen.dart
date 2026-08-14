@@ -9,6 +9,7 @@ import '../../theme/app_spacing.dart';
 import '../../theme/app_typography.dart';
 import '../../widgets/widgets.dart';
 import 'agenda_screen.dart';
+import 'nueva_cita_screen.dart';
 
 /// Dashboard (Profesional) — HU-27, pantalla nueva (no reemplaza nada existente). Wireframe
 /// corregido completo en `mapa-pantallas.md` §5.2bis. El ícono "cambiar de vista" del header
@@ -72,6 +73,22 @@ class _DashboardScreenState extends State<DashboardScreen> {
   bool _esHoy(DateTime fecha) {
     final hoy = DateTime.now();
     return fecha.year == hoy.year && fecha.month == hoy.month && fecha.day == hoy.day;
+  }
+
+  /// HU-23: mismo mecanismo que `configuracion_screen.dart` (`_abrirNuevaCita`) — `NuevaCitaScreen`
+  /// ya se construye sobre `AppModalSheet`, así que se abre con `AppModalSheet.show` en vez de
+  /// `Navigator.push` para no duplicar el envoltorio. A diferencia de Configuración, el Dashboard
+  /// sí muestra los turnos de hoy (`_futureTurnos`) — si la cita nueva es de hoy tiene que
+  /// aparecer en "Próximas citas" sin esperar a un pull-to-refresh manual, por eso [_refrescar]
+  /// además de la confirmación.
+  Future<void> _abrirNuevaCita(BuildContext context) async {
+    final creada = await AppModalSheet.show<bool>(context, builder: (_) => const NuevaCitaScreen());
+    if (creada == true && context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Cita creada y cliente notificado.')),
+      );
+      await _refrescar();
+    }
   }
 
   /// HU-27 ("cambiar de vista"): abre el selector con los negocios de `Sesion.negocios` y, si se
@@ -218,7 +235,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
         backgroundColor: colors.primary,
         foregroundColor: colors.onPrimary,
         tooltip: 'Agendar Cita',
-        onPressed: () => _avisoNoDisponible(context, 'Agendar Cita todavía no está disponible.'),
+        onPressed: () => _abrirNuevaCita(context),
         child: const Icon(Icons.add),
       ),
     );
