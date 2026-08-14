@@ -51,31 +51,20 @@ jobs:
       - name: flutter --version
         run: flutter --version
 
-      # Este proyecto se escribio a mano (solo lib/ + pubspec.yaml) sin correr nunca
-      # `flutter create`, asi que le faltan las carpetas nativas por plataforma (android/,
-      # ios/, etc. - no estan en el repo, ver README.md de este directorio y su .gitignore,
-      # que tampoco tiene las entradas que el propio Flutter genera). Sin android/ no hay
-      # nada que `flutter build apk` pueda compilar. La generamos aca con el SDK real (mas
-      # confiable que escribir Gradle/Kotlin a mano sin poder probarlo en este entorno) -
-      # es el mecanismo oficial para agregar soporte de plataforma a un proyecto Flutter
-      # existente. No pisa pubspec.yaml ni lib/ (flutter create no sobreescribe archivos
-      # existentes) y no se commitea de vuelta al repo: es solo para esta verificacion en CI.
-      - name: "Generar carpeta android/ faltante (flutter create --platforms=android)"
-        run: flutter create --platforms=android .
-
-      # `flutter create` tambien completa, si faltan, archivos de la plantilla base
-      # (analysis_options.yaml, test/widget_test.dart) con contenido generico de una
-      # contra-app "MyApp" sin relacion con este proyecto. Los sacamos para que
-      # `flutter analyze` valide unicamente el codigo que si escribimos (lib/): sin esto, el
-      # test generico rompe el analisis (referencia una clase que no existe en este
-      # main.dart) y analysis_options.yaml activaria de golpe flutter_lints con reglas de
-      # estilo sobre codigo que nunca se linteo, tapando con ruido los errores reales que
-      # este workflow busca detectar.
-      - name: Limpiar archivos de plantilla no relacionados con este proyecto
-        run: |
-          rm -rf test
-          rm -f analysis_options.yaml
-
+      # HISTORIAL (2026-08-14): hasta la ronda de HU-29 "Turnario Pro", este proyecto se escribia
+      # a mano (solo lib/ + pubspec.yaml) sin correr nunca `flutter create`, asi que le faltaba
+      # android/ - este workflow lo generaba en cada corrida con `flutter create
+      # --platforms=android .` y despues borraba test/widget_test.dart/analysis_options.yaml
+      # (plantilla generica que `flutter create` completa de yapa, sin relacion con este
+      # proyecto). Google Play Billing (HU-29) necesitaba android/ real y permanente con un
+      # `applicationId` especifico (com.turnariopro.app, ver
+      # ../../proyectos/turnos-profesionales/08-despliegue/google-play-billing.md) - no algo que
+      # se sintetice distinto en cada corrida de CI. android/ ya esta commiteado en el repo desde
+      # esa ronda, con su propio test/widget_test.dart y analysis_options.yaml REALES (no
+      # plantilla) - los dos pasos que hacian ese trabajo temporal se sacaron de aca: generar
+      # android/ de nuevo seria redundante (`flutter create` no pisa lo que ya existe, pero ya no
+      # hace falta llamarlo) y borrar test/analysis_options.yaml ahora borraria archivos
+      # legitimos del repo, no plantilla.
       - name: flutter pub get
         run: flutter pub get
 

@@ -2,10 +2,13 @@
 -- Rol: DBA · Fase 3 — Diseño (evolucionada en varios ciclos posteriores: fix CRITICAL-1 §2bis,
 -- generalización N:M §2ter, D10/duracion_cita_min §2quater, la ratificación de RLS del
 -- 2026-08-09, HU-20/HU-21/HU-35 del 2026-08-10 (ficha de paciente extendida + historial
--- clínico + login con Google), y HU-14b/HU-25/HU-26 del 2026-08-12 (bandeja de notificaciones
--- con destinatario/leído + preferencias de notificación, ver §2octies/§5quinquies) — ver
--- 03-arquitectura/modelo-datos.md para el detalle completo de cada una y
--- memory/proyectos/turnos-profesionales/decisiones.md para la traza de decisiones).
+-- clínico + login con Google), HU-32 del 2026-08-11 (preferencias de privacidad de usuario, ver
+-- §2septies/§5quater — mención agregada acá; no se había sumado a este resumen en su propio
+-- ciclo), HU-14b/HU-25/HU-26 del 2026-08-12 (bandeja de notificaciones con destinatario/leído +
+-- preferencias de notificación, ver §2octies/§5quinquies), y HU-29/E11 del 2026-08-14
+-- (suscripción "Turnario Pro", ver §2novies/§5sexies) — ver 03-arquitectura/modelo-datos.md para
+-- el detalle completo de cada una y memory/proyectos/turnos-profesionales/decisiones.md para la
+-- traza de decisiones).
 -- Convenciones: GUID como PK, auditoría completa, soft delete donde corresponde (docs/06-modelo-datos.md §3)
 --
 -- ARCHIVO DUPLICADO A PROPÓSITO — mantener sincronizado. Este archivo es la fuente de verdad del
@@ -1575,3 +1578,314 @@ ALTER TABLE usuario_preferencias FORCE ROW LEVEL SECURITY;
 CREATE POLICY usuario_preferencias_acceso_propio ON usuario_preferencias
   USING (usuario_id = NULLIF(current_setting('app.usuario_id', true), '')::uuid)
   WITH CHECK (usuario_id = NULLIF(current_setting('app.usuario_id', true), '')::uuid);
+
+-- ============================================================================
+-- Suscripción "Turnario Pro" (HU-29/E11, 2026-08-14, DBA)
+-- ============================================================================
+-- Origen: HU-29 (E11, 02-backlog/backlog.md) — freemium POR NEGOCIO, no por profesional
+-- individual: el plan gratis limita 1 profesional por negocio y 60 turnos confirmados/mes por
+-- negocio (ninguno de los dos necesita columnas nuevas — ambos son consultas sobre tablas ya
+-- existentes, ver el índice nuevo al final de este bloque para el segundo). "Turnario Pro"
+-- levanta esos límites y desbloquea Reportes (HU-28, ya construido), WhatsApp (HU-24, todavía
+-- no), plantillas de horario recurrente (HU-17, ya construido) e import/export de pacientes
+-- (HU-22, todavía no) — esos desbloqueos de OTRAS features son responsabilidad de Backend en cada
+-- endpoint (chequear el plan de ese negocio), no de este modelado. Precio confirmado por el CEO
+-- (backlog.md, esta ronda): USD 9/mes por negocio, 20% off pagando anual (USD 86.40/año, ya
+-- calculado por DevOps en `08-despliegue/google-play-billing.md` §5). Plataforma v1: SOLO
+-- Android, cobrado vía Google Play Billing — pero esa integración real todavía no existe (necesita
+-- que el CEO cree una cuenta de Google Play Developer, USD 25 + verificación de identidad, ver ese
+-- mismo documento §1/§2) — este ciclo modela el soporte de datos para una ACTIVACIÓN SIMULADA
+-- (mismo criterio que ya usa Mercado Pago, `MockPagoProvider` en
+-- `backend/src/integraciones/pagos.ts`), no una verificación real de compra. Comportamiento al
+-- llegar al límite del plan gratis, confirmado por el CEO en esta misma ronda: BLOQUEAR nuevas
+-- reservas/turnos ese mes (no solo avisar) — lo aplica Backend en el endpoint de reserva, no la
+-- base de datos (ver recomendación al final de este bloque).
+--
+-- DECISIÓN DE DISEÑO — ¿columna `negocio.plan` sola, o tabla `suscripcion_negocio` separada?
+-- Evaluadas ambas antes de decidir, mismo criterio que ya usó este archivo para
+-- `usuario_preferencias`/`paciente` (ver esos bloques, más arriba): la cardinalidad NO fuerza la
+-- respuesta acá (1:1 con `negocio` bajo cualquiera de las dos), así que decide otro criterio.
+-- Se descarta una columna `negocio.plan` sola porque el plan pago necesita, además, 3 atributos
+-- que el plan gratis no tiene sentido de tener (`periodo`, `vencimiento`, `estado` de ESA
+-- suscripción puntual) — una columna sola en `negocio` de todos modos habría necesitado sumar esas
+-- mismas 3 columnas ahí (`plan_periodo`/`plan_vencimiento`/`plan_estado`), con el mismo resultado
+-- práctico que una tabla propia, pero ensanchando `negocio` (identidad: nombre/rubro/ubicación) con
+-- un concern de facturación ajeno — mismo razonamiento ya aplicado para separar
+-- `usuario_preferencias` de `usuario` ("las preferencias son un concern independiente que ya se
+-- sabe va a seguir creciendo", ver ese bloque). Se elige TABLA SEPARADA (`suscripcion_negocio`,
+-- 1:1 con `negocio` vía `negocio_id UNIQUE`), mismo patrón estructural que
+-- `profesional`/`pago`/`usuario_preferencias` en este archivo (GUID propio +
+-- `<dueño>_id UNIQUE REFERENCES <dueño>(id)`, no `negocio_id` como PK directamente — nada
+-- referencia hoy una fila de esta tabla por su propio id, pero mantiene la forma consistente con
+-- el resto del esquema). Nombre `suscripcion_negocio` (no `negocio_suscripcion`): este esquema no
+-- tiene una única regla para nombrar satélites 1:1 (`usuario_preferencias` antepone el dueño;
+-- `pago`, satélite 1:1 de `turno`, no) — se mantiene el nombre ya anticipado en la consigna de
+-- este ciclo, sin motivo de peso para apartarse.
+--
+-- Columnas `plan`/`periodo`/`estado` — 3 ENUM dedicados, mismo criterio que
+-- `rol_usuario`/`estado_turno`/`estado_pago`/`visibilidad_perfil_usuario`: gobiernan lógica real
+-- (qué límites aplica Backend, qué desbloquea), no son contenido descriptivo de UI. Minúscula sin
+-- tilde, mismo estilo que el resto de los ENUM de este archivo.
+-- - `plan_negocio` ('gratis' | 'turnario_pro') — 'turnario_pro' coincide literalmente con el ID de
+--   producto de suscripción recomendado para Play Console (`turnario_pro`,
+--   `08-despliegue/google-play-billing.md` §5) — mismo vocabulario en toda la cadena (backlog →
+--   DevOps → DBA), no una coincidencia: cuando Backend mapee esta columna al `productId` real de
+--   la Android Publisher API, no hace falta traducir entre 2 nombres para el mismo concepto.
+-- - `periodo_suscripcion` ('mensual' | 'anual') — NULLABLE (ver CHECK más abajo): solo tiene
+--   sentido cuando `plan = 'turnario_pro'`; el plan gratis no tiene periodicidad de facturación.
+--   Coincide, otra vez a propósito, con los 2 "planes base" recomendados dentro del producto de
+--   Play Console (`mensual`/`anual`, mismo documento §5) — Backend combina `plan`+`periodo` para
+--   derivar el identificador compuesto `turnario_pro_mensual`/`turnario_pro_anual` que va a usar
+--   contra Play Console el día que la verificación real exista; no se guarda ese string compuesto
+--   como columna propia acá para no duplicar lo que ya expresan `plan`+`periodo` juntos (mismo
+--   criterio anti-redundancia ya aplicado en este archivo, ej. al descartar una columna
+--   `proveedor_auth` separada para `usuario.password_hash`/`google_id`, más arriba).
+-- - `estado_suscripcion_negocio` ('activa' | 'vencida' | 'cancelada') — el estado de ESE período
+--   pago puntual, independiente de si `plan` sigue diciendo 'turnario_pro': una vez que un negocio
+--   se suscribe por primera vez, `plan` puede quedarse en 'turnario_pro' de forma permanente
+--   (registro de "este negocio alguna vez pagó", útil para analítica futura) mientras `estado`
+--   refleja el momento actual ('vencida' = pasó `vencimiento` sin renovarse; 'cancelada' = el
+--   administrador pidió cancelar, pero puede seguir con acceso hasta que venza lo ya pagado —
+--   patrón común de SaaS). Bajo ese criterio, el ACCESO EFECTIVO a las funciones Pro no es
+--   `plan = 'turnario_pro'` solo — es `plan = 'turnario_pro' AND estado = 'activa' AND
+--   vencimiento >= now()` (recomendación para Backend, no una regla de la base de datos: ningún
+--   job de este ciclo recalcula `estado`/`plan` automáticamente al pasar `vencimiento` — mismo
+--   criterio de "resolver en la capa de aplicación, no con lógica implícita en la base de datos"
+--   ya aplicado sistemáticamente en este archivo, ej. el fallback de `duracion_cita_min` o el gate
+--   de `es_rubro_salud`). Es una recomendación, no una obligación: si Backend prefiere resetear
+--   `plan` a 'gratis' (+ `periodo`/`vencimiento` a NULL) al cancelar/vencer, el CHECK de abajo
+--   sigue siendo válido para ese otro criterio también — decisión de Backend al implementar la
+--   verificación real.
+--
+-- CHECK — `periodo`/`vencimiento` NULL si y solo si `plan = 'gratis'`, mismo patrón de invariante
+-- cruzada entre columnas que `ck_usuario_password_o_google` (más arriba): a nivel de base de
+-- datos, no solo de convención documentada, para que una fila inconsistente (ej. `plan = 'gratis'`
+-- con un `vencimiento` seteado) sea imposible de insertar por error, no solo "no debería pasar".
+--
+-- Auditoría completa (`creado_por`/`modificado_por`, además de `creado_en`/`modificado_en`): a
+-- diferencia de `usuario_preferencias`/`usuario_preferencias_notificacion` (las omiten porque el
+-- único actor posible es siempre el propio dueño de la fila, dato 100% redundante — regla general
+-- en `modelo-datos.md` §1), acá el "dueño" es `negocio_id`, pero `negocio_administrador` es N:M —
+-- puede haber más de un administrador para el mismo negocio, así que QUIÉN activó/canceló Turnario
+-- Pro no es deducible de `negocio_id` solo. Mismo criterio ya aplicado a
+-- `negocio`/`paciente`/`tratamiento`/`nota_medica` (tablas donde quien escribe puede no coincidir
+-- con un único dueño obvio), y particularmente apropiado acá por ser un dato de facturación, donde
+-- "quién autorizó este cambio" es una pregunta de negocio legítima (auditoría/soporte/disputas).
+-- Sin `eliminado_en` (soft delete): ninguna otra tabla referencia `suscripcion_negocio.id`, y el
+-- ciclo de vida de esta fila es de ESTADO MUTABLE (activar/cancelar/vencer/reactivar in-place), no
+-- de alta/baja — mismo motivo que `usuario_preferencias`.
+--
+-- Deliberadamente NO se modela en este ciclo (no es un olvido) — mismo criterio de "no
+-- sobre-construir" ya aplicado en el resto de este esquema: ninguna columna para los datos de
+-- verificación real de Google Play (`purchaseToken`/el resultado de la Android Publisher API). Hay
+-- un precedente directo en este mismo archivo que en un primer momento parece sugerir lo
+-- contrario — `pago.referencia_externa TEXT` (más arriba) es exactamente ese patrón, una columna
+-- nullable agregada "por si hace falta después" para un dato externo de un proveedor que hoy solo
+-- tiene un Mock — pero, verificado contra el código real (sin ninguna coincidencia en
+-- `backend/src/`), ESA columna tampoco tiene ningún consumidor hoy, ni siquiera el propio
+-- `MockPagoProvider` la escribe: ya es, en la práctica, el contraejemplo de "no sobre-construir"
+-- que este ciclo prefiere no repetir una segunda vez. La activación simulada de este ciclo
+-- (Backend, próxima ronda) no produce ningún `purchaseToken` real que guardar — un Mock que simula
+-- "la compra funcionó" no tiene un dato externo genuino que persistir todavía. Cuando la
+-- integración real exista (después de que el CEO complete `08-despliegue/google-play-billing.md`
+-- §2/§6), agregar recién ahí una columna nueva (ej. `purchase_token TEXT`, nullable) en una
+-- migración incremental futura — no antes.
+-- Tampoco se modela el precio/monto de la suscripción (a diferencia de `pago.monto`, que sí
+-- registra el importe real de cada pago de turno): USD 9/mes y USD 86.40/año son un dato de
+-- CONFIGURACIÓN DE PRODUCTO (vive en Play Console y en `02-backlog/backlog.md` como referencia),
+-- no un hecho transaccional por fila mientras la activación sea simulada y no exista ningún cobro
+-- real que registrar — un campo de monto hoy derivaría 100% de `periodo` sin ningún consumidor que
+-- lo necesite. Si el precio pudiera variar por negocio (descuentos, planes legacy) o hiciera falta
+-- el importe real cobrado por Google, ese es el momento de agregarlo — no antes.
+CREATE TYPE plan_negocio AS ENUM ('gratis', 'turnario_pro');
+CREATE TYPE periodo_suscripcion AS ENUM ('mensual', 'anual');
+CREATE TYPE estado_suscripcion_negocio AS ENUM ('activa', 'vencida', 'cancelada');
+
+CREATE TABLE suscripcion_negocio (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  negocio_id      UUID NOT NULL UNIQUE REFERENCES negocio(id),
+  plan            plan_negocio NOT NULL DEFAULT 'gratis',
+  periodo         periodo_suscripcion,
+  vencimiento     TIMESTAMPTZ,
+  estado          estado_suscripcion_negocio NOT NULL DEFAULT 'activa',
+  creado_en       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  creado_por      UUID,
+  modificado_en   TIMESTAMPTZ,
+  modificado_por  UUID,
+  CONSTRAINT ck_suscripcion_negocio_periodo_vencimiento_segun_plan CHECK (
+    (plan = 'gratis' AND periodo IS NULL AND vencimiento IS NULL)
+    OR (plan = 'turnario_pro' AND periodo IS NOT NULL AND vencimiento IS NOT NULL)
+  )
+);
+
+-- Todo negocio EXISTENTE (creado antes de este ciclo) queda en plan 'gratis' automáticamente, sin
+-- backfill manual: en este archivo (001_init.sql) es un no-op por construcción — una base nueva
+-- todavía no tiene ninguna fila en `negocio` en el momento en que corre este DDL, mismo motivo por
+-- el que 001_init.sql nunca backfillea nada (ver el header de `004_notificaciones.sql`). Contra un
+-- ambiente YA migrado (Render, con negocios reales ya creados) el backfill equivalente SÍ hace
+-- falta y vive en `005_suscripcion_negocio.sql` (`INSERT ... SELECT id FROM negocio ON CONFLICT DO
+-- NOTHING`, confiando en los mismos DEFAULT de arriba) — no acá.
+--
+-- Recomendación para Backend (no implementada acá, fuera de alcance de DBA) — cuándo se crea la
+-- fila para un negocio NUEVO (creado después de este ciclo): la forma más simple es agregar un 4to
+-- INSERT a la misma transacción de `POST /auth/registro-negocio` (`backend/src/routes/auth.ts`),
+-- justo después del INSERT sobre `negocio_administrador` — `INSERT INTO suscripcion_negocio
+-- (negocio_id) VALUES ($1)`, dejando plan/estado en sus DEFAULT ('gratis'/'activa'). Verificado
+-- contra ese código real que esto es seguro bajo la policy de INSERT de más abajo:
+-- `withTransaction` ya setea `app.usuario_id` al `usuarioId` recién generado ANTES del primer
+-- INSERT de esa transacción (no en un `set_config` a mitad de camino), y para ese momento el
+-- INSERT sobre `negocio_administrador (negocioId, usuarioId)` ya corrió — la policy de INSERT de
+-- `suscripcion_negocio` (`EXISTS` contra `negocio_administrador`) encuentra esa fila y pasa. Si en
+-- cambio Backend prefiere no tocar `registro-negocio` y resolverlo de forma perezosa (mismo patrón
+-- ya usado para `usuario_preferencias`/`paciente`: `INSERT ... ON CONFLICT (negocio_id) DO
+-- NOTHING` la primera vez que se lee/escribe el estado del plan), también es válido — cualquiera
+-- de los dos caminos deja, en la práctica, a un negocio nuevo sin fila todavía por un tiempo corto;
+-- no es un problema mientras ningún endpoint dependa de esta tabla (fuera de alcance de este
+-- ciclo), pero SÍ hay que resolverlo antes de conectar el chequeo de límites: un negocio sin fila
+-- en `suscripcion_negocio` debe tratarse como 'gratis' en cualquier lectura (`COALESCE`/fallback
+-- explícito), nunca como "sin límite" por accidente — chequear explícitamente por
+-- `plan = 'turnario_pro'` (en vez de `plan <> 'gratis'`) ya hace esto seguro por default en SQL:
+-- si no hay fila que joinear, la comparación da `NULL`/falso, no verdadero.
+--
+-- RLS — FORCE desde el primer commit (misma lección de §5bis, más arriba: cualquier tabla nueva la
+-- necesita desde el día 1). 3 policies separadas (no una única simétrica como
+-- `usuario_preferencias_acceso_propio`) porque acá, a diferencia de esa tabla, el criterio de
+-- LECTURA es más ancho que el de ESCRITURA — pedido explícito de esta ronda: "quién puede
+-- leer/escribir el estado del plan de un negocio (administrador del negocio, y lectura para
+-- profesionales de ese negocio para poder mostrar el estado 'gratis: 42/60 turnos este mes' en
+-- Mobile)":
+-- - SELECT: cualquier STAFF del negocio — administrador O profesional activo en ese negocio_id —
+--   mismo criterio EXISTS/OR que `turno_acceso_negocio_o_cliente` (sin la rama de `cliente_id`:
+--   ningún caso de uso de este ciclo necesita que un cliente vea el plan del negocio). Sin filtrar
+--   por `negocio_profesional.activo` — mismo criterio ya aplicado en
+--   `paciente_acceso_propio_profesional` y en la rama de staff de `turno_acceso_negocio_o_cliente`,
+--   ninguna de las dos lo exige.
+-- - INSERT/UPDATE: solo ADMINISTRADOR del negocio — mismo criterio que
+--   `servicio_insert_admin_del_negocio`/`servicio_update_admin_del_negocio` (el profesional puede
+--   VER el estado del plan, pero gestionar la suscripción — dato de facturación del negocio — es
+--   una decisión de administrador, igual que dar de alta un servicio o un profesional). Sin
+--   `WITH CHECK` explícito en el UPDATE (a diferencia de `turno_acceso_negocio_o_cliente`/
+--   `usuario_preferencias_acceso_propio`): mismo criterio que `servicio_update_admin_del_negocio`/
+--   `negocio_profesional_update_admin_del_negocio` — Postgres reutiliza el `USING` como chequeo de
+--   la fila nueva cuando no se da un `WITH CHECK` separado, y `negocio_id` no es un valor que
+--   ningún flujo de este ciclo necesite reasignar (mismo motivo que `servicio.negocio_id`).
+-- - Sin policy de DELETE — mismo motivo que `negocio_administrador`/`usuario_preferencias`: ningún
+--   endpoint/HU de este ciclo borra una suscripción (cancelar es un UPDATE de `estado`, no un
+--   DELETE de la fila) — fail-closed por default (RLS deniega cualquier comando sin policy
+--   propia), documentado como intencional, no un olvido.
+ALTER TABLE suscripcion_negocio ENABLE ROW LEVEL SECURITY;
+ALTER TABLE suscripcion_negocio FORCE ROW LEVEL SECURITY; -- ver nota junto a `profesional`, más arriba en este archivo
+
+CREATE POLICY suscripcion_negocio_select_staff_del_negocio ON suscripcion_negocio
+  FOR SELECT USING (
+    EXISTS (
+      SELECT 1 FROM negocio_administrador na
+      WHERE na.negocio_id = suscripcion_negocio.negocio_id
+        AND na.usuario_id = NULLIF(current_setting('app.usuario_id', true), '')::uuid
+    )
+    OR EXISTS (
+      SELECT 1 FROM negocio_profesional np
+      JOIN profesional p ON p.id = np.profesional_id
+      WHERE np.negocio_id = suscripcion_negocio.negocio_id
+        AND p.usuario_id = NULLIF(current_setting('app.usuario_id', true), '')::uuid
+    )
+  );
+
+CREATE POLICY suscripcion_negocio_insert_admin_del_negocio ON suscripcion_negocio
+  FOR INSERT WITH CHECK (
+    EXISTS (
+      SELECT 1 FROM negocio_administrador na
+      WHERE na.negocio_id = suscripcion_negocio.negocio_id
+        AND na.usuario_id = NULLIF(current_setting('app.usuario_id', true), '')::uuid
+    )
+  );
+
+CREATE POLICY suscripcion_negocio_update_admin_del_negocio ON suscripcion_negocio
+  FOR UPDATE USING (
+    EXISTS (
+      SELECT 1 FROM negocio_administrador na
+      WHERE na.negocio_id = suscripcion_negocio.negocio_id
+        AND na.usuario_id = NULLIF(current_setting('app.usuario_id', true), '')::uuid
+    )
+  );
+
+-- [BACKEND] suscripcion_negocio_select_negocio_en_contexto — pendiente de ratificación por DBA
+-- (2026-08-14, mismo mecanismo ya usado y luego ratificado por DBA para
+-- `profesional_update_propio_duracion_cita`/`turno_select_publico`/`notificacion_insert_job_sistema`
+-- en este mismo archivo — ver 03-arquitectura/modelo-datos.md §5bis: Backend agrega acá una
+-- policy acotada para cerrar un gap real encontrado al conectar código nuevo contra RLS, marcada
+-- para revisión de DBA en su próximo ciclo).
+--
+-- Gap encontrado al implementar el chequeo de "60 turnos confirmados/mes" (HU-29,
+-- backend/src/dominio/suscripciones.ts) en `POST /turnos` (backend/src/routes/turnos.ts): ese
+-- endpoint corre con `requireAuth('cliente')` — `app.usuario_id` en su transacción es el CLIENTE
+-- que reserva, nunca administrador ni profesional de ESE negocio, así que
+-- `suscripcion_negocio_select_staff_del_negocio` (arriba) nunca lo habilita, sin importar cuál
+-- sea el negocio. Sin esta policy, el chequeo del límite en el único camino de "reserva de
+-- cliente sin seña -> turno nace confirmado directo" (ver ese archivo) leería siempre 0 filas
+-- (fail-closed silencioso de RLS) y trataría CUALQUIER negocio, incluido uno con Turnario Pro
+-- activo, como si nunca tuviera fila -> 'gratis' implícito (ver `obtenerEstadoSuscripcion`,
+-- dominio/suscripciones.ts) — un negocio pago quedaría erróneamente limitado a 60 turnos/mes por
+-- esta lectura. No es un problema de seguridad (nunca deja pasar de más), pero sí un bug
+-- funcional real, y el motivo por el que esta policy se agrega en el mismo ciclo que el código
+-- que la necesita, no se posterga.
+--
+-- Por qué acotada por `app.negocio_id` (no por `app.usuario_id`, a diferencia de las 3 policies
+-- de arriba): el actor legítimo acá (el cliente reservando) nunca va a tener una fila propia en
+-- `negocio_administrador`/`negocio_profesional` para este negocio — no hay forma de acotar por
+-- identidad del actor sin excluir exactamente al actor legítimo. `obtenerEstadoSuscripcion`
+-- (dominio/suscripciones.ts) fija `app.negocio_id` al negocio YA VALIDADO de la operación en
+-- curso (ej. `servicio.negocio_id`, resuelto server-side, nunca un valor crudo del body)
+-- INMEDIATAMENTE antes de este SELECT, sin confiar en lo que haya seteado el resto del handler —
+-- mismo criterio defensivo que el resto de este archivo.
+--
+-- Alternativa evaluada y descartada — función `SECURITY DEFINER` (en vez de policy nueva): con
+-- `FORCE ROW LEVEL SECURITY` activo y sin separación de roles todavía (hoy un solo rol para
+-- migración+runtime, ver el bloque grande de RLS más arriba y §5bis), una función
+-- `SECURITY DEFINER` de un owner sin `BYPASSRLS` NO bypassea RLS por sí sola (mismo warning ya
+-- documentado junto a `turno_ocupacion_publica`/`turno_propio_para_gestion`, más abajo) —
+-- necesitaría de todos modos una policy de respaldo como esta, así que se prefiere la policy
+-- sola, más simple, en vez de dos capas.
+--
+-- Alcance de la relajación: SOLO lee `plan`/`periodo`/`vencimiento`/`estado` de la fila del
+-- negocio con el que la transacción YA está interactuando — no expone la suscripción de otros
+-- negocios, y no habilita ningún INSERT/UPDATE (siguen exclusivamente
+-- `suscripcion_negocio_insert_admin_del_negocio`/`_update_admin_del_negocio`, arriba). Dato de
+-- sensibilidad baja en este contexto puntual (un cliente en medio de reservar con ESE negocio
+-- puede enterarse de si tiene o no Turnario Pro activo — nunca de negocios con los que no está
+-- interactuando), comparable en espíritu a que el propio catálogo público de negocios/servicios
+-- (`GET /negocios`, `GET /negocios/:id/servicios`) ya es de lectura pública sin autenticación.
+--
+-- Único call site hoy: `obtenerEstadoSuscripcion` (dominio/suscripciones.ts) — usado por los 2
+-- chequeos de límite de HU-29 y por `GET /negocios/:id/plan` (aunque para administrador/
+-- profesional ese último ya pasa por la policy de arriba sin necesitar esta). Si se agrega un
+-- segundo call site con un criterio distinto, revisar explícitamente que esta policy siga siendo
+-- la mínima necesaria — mismo criterio de revisión que ya dejó DBA junto a
+-- `profesional_update_propio_duracion_cita`.
+CREATE POLICY suscripcion_negocio_select_negocio_en_contexto ON suscripcion_negocio
+  FOR SELECT USING (
+    negocio_id = NULLIF(current_setting('app.negocio_id', true), '')::uuid
+  );
+
+-- ---------------------------------------------------------------------------
+-- Índice adicional sobre `turno` (tabla existente, sin cambios de columnas) — soporte del límite
+-- de 60 turnos confirmados/mes del plan gratis (HU-29). La query de chequeo (hot path: corre en
+-- cada intento de reserva de un negocio en plan gratis) tiene la forma `SELECT count(*) FROM turno
+-- WHERE negocio_id = ? AND estado = 'confirmado' AND inicio >= <inicio de mes> AND inicio <
+-- <inicio de mes siguiente>` — índice parcial (mismo patrón que `uq_turno_slot_activo`/
+-- `idx_notificacion_destinatario_no_leida`) filtrado por `estado = 'confirmado'`, columnas
+-- `(negocio_id, inicio)` en ese orden (igualdad primero, rango después).
+--
+-- Supuesto no verificado, señalado para Backend: se indexa por `turno.inicio` (la fecha/hora DEL
+-- TURNO), no por `turno.creado_en` (cuándo se creó/confirmó el registro) — interpretación más
+-- consistente con la redacción del backlog ("60, ~2/día", una medida de densidad de agenda, no de
+-- "cuándo se tocó la fila"), y coherente con que `uq_turno_slot_activo` ya indexa la disponibilidad
+-- real por `inicio`. Si Backend/Product Manager definen lo contrario al implementar el chequeo (ej.
+-- contar por `creado_en`), este índice no sirve para esa query — cambiarlo es una migración de una
+-- sola línea (`CREATE INDEX ... ON turno (negocio_id, creado_en) WHERE ...`), no un rediseño.
+-- No se agrega índice para el otro límite de HU-29 ("1 profesional por negocio"): ya está cubierto
+-- por la PK compuesta `(negocio_id, profesional_id)` de `negocio_profesional` (negocio_id es la
+-- columna líder) — ver `modelo-datos.md` §6.
+CREATE INDEX idx_turno_negocio_confirmado_inicio
+  ON turno (negocio_id, inicio)
+  WHERE estado = 'confirmado';
