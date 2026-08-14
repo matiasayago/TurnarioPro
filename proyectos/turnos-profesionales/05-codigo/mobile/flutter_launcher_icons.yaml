@@ -1,0 +1,46 @@
+# Config de `flutter_launcher_icons` — branding real de la app (ícono del launcher nativo +
+# favicon/PWA icons de `web/`), a partir de los 3 PNG provistos por el CEO en `assets/icon/`
+# (el mismo `icon.png` también se reusa como logo en `LoginScreen`, ver
+# `lib/screens/login_screen.dart`).
+#
+# Estado de las plataformas nativas (2026-08): este proyecto Flutter hoy solo tiene generada la
+# carpeta `web/` — no existen `android/` ni `ios/` (no se corrió `flutter create
+# --platforms=android,ios .` todavía). Las secciones `android`/`ios`/`adaptive_icon_*` de abajo
+# quedan configuradas igual, listas para el día que esas carpetas existan: alcanza con volver a
+# correr `dart run flutter_launcher_icons` (sin flags — usa este archivo por convención de
+# nombre) una vez creadas, no hace falta tocar nada acá.
+#
+# IMPORTANTE — no correr el comando de arriba tal cual mientras `android/` no exista: la
+# generación de ícono Android intenta reescribir `android/app/src/main/AndroidManifest.xml`, que
+# todavía no existe, y esa falla (error real, no warning) aborta el proceso completo ANTES de
+# llegar a generar `web` (ver `android.dart`/`main.dart` del paquete instalado en
+# `.dart_tool`/pub cache). Para regenerar solo `web` en este estado transitorio se usó un config
+# temporal con únicamente la sección `web` de abajo (creado y borrado en la misma integración del
+# logo, no queda commiteado).
+flutter_launcher_icons:
+  image_path: "assets/icon/icon.png"
+
+  # --- Android (pendiente de `flutter create --platforms=android .`) ---
+  android: "launcher_icon"
+  min_sdk_android: 21
+  # No tenemos un asset de foreground aislado con transparencia — los 3 PNG que mandó el CEO son
+  # la misma imagen ya compuesta, con el degradado azul→violeta "horneado" adentro (sin canal
+  # alfa real, ver assets/icon/icon.png). Se usa igual como foreground del ícono adaptativo y,
+  # de background, un color sólido medio tomado del propio degradado — el mismo que ya es
+  # `primary` de la app (`AppPalette.primaryLight`, `lib/theme/app_colors.dart`), para quedar
+  # on-brand con el resto de la UI en vez de inventar un hex nuevo.
+  adaptive_icon_background: "#6C7FE0"
+  adaptive_icon_foreground: "assets/icon/adaptive-icon.png"
+
+  # --- iOS (pendiente de `flutter create --platforms=ios .`) ---
+  ios: true
+  # El PNG fuente trae canal alfa (aunque 100% opaco en todos sus píxeles) — Apple rechaza
+  # íconos con canal alfa en el App Store, así que se remueve en la generación.
+  remove_alpha_ios: true
+
+  # --- Web (única plataforma que existe hoy) ---
+  web:
+    generate: true
+    image_path: "assets/icon/icon.png"
+    background_color: "#FFFFFF"
+    theme_color: "#6C7FE0"

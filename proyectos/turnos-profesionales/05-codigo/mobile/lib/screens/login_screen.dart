@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../api_client.dart';
 import '../state/sesion.dart';
+import '../theme/app_radius.dart';
+import '../theme/app_spacing.dart';
 import '../widgets/google_sign_in_button.dart';
 
 /// HU-01: login de cliente o profesional. El registro de negocio/administrador (HU-00a) y el
@@ -175,6 +177,29 @@ class _LoginScreenState extends State<LoginScreen> {
           mainAxisAlignment: MainAxisAlignment.center,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            // Branding real de la app (logo provisto por el CEO — ver flutter_launcher_icons.yaml
+            // / flutter_native_splash.yaml para el mismo asset usado como ícono/splash). Envuelto
+            // en `Center` para que no se estire al ancho completo pese al `CrossAxisAlignment
+            // .stretch` de esta Column (mismo criterio que el resto de la pantalla).
+            //
+            // El PNG trae su propio fondo blanco opaco "horneado" detrás del ícono redondeado
+            // (no hay una versión con transparencia, ver flutter_launcher_icons.yaml) — en tema
+            // oscuro eso se ve como un cuadrado blanco con esquinas filosas flotando sobre
+            // `background`. `ClipRRect` con `AppRadius.card` redondea ese borde exterior para que
+            // se lea como una tarjeta de logo intencional en vez de un recorte accidental, en los
+            // dos temas.
+            Center(
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(AppRadius.card),
+                child: Image.asset(
+                  'assets/icon/icon.png',
+                  width: 96,
+                  height: 96,
+                  fit: BoxFit.contain,
+                ),
+              ),
+            ),
+            const SizedBox(height: AppSpacing.xl),
             TextField(controller: _emailCtrl, decoration: const InputDecoration(labelText: 'Email')),
             const SizedBox(height: 12),
             TextField(
