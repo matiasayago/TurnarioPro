@@ -13,6 +13,7 @@ import {
   montoPositivoSchema,
   respuestaValidacionFallida,
 } from '../dominio/validacion';
+import { LimitePlanGratisError, cuerpoLimitePlanAlcanzado, exigirLimiteTurnosConfirmadosDelMes } from '../dominio/suscripciones';
 
 export const profesionalesRouter = Router();
 
@@ -429,9 +430,11 @@ profesionalesRouter.get(
 // Contrato: POST /profesionales/:id/turnos, body { paciente_id: uuid, servicio_id: uuid,
 // inicio: ISO-8601, cobrar_sena: boolean } -> 201 { id, paciente_id, servicio_id, inicio, fin,
 // estado, requiere_pago, monto_sena } | 400 datos inválidos, o `inicio` no alineado a la grilla
-// de disponibilidad publicada (RN1) | 403 rol distinto de profesional o `:id` ajeno | 404
-// paciente/servicio inexistente, servicio de un negocio donde no trabajás, o todavía no asociaste
-// ese servicio a tu agenda (RN4) | 409 el horario ya está ocupado por otro turno/excepción (RN2).
+// de disponibilidad publicada (RN1) | 402 (HU-29) `cobrar_sena=false` y el negocio (plan gratis)
+// ya alcanzó el límite de 60 turnos confirmados este mes — ver dominio/suscripciones.ts | 403 rol
+// distinto de profesional o `:id` ajeno | 404 paciente/servicio inexistente, servicio de un
+// negocio donde no trabajás, o todavía no asociaste ese servicio a tu agenda (RN4) | 409 el
+// horario ya está ocupado por otro turno/excepción (RN2).
 profesionalesRouter.post(
   '/:id/turnos',
   requireAuth('profesional'),
@@ -537,6 +540,18 @@ profesionalesRouter.post(
     try {
       await withTransaction(
         async (client) => {
+          // HU-29 (Turnario Pro) — el chequeo del límite "60 turnos confirmados/mes" tiene que
+          // correr ACÁ, antes del INSERT: este camino (`cobrar_sena=false`) deja nacer el turno
+          // DIRECTO en 'confirmado' — no hay ningún punto posterior en el que este turno puntual
+          // cambie de estado, así que este es el ÚNICO momento en que se puede bloquear antes de
+          // que "cuente". (El otro camino de este mismo endpoint, `cobrar_sena=true`, nace
+          // 'pendiente_de_pago' y el chequeo se difiere — ver dominio/suscripciones.ts y
+          // turnos.ts/POST / para el resto de los caminos documentados, incluido uno que todavía
+          // no existe en este código.) Se salta completo si el negocio tiene Turnario Pro activo.
+          if (estadoInicial === 'confirmado') {
+            await exigirLimiteTurnosConfirmadosDelMes(client, servicio.negocio_id, inicioDate);
+          }
+
           await client.query(
             `INSERT INTO turno (id, negocio_id, profesional_id, servicio_id, cliente_id, inicio, fin, estado, creado_en)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
@@ -589,6 +604,12 @@ profesionalesRouter.post(
         { usuarioId: req.auth!.sub, negocioId: req.auth!.negocio_id }
       );
     } catch (err: any) {
+      // HU-29 — ver el comentario junto a `exigirLimiteTurnosConfirmadosDelMes` más arriba y
+      // `cuerpoLimitePlanAlcanzado` (dominio/suscripciones.ts) para el razonamiento completo del
+      // 402 (en vez de 403): la identidad/rol de quien llama es correcta, lo que falla es el plan.
+      if (err instanceof LimitePlanGratisError) {
+        return res.status(402).json(cuerpoLimitePlanAlcanzado(err.message));
+      }
       // Mismo código 23505 (unique_violation de `uq_turno_slot_activo`) que `POST /turnos` — ver
       // ese comentario: última línea de defensa si 2 requests corren la misma ventana en paralelo
       // (ej. el profesional carga un turno a mano justo cuando el cliente reserva ese mismo slot).
