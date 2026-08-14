@@ -13,6 +13,7 @@ import 'ayuda_soporte_screen.dart';
 import 'configuracion_consultorio_screen.dart';
 import 'configuracion_notificaciones_screen.dart';
 import 'editar_perfil_screen.dart';
+import 'nueva_cita_screen.dart';
 import 'precios_senas_screen.dart';
 import 'privacidad_screen.dart';
 import 'reportes_screen.dart';
@@ -37,10 +38,14 @@ import 'reportes_screen.dart';
 /// y, apuntando a la MISMA pantalla (`precios_senas_screen.dart`, Precios y Señas), tanto
 /// "Configuración de Pagos" (Panel Profesional) como "Pagos y Señas" (su propia sección) — ambos
 /// ítems son, en los hechos, el mismo backend (seña por servicio, HU-04b), sin wireframe propio
-/// separado que los distinga en `mapa-pantallas.md` §5.11bis. Se agregan además 2 pantallas
-/// estáticas sin backend, "Ayuda y Soporte" (`ayuda_soporte_screen.dart`) y "Acerca de"
-/// (`acerca_de_screen.dart`). El resto (Turnario Pro · Suscripción, Idioma, Nueva Cita,
-/// Autorizaciones Médicas) sigue sin backend y va a `ProximamenteScreen`.
+/// separado que los distinga en `mapa-pantallas.md` §5.11bis. "Nueva Cita" (HU-23,
+/// `nueva_cita_screen.dart`, variante "Crear Nueva Cita" de `mapa-pantallas.md` §5.7bis) abre
+/// como modal de pantalla completa vía `AppModalSheet.show` (no [_irA], que solo empuja una ruta
+/// normal) — al crear la cita con éxito, la confirmación se muestra acá mismo, después de que el
+/// modal se cierra solo (ver [_abrirNuevaCita]). Se agregan además 2 pantallas estáticas sin
+/// backend, "Ayuda y Soporte" (`ayuda_soporte_screen.dart`) y "Acerca de"
+/// (`acerca_de_screen.dart`). El resto (Turnario Pro · Suscripción, Idioma, Autorizaciones
+/// Médicas) sigue sin backend y va a `ProximamenteScreen`.
 class ConfiguracionScreen extends StatelessWidget {
   const ConfiguracionScreen({super.key, required this.onIrAHorarios, required this.onIrAPacientes});
 
@@ -123,7 +128,7 @@ class ConfiguracionScreen extends StatelessWidget {
                     _MenuTile(
                       icon: Icons.event_note_outlined,
                       label: 'Nueva Cita',
-                      onTap: () => _irAProximamente(context, 'Nueva Cita'),
+                      onTap: () => _abrirNuevaCita(context),
                     ),
                     _MenuTile(
                       icon: Icons.insert_chart_outlined,
@@ -194,6 +199,22 @@ class ConfiguracionScreen extends StatelessWidget {
   /// datos reales + las 2 pantallas estáticas nuevas de esta ronda usan este helper.
   void _irA(BuildContext context, Widget pantalla) {
     Navigator.push(context, MaterialPageRoute(builder: (_) => pantalla));
+  }
+
+  /// Abre "Crear Nueva Cita" (HU-23) como modal de pantalla completa — a diferencia de [_irA],
+  /// reusa `AppModalSheet.show` (mismo mecanismo que `elegirNegocio`, ver
+  /// `widgets/selector_negocio.dart`) porque `NuevaCitaScreen` ya se construye sobre
+  /// `AppModalSheet`; empujarla con [_irA] duplicaría el envoltorio de pantalla. Al crear la
+  /// cita con éxito, `NuevaCitaScreen` se cierra sola con `Navigator.pop(true)` — acá se espera
+  /// ese resultado para recién mostrar la confirmación sobre ESTA pantalla (Configuración), en
+  /// vez de sobre el modal que ya se está cerrando.
+  Future<void> _abrirNuevaCita(BuildContext context) async {
+    final creada = await AppModalSheet.show<bool>(context, builder: (_) => const NuevaCitaScreen());
+    if (creada == true && context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Cita creada y cliente notificado.')),
+      );
+    }
   }
 }
 
