@@ -230,6 +230,16 @@ async function main() {
   );
 
   // --- De yapa: autorización y validación del endpoint nuevo (PATCH /profesionales/:id/configuracion) ---
+  // HU-29 (Turnario Pro, 2026-08-14): el plan gratis limita 1 profesional ACTIVO por negocio —
+  // este negocio ya tiene 1 (el de arriba), así que dar de alta un segundo profesional acá
+  // (irrelevante para D10, solo hace falta para el control de autorización cruzada de abajo)
+  // necesita que el negocio tenga Turnario Pro activo, o el alta se bloquea con 402 (ver
+  // dominio/suscripciones.ts). Activación simulada (mock, mismo endpoint que usa Mobile) — no
+  // se prueba nada de HU-29 en sí acá, solo se evita el bloqueo para no acoplar este script,
+  // preexistente, a esa historia.
+  const activarPro = await req('POST', `/negocios/${negocioId}/suscripcion`, { periodo: 'mensual' }, adminToken);
+  assert(activarPro.status === 200, 'activar Turnario Pro (mock) para poder sumar un segundo profesional');
+
   const otroProf = await req(
     'POST',
     `/negocios/${negocioId}/profesionales`,
