@@ -1265,3 +1265,86 @@ Detalle completo en `03-arquitectura/modelo-datos.md` §2novies/§5sexies. Resum
   recién acordado arriba), baja/pausa de profesional o remoción de servicio (sin endpoint), pantalla
   de registro de negocio (HU-00a, gap ya documentado desde antes de esta ronda), resto de HU-31
   (horario general, dirección detallada, teléfono, logo).
+
+## RLS de administrador — acceso de solo lectura al historial de pacientes (fast-follow de E15) — DBA (2026-08-15)
+
+Detalle completo, razonamiento y verificación contra el código real de Backend en
+`03-arquitectura/modelo-datos.md` §5septies (sección nueva). Resumen para reutilizar:
+
+- **Contexto:** cierra el fast-follow que la entrada anterior de este archivo ("E15 'Modo
+  Administrador v1'") dejó acordado: el CEO pidió "acceso completo" al historial de pacientes de
+  su negocio para el rol `administrador` (rechazando el default conservador — sin acceso — que
+  proponía Product Manager en `02-backlog/backlog.md`), y se secuenció como una ronda separada de
+  DBA primero, Backend/Mobile después, en vez de meterlo en la ronda de E15.
+- **Decisión de alcance, evaluada explícitamente por DBA, no asumida:** SOLO LECTURA (`SELECT`),
+  no escritura. "Acceso completo" se interpretó como "el historial ENTERO visible" (ficha +
+  tratamientos + notas, sin recortes), no como "con permiso de edición incluido" — nada en el
+  pedido del CEO ni en ninguna HU/backlog pide que el administrador edite o borre un registro
+  clínico ajeno, y RN7/RN13/D3 siguen íntegramente vigentes para la escritura (autoría clínica del
+  profesional que atendió, con implicancia médico-legal). Mismo criterio de mínimo privilegio ya
+  aplicado en otras decisiones de este proyecto ante instrucciones ambiguas: implementar la
+  lectura más angosta que satisface lo pedido, dejar la más amplia como extensión futura aditiva
+  si se llega a pedir explícitamente.
+- **Diseño técnico:** 3 policies `FOR SELECT` nuevas (`paciente_select_admin_del_negocio`,
+  `tratamiento_select_admin_del_negocio`, `nota_medica_select_admin_del_negocio`); ninguna de las
+  3 policies `FOR ALL` ya existentes se modifica ni se separa. Se evaluó separar cada `FOR ALL` en
+  `SELECT`/resto (tal como sugería un comentario ya existente en el DDL) y se descartó por
+  innecesario: Postgres combina con OR, por comando, todas las policies `PERMISSIVE` que aplican a
+  ese comando — sumar una `FOR SELECT` nueva ya amplía la lectura sin tocar las 3 policies `FOR
+  ALL` originales (que siguen gobernando en exclusiva INSERT/UPDATE/DELETE). Menor superficie de
+  cambio, mismo resultado, sin riesgo de regresión sobre policies ya en producción.
+- **Verificado contra el código real de Backend** (`05-codigo/backend/src/routes/
+  profesionales.ts`) antes de decidir que el agregado es inofensivo: las únicas rutas que hoy leen
+  o escriben `paciente`/`tratamiento`/`nota_medica` exigen `requireAuth('profesional')` +
+  `esPropioProfesional(req)` y fijan `app.usuario_id` al propio profesional — ningún código
+  depende de que estas tablas tengan una única policy `FOR ALL`, así que el agregado no cambia el
+  comportamiento de ninguna ruta existente.
+- **Migración:** `05-codigo/database/migrations/007_paciente_historial_acceso_administrador.sql`
+  (delta para Render, puramente aditivo, sin DDL de esquema ni backfill, 3 `CREATE POLICY`
+  envueltos en un bloque `DO` con guard contra `pg_policy`, mismo patrón que `005`). A diferencia
+  del ciclo de `005_suscripcion_negocio.sql`, esta vez **sí se sincronizaron ambas copias** de
+  `001_init.sql` (`database/migrations/` y `backend/migrations/`), verificadas byte-idénticas.
+- **No aplicado contra Render** — queda listo para revisión y aplicación manual del Director
+  General IA, con aprobación del CEO, mismo flujo que las migraciones anteriores. No verificado
+  contra un Postgres real por el mismo motivo de siempre (sin `psql`/Docker en este entorno) —
+  balance de paréntesis de `001_init.sql` (ambas copias) y de `007_...sql` revisado
+  programáticamente antes de entregar.
+- **Fuera de alcance de este ciclo, por instrucción explícita:** código de Backend/Mobile (queda
+  para una ronda posterior sobre este mismo diseño) y `01-requisitos/documento-funcional.md`
+  (D3/RN7/§6)/`02-backlog/backlog.md` (E15) — la actualización formal de esos 2 documentos con la
+  resolución del CEO le corresponde a Business Analyst/Product Manager, no a DBA.
+
+## Fast-follow de acceso a historial de pacientes — cierre completo: Backend + Mobile (2026-08-15)
+
+Continuación directa de la entrada anterior (DBA). Migración 007 aplicada contra Render por el
+Director General IA (aprobación explícita del CEO) y verificada con datos reales: se creó una
+ficha de paciente real (turno + `PATCH /profesionales/:id/pacientes/:pacienteId`) y se confirmó,
+impersonando distintas identidades vía `set_config('app.usuario_id', ...)`, que (1) la
+administradora dueña del negocio ve paciente+tratamiento+nota_medica, (2) el profesional dueño de
+la ficha los sigue viendo igual que antes, y (3) un administrador de otro negocio no ve nada — los
+3 casos dentro de una transacción con `ROLLBACK` final (sin dejar los tratamiento/nota_medica de
+prueba, insertados a mano por no existir todavía un endpoint de alta para esas 2 tablas).
+
+- **Backend**: 3 endpoints nuevos en `negocios.ts`, todos `requireAuth('administrador')` y de
+  SOLO LECTURA — `GET /:id/pacientes` (listado, una fila por FICHA, no por persona — la misma
+  persona atendida por 2 profesionales del negocio aparece 2 veces, sin fusionar), `GET
+  /:id/pacientes/:fichaId` (detalle) y `GET /:id/pacientes/:fichaId/historial`
+  (turnos/tratamientos/notas). Hallazgo de seguridad propio, no pedido explícitamente pero
+  detectado y corregido en el mismo commit: como la policy RLS de DBA autoriza por
+  `app.usuario_id` solo (sin `app.negocio_id`, porque un mismo administrador puede operar 2+
+  negocios), cada query filtra ADEMÁS por `negocio_id = :id` en el propio SQL — sin ese filtro
+  explícito, un administrador de los negocios A y B podría pedir la ficha de B bajo la URL de A y
+  recibirla igual (la RLS lo autorizaría, es admin de B), rompiendo el aislamiento por negocio que
+  el resto de la API sí respeta. El subagente de Backend se cortó por límite de sesión justo antes
+  de correr sus propias pruebas — el Director General IA verificó personalmente el build y los 3
+  endpoints (+ 401/403 de autorización) contra Render real antes de dar la ronda por buena.
+- **Mobile**: 2 pantallas nuevas en `screens/administrador/` (`PacientesNegocioScreen` +
+  `FichaPacienteNegocioScreen`, esta última combina ficha+historial en una sola pantalla con
+  scroll — a diferencia de las 2 pantallas separadas del lado profesional, que existen por la
+  necesidad de alternar a modo edición, algo que acá no aplica) + un 5to ítem "Pacientes" en el
+  menú "Mi negocio" de `AdministradorShell`. Sin ningún botón de alta/edición, confirmado por el
+  Director General IA leyendo el código Y verificando visualmente en el Browser pane contra datos
+  reales de Render (ficha completa con alergias/notas médicas/contacto de emergencia, turno real
+  en el historial, estados vacíos de tratamientos/notas correctos).
+- Con esto, el fast-follow queda completo y desplegable — pendiente el mismo flujo de siempre
+  (PR → CI → aprobación del CEO → merge → deploy a Render).
