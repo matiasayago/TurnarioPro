@@ -1224,3 +1224,44 @@ Detalle completo en `03-arquitectura/modelo-datos.md` §2novies/§5sexies. Resum
   `pagos.ts`) — a futuro debe llamar `exigirLimiteTurnosConfirmadosDelMes` en el mismo punto de
   transición `pendiente_de_pago` → `confirmado`. Además: no existe UI real para el rol
   `administrador` (activar/cancelar Turnario Pro hoy solo tiene endpoint, no pantalla Mobile).
+
+## E15 "Modo Administrador v1" — shell + 5 pantallas Mobile (2026-08-15)
+
+- **Origen**: el rol `administrador` tenía 6 endpoints backend admin-only sin ningún consumidor
+  Mobile — `main.dart` mandaba cualquier cuenta con ese rol directo a `LoginScreen`, igual que un
+  usuario no autenticado. Product Manager consolidó el alcance de una v1 en `02-backlog/backlog.md`
+  (épica E15) antes de tocar código, priorizando lo que Backend ya soportaba sin cambios.
+- **Decisiones de producto del CEO, ambas resueltas en el momento (no bloquearon la ronda):**
+  (1) "No puede ser los dos" — un usuario NUNCA es Profesional y Administrador a la vez, confirma
+  la restricción ya existente del modelo de datos (`usuario.rol` es un único valor) como regla de
+  producto definitiva, no una limitación a resolver a futuro. (2) Acceso del administrador al
+  historial de pacientes: el CEO pidió **acceso completo** (no el default conservador que proponía
+  Product Manager) — pero al no tener backend hoy (choca con una regla de negocio ya documentada,
+  D3/RN7: "el historial de un paciente SOLO lo ve el profesional que lo atendió"), el CEO aceptó
+  la recomendación de secuenciarlo como **fast-follow aparte** (DBA+Backend+Mobile en otra ronda),
+  no meterlo en esta.
+- **Único gap de backend de toda la épica**: `GET /negocios/:id/profesionales` (roster del negocio
+  — el alta ya existía, faltaba el listado). Agregado, verificado por el Director General IA de
+  forma independiente contra Render real (roster vacío → con datos tras alta real, `id` correcto,
+  401/403 de autorización), sin necesitar ninguna migración nueva (las 3 tablas del JOIN ya eran
+  legibles bajo el contexto RLS de un administrador).
+- **Bug real encontrado y corregido durante la revisión** (no introducido por esta ronda, preexistía
+  desde HU-29): `tieneAccesoTurnarioPro` (`dominio/suscripciones.ts`) exigía `estado === 'activa'`
+  a secas, lo que cortaba el acceso a Turnario Pro apenas se cancelaba la suscripción — contradice
+  tanto el comentario del propio endpoint `PATCH /:id/suscripcion/cancelar` como la nota original
+  de DBA sobre 'cancelada' ("conserva el acceso hasta que venza lo ya pagado, patrón común de
+  SaaS"). Fix: `estado !== 'vencida'` en vez de `estado === 'activa'` — verificado en vivo contra
+  Render real (activar → cancelar → `acceso_turnario_pro` sigue `true` hasta el vencimiento).
+- **Mobile**: shell nuevo (`AdministradorShell`, hub simple sin bottom nav) + 4 pantallas nuevas
+  (`administrador/`: Servicios, Profesionales, Turnario Pro) + 1 pantalla existente reutilizada en
+  modo edición (`configuracion_consultorio_screen.dart`, antes de solo lectura para todo rol —
+  ahora edita si la sesión es `administrador`, sigue de solo lectura si es `profesional`, mismo
+  archivo/mismo `State` para ambos roles). Multi-negocio reusa el mecanismo ya construido para
+  HU-27 (`elegirNegocio`/`entrarANegocio`), sin selector nuevo. Verificado de punta a punta por el
+  Director General IA contra Render real: alta+listado de servicios y profesionales, el 402 del
+  límite del plan gratis con su acceso directo a Turnario Pro, y activar/cancelar Turnario Pro.
+- **Sigue fuera de alcance** (documentado en el backlog, no de esta ronda): reportes agregados de
+  negocio (HU-28, sin backend), Mercado Pago (HU-30), acceso a historial de pacientes (fast-follow
+  recién acordado arriba), baja/pausa de profesional o remoción de servicio (sin endpoint), pantalla
+  de registro de negocio (HU-00a, gap ya documentado desde antes de esta ronda), resto de HU-31
+  (horario general, dirección detallada, teléfono, logo).
