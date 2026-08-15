@@ -76,14 +76,24 @@ export async function obtenerEstadoSuscripcion(client: PoolClient, negocioId: st
  * Acceso EFECTIVO a las funciones de Turnario Pro — mismo criterio documentado por DBA
  * (001_init.sql, bloque "Suscripción 'Turnario Pro'"): NO alcanza con `plan = 'turnario_pro'`
  * solo (ese valor puede quedar así de forma permanente, como registro de "alguna vez pagó",
- * incluso mucho después de vencer/cancelar) — hace falta además `estado = 'activa'` y no haber
- * pasado `vencimiento`. No es una regla forzada por la base de datos (ningún CHECK ni job la
- * recalcula) — vive acá, en la capa de aplicación, a propósito.
+ * incluso mucho después de vencer/cancelar) — hace falta además no haber pasado `vencimiento`.
+ * No es una regla forzada por la base de datos (ningún CHECK ni job la recalcula) — vive acá, en
+ * la capa de aplicación, a propósito.
+ *
+ * Corrección (2026-08-15, encontrada al construir la pantalla de Turnario Pro del lado
+ * Administrador — épica E15): `estado` acepta 'activa' **o** 'cancelada', nunca 'vencida'. Antes
+ * exigía `estado === 'activa'` a secas, lo que cortaba el acceso apenas se cancelaba —
+ * contradice tanto el comentario de `PATCH /:id/suscripcion/cancelar` (negocios.ts: "conserva el
+ * acceso hasta que venza lo ya pagado, patrón común de SaaS") como la propia nota de DBA sobre
+ * 'cancelada' ("puede seguir con acceso hasta que venza lo ya pagado"). Con ningún job de este
+ * ciclo escribiendo 'vencida' todavía (ver nota de DBA), el chequeo de `vencimiento` de abajo ya
+ * cubre la expiración real en ambos casos — excluir 'vencida' explícitamente es defensa a futuro,
+ * para el día que sí exista ese job.
  */
 export function tieneAccesoTurnarioPro(estadoSuscripcion: EstadoSuscripcion, ahora: Date = new Date()): boolean {
   return (
     estadoSuscripcion.plan === 'turnario_pro' &&
-    estadoSuscripcion.estado === 'activa' &&
+    estadoSuscripcion.estado !== 'vencida' &&
     estadoSuscripcion.vencimiento !== null &&
     new Date(estadoSuscripcion.vencimiento).getTime() >= ahora.getTime()
   );
