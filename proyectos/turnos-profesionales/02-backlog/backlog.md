@@ -1079,3 +1079,22 @@ como punto de partida, no un sistema visual nuevo); Backend evalúa si suma el �
 nuevo recomendado (`GET /negocios/:id/profesionales`) a esta misma ronda o si Mobile arranca con
 el fallback "alta sin listado" mientras tanto; Arquitecto confirma que el patrón de shell/
 selector de HU-27 es reusable tal cual para el rol administrador antes de que Mobile empiece.
+
+**Estado, 2026-08-15 — ambas preguntas resueltas por el CEO, v1 entregada y desplegada, más un
+fast-follow en curso.** Pregunta 1 (doble investidura): "no puede ser los dos" — confirmado que no
+es alcanzable con el modelo actual, y que así debe seguir. Pregunta 2 (acceso a historial de
+pacientes): el CEO pidió acceso completo, no el default conservador — como no tenía backend, se
+secuenció como fast-follow aparte (ver abajo) en vez de bloquear la v1. Las 5 pantallas + shell +
+el endpoint de roster ya se construyeron, verificaron y desplegaron a Render (PR #13, commit
+`7d9d313`).
+
+**Fast-follow — acceso de administrador al historial de pacientes (2026-08-15).** DBA modeló y
+aplicó contra Render 3 policies RLS de solo lectura (`005/006/007...`, ver
+`03-arquitectura/modelo-datos.md` §5septies) — el administrador ve, pero no edita, el historial de
+pacientes de su negocio (la escritura sigue siendo exclusiva del profesional dueño de la ficha).
+Backend agregó `GET /negocios/:id/pacientes` (listado, una fila por ficha — la misma persona
+atendida por 2 profesionales del negocio aparece 2 veces, sin fusionar), `GET
+/negocios/:id/pacientes/:fichaId` (detalle) y `GET /negocios/:id/pacientes/:fichaId/historial`
+(turnos/tratamientos/notas) — los 3 verificados por el Director General IA contra Render real,
+incluido el caso de aislamiento entre negocios. Pendiente: Mobile (pantalla nueva en
+`AdministradorShell`).
