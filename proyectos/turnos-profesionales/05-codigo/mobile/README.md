@@ -308,6 +308,84 @@ ve su agenda completa (todos sus negocios mezclados) sin importar cuál esté "a
 acotarse al negocio actualmente seleccionado como pide el criterio de aceptación de HU-27 ("Las
 métricas del resumen del día se calculan... dentro del negocio actualmente seleccionado").
 
+## 🆕 Modo Administrador v1 (E15) — shell propio + 5 pantallas
+
+Cierra el gap que dejaba `main.dart` (`_Router`): cualquier usuario con `rol == administrador`
+caía directo a `LoginScreen()`, igual que alguien no autenticado ("queda para una fase posterior").
+Épica completa (mapeo de los 6 endpoints de administrador sin consumidor, alcance, exclusiones y
+las 2 preguntas de producto ya resueltas) en `02-backlog/backlog.md`, sección "E15 — Modo
+Administrador v1 (Mobile)".
+
+- `lib/screens/administrador/administrador_shell.dart` (nuevo, HU-36): punto de entrada del rol
+  `Rol.administrador` en `main.dart`. A diferencia de `ProfesionalShell`/`ClienteShell` (bottom nav
+  + `IndexedStack`), es un único hub — resumen liviano del plan (`GET /negocios/:id/plan`) +
+  accesos a las otras 4 pantallas de esta épica + los 2 accesos "bonus" rol-agnósticos (Mi
+  Perfil/Privacidad). Multi-negocio (HU-27): mismo mecanismo ya construido para el lado Profesional
+  (`Sesion.negocios`/`Sesion.entrarANegocio`/`widgets/selector_negocio.dart`), sin selector nuevo —
+  mismo patrón `key: ValueKey(sesion.negocioId)` en `main.dart` que ya usa `ProfesionalShell`. No
+  hay selector "actuar como Profesional/Administrador": el modelo de datos no permite que una misma
+  cuenta tenga los dos roles a la vez (`usuario.rol` es un único valor, pregunta abierta #1 de la
+  épica, ya resuelta) — cada cuenta entra a exactamente un shell.
+- `lib/screens/profesional/configuracion_consultorio_screen.dart` (HU-31 acotada): dejó de ser
+  exclusivamente de solo lectura. Misma pantalla para los dos roles que pueden alcanzarla (mismo
+  criterio que `FichaPacienteScreen`, "ver"/"editar" es el mismo `State`): `Rol.profesional` sigue
+  viendo el formulario de solo lectura de siempre (un JWT de profesional recibe 403 SIEMPRE contra
+  `PATCH /negocios/:id`); `Rol.administrador` ve un formulario editable real contra ese mismo PATCH,
+  acotado a `nombre`/`rubro`/`ubicacion` (los únicos 3 campos que acepta hoy — `es_rubro_salud`
+  queda de solo lectura en ambos modos, el backend lo excluye del PATCH a propósito).
+- `lib/screens/administrador/servicios_negocio_screen.dart` (nuevo, HU-03): alta
+  (`POST /negocios/:id/servicios`) + listado (`GET /negocios/:id/servicios`, público, mismo
+  endpoint que ya consume `screens/cliente/detalle_negocio_screen.dart`). Sin edición ni baja — el
+  backend no expone ninguna de las dos para este recurso.
+- `lib/screens/administrador/profesionales_negocio_screen.dart` (nuevo, HU-02): alta
+  (`POST /negocios/:id/profesionales`, ya cubre 201/409 email tomado/402 límite de plan con
+  `requiere_turnario_pro: true`/409 ya activo) + listado (`GET /negocios/:id/profesionales`, ENDPOINT
+  NUEVO agregado a `negocios.ts` en esta misma ronda — único ítem de esta épica que no fue "cero
+  backend nuevo"). El flag `activo` (`negocio_profesional.activo`, el mismo que cuenta contra el
+  límite de "1 profesional activo" del plan gratis, HU-29) se muestra con un constructor nuevo y
+  genérico, `StatusPill.activo(bool)` (`widgets/status_pill.dart`), en vez de forzar el
+  `StatusPill.paciente` ya existente sobre un dominio que no es paciente. El 402 de la alta se
+  distingue del resto de errores con un acceso directo a `TurnarioProScreen` (mismo criterio de
+  "flag explícito, no parsear texto" que ya usa `login_screen.dart` para
+  `requiere_confirmacion_password`, HU-35). Sin baja/pausa ni acceso a historial/ficha de paciente:
+  ninguna de las dos está en el alcance de esta ronda (ver backlog).
+- `lib/screens/administrador/turnario_pro_screen.dart` (nuevo, HU-29): ver plan/uso
+  (`GET /negocios/:id/plan`), activar (`POST /negocios/:id/suscripcion`, activación simulada/mock,
+  sin cobro real) y cancelar (`PATCH /negocios/:id/suscripcion/cancelar`). El acceso mostrado es
+  siempre `acceso_turnario_pro` tal cual lo devuelve la API — nunca se re-deriva de
+  `plan`/`estado`/`vencimiento` del lado del cliente (esa regla ya vive en
+  `dominio/suscripciones.ts`, `tieneAccesoTurnarioPro`). Reemplaza el placeholder "Próximamente"
+  **solo del lado Administrador**: el ítem "Turnario Pro · Suscripción" que ve el Profesional en su
+  propio menú de Configuración (`profesional/configuracion_screen.dart`) sigue sin tocar a
+  propósito — está fuera del alcance de esta ronda (backlog: "modifica una pantalla del lado
+  Profesional ya entregada... queda propuesta pero no incluida sin ese visto bueno explícito").
+- Bonus de costo marginal (HU-32): el shell da acceso a `editar_perfil_screen.dart` y
+  `privacidad_screen.dart` TAL CUAL, sin duplicarlas — son rol-agnósticas a propósito
+  (`GET/PATCH /usuario/perfil` y `/usuario/privacidad` no filtran por rol), cero backend nuevo.
+
+**Observación para Backend (no bloqueante, no se tocó código de backend en esta ronda):** el
+comentario de `PATCH /:id/suscripcion/cancelar` (`negocios.ts`) documenta que cancelar "conserva el
+acceso a Turnario Pro hasta que venza lo ya pagado", pero `tieneAccesoTurnarioPro`
+(`dominio/suscripciones.ts`) exige `estado === 'activa'` de forma estricta — con el código actual,
+`acceso_turnario_pro` pasa a `false` de inmediato al cancelar, no al vencer. Mobile consume
+`acceso_turnario_pro` tal cual (nunca re-deriva la regla del lado del cliente), así que esta
+pantalla ya refleja el comportamiento real de la API sin importar cuál de los dos sea el
+comportamiento correcto — queda señalado para que Backend confirme cuál de los dos textos es la
+intención real.
+
+**Fuera de alcance de esta ronda (con motivo, ver detalle completo en el backlog):** reportes
+agregados de negocio (HU-28, sin backend), configuración de pagos vía Mercado Pago (HU-30, sin
+backend), acceso del administrador al historial/ficha de un cliente puntual (pregunta abierta #2 de
+la épica — se mantiene el default "sin acceso directo", pendiente de validación del CEO), baja/pausa
+de un profesional o remoción de un servicio (sin endpoint), pantalla de registro de negocio (HU-00a,
+gap aparte ya documentado más abajo en este README), resto de HU-31 (horario general, dirección
+detallada, teléfono, logo — sin columnas de datos ni endpoint).
+
+**Verificado:** `flutter analyze` limpio (mismo único "info" preexistente y ajeno a este cambio que
+ya documentaba este README, en `dashboard_screen.dart`) y `flutter build web` (compila; el
+tree-shaking de íconos corrió sin errores, confirmando que todos los `Icons.*` nuevos resuelven a
+constantes válidas).
+
 ## Pantallas implementadas (ver mapa completo en `04-diseno/mapa-pantallas.md`)
 
 **Cliente:** Login (+ Google, HU-35, solo Web — ver sección propia arriba), `ClienteShell` (bottom
@@ -331,6 +409,14 @@ Seguridad, Configuración de Consultorio, Precios y Señas, Reportes y Estadíst
 Soporte, Acerca de — ver sección "🆕 Configuración del lado Profesional" arriba).
 WhatsApp/Notificaciones/Idioma/Turnario Pro/Nueva Cita/Autorizaciones Médicas: placeholders
 "Próximamente".
+
+**Administrador (E15, "Modo Administrador v1" — ver sección propia arriba):** `AdministradorShell`
+(HU-36, hub único con resumen de plan + accesos, no bottom nav), Datos del Negocio (HU-31 acotada,
+`configuracion_consultorio_screen.dart` en modo edición), Servicios del Negocio (HU-03, alta +
+listado), Profesionales del Negocio (HU-02, alta + listado), Turnario Pro · Suscripción (HU-29, ver
+plan/uso + activar + cancelar) y, reusadas tal cual del lado Profesional, Mi Perfil y Privacidad y
+Seguridad (HU-32). Reportes de negocio y Configuración de Pagos (Mercado Pago): sin backend, fuera
+de esta ronda.
 
 ## Simplificaciones deliberadas de este slice (no son bugs, son alcance reducido)
 
