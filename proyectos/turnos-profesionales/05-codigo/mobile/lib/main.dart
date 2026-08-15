@@ -7,6 +7,7 @@ import 'state/sesion.dart';
 import 'state/theme_controller.dart';
 import 'theme/app_theme.dart';
 import 'screens/login_screen.dart';
+import 'screens/administrador/administrador_shell.dart';
 import 'screens/cliente/cliente_shell.dart';
 import 'screens/profesional/profesional_shell.dart';
 
@@ -48,8 +49,11 @@ class TurnosProfesionalesApp extends StatelessWidget {
   }
 }
 
-/// Punto único de decisión de modo: Cliente vs. Profesional, según el rol de la sesión
-/// (ver docs/04-diseno/mapa-pantallas.md §1 — una sola app, dos modos, no intercambiable).
+/// Punto único de decisión de modo — Cliente, Profesional o Administrador, según el ÚNICO rol de
+/// la sesión (ver docs/04-diseno/mapa-pantallas.md §1 y `02-backlog/backlog.md` E15 "Preguntas
+/// abiertas": `usuario.rol` es un único valor, una misma cuenta nunca es Profesional y
+/// Administrador a la vez, así que no hay selector "actuar como" — cada cuenta entra a exactamente
+/// un shell, no intercambiable).
 class _Router extends StatelessWidget {
   const _Router();
 
@@ -70,9 +74,12 @@ class _Router extends StatelessWidget {
         // sesión — cero cambio de comportamiento respecto de antes de esta historia.
         return ProfesionalShell(key: ValueKey(sesion.negocioId));
       case Rol.administrador:
+        // HU-36 (épica E15 "Modo Administrador v1", `02-backlog/backlog.md`): shell propio del
+        // rol administrador — mismo criterio de `key` atada al negocio activo que `ProfesionalShell`
+        // arriba (HU-27: cambiar de negocio recrea el shell desde cero, ver
+        // `AdministradorShell._cambiarNegocio`).
+        return AdministradorShell(key: ValueKey(sesion.negocioId));
       case null:
-        // El administrador gestiona el negocio; en este slice de mobile no tiene pantallas
-        // propias todavía (queda para una fase posterior, ver README.md de este proyecto).
         return const LoginScreen();
     }
   }

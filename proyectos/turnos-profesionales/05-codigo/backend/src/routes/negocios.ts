@@ -297,6 +297,68 @@ negociosRouter.post(
   })
 );
 
+// HU-02 / E15 (02-backlog/backlog.md, "Modo Administrador v1 (Mobile)" — nota de alcance HU-02):
+// roster completo de profesionales de SU negocio. Único endpoint nuevo que necesitó esa épica — el
+// resto de sus pantallas se apoyan en endpoints que ya existían (ver esa sección del backlog).
+// Contrato: GET /negocios/:id/profesionales -> 200 [{ id, nombre, email, activo }] | 400 :id
+// inválido | 403 rol distinto de administrador, o negocio ajeno.
+//
+// `id` es `profesional.id` (NO `usuario.id`) a propósito: es el identificador que ya usa el resto
+// de los endpoints `/profesionales/:id/...` (profesionales.ts) para referenciar a un profesional
+// puntual, así que Mobile puede enlazar cada fila de este listado directo a esos endpoints sin
+// resolver ningún id intermedio. `activo` es `negocio_profesional.activo` (la membresía de ESTE
+// profesional en ESTE negocio, no un estado global de la identidad) — el mismo flag que ya usa
+// `verificarLimiteProfesionalesActivos`/`contarProfesionalesActivos` (dominio/suscripciones.ts,
+// HU-29) para el límite de "1 profesional activo" del plan gratis, así que Mobile puede mostrar en
+// la misma pantalla quién cuenta contra ese límite y quién no (membresía pausada). `p.eliminado_en
+// IS NULL` filtra identidades profesionales soft-deleted, mismo criterio que el resto de las
+// lecturas de `profesional` en este archivo (ej. HU-08 más arriba) — defensa en profundidad, no
+// debería poder existir una fila `negocio_profesional` apuntando a un `profesional` eliminado.
+// Orden alfabético por `u.nombre`, sin paginar: mismo criterio que el resto de los listados de este
+// archivo (GET /:id/servicios, GET /:id/servicios/:servicioId/profesionales), ninguno pagina hoy.
+//
+// Auth: RN9 vía claim del JWT (mismo patrón que el resto de este archivo, comparación directa
+// contra `:id`, no una query aparte) — un administrador no puede listar el roster de otro negocio.
+//
+// Sin migración nueva: las 3 tablas del JOIN ya son legibles con el contexto RLS de un
+// administrador autenticado — `negocio_profesional`/`profesional` tienen SELECT público
+// (`negocio_profesional_select_publico`/`profesional_select_publico`, migrations/001_init.sql,
+// USING (true)) y `usuario` no tiene RLS habilitada en ningún punto de ese archivo (ver el
+// comentario junto a su CREATE TABLE). `withTransaction` con contexto de todos modos, por el mismo
+// criterio de consistencia que ya dejó documentado `emitirLoginParaUsuario` (routes/auth.ts) para
+// una lectura equivalente sobre una tabla con SELECT público: no hace falta para autorizar (ya lo
+// resolvió el chequeo de `req.auth!.negocio_id` de arriba), pero mantiene el mismo patrón que el
+// resto de los handlers autenticados de este archivo.
+negociosRouter.get(
+  '/:id/profesionales',
+  requireAuth('administrador'),
+  asyncHandler(async (req: AuthedRequest, res) => {
+    const paramsParsed = negocioIdParamsSchema.safeParse(req.params);
+    if (!paramsParsed.success) return respuestaValidacionFallida(res, paramsParsed.error);
+    if (req.auth!.negocio_id !== req.params.id) {
+      return res.status(403).json({ error: 'No podés listar profesionales de otro negocio' });
+    }
+
+    const profesionales = await withTransaction(
+      async (client) => {
+        const result = await client.query(
+          `SELECT p.id AS id, u.nombre AS nombre, u.email AS email, np.activo AS activo
+           FROM negocio_profesional np
+           JOIN profesional p ON p.id = np.profesional_id
+           JOIN usuario u ON u.id = p.usuario_id
+           WHERE np.negocio_id = $1 AND p.eliminado_en IS NULL
+           ORDER BY u.nombre`,
+          [req.params.id]
+        );
+        return result.rows;
+      },
+      { usuarioId: req.auth!.sub, negocioId: req.params.id }
+    );
+
+    res.json(profesionales);
+  })
+);
+
 // HU-31: Configuración de Consultorio — el administrador edita los datos descriptivos de SU
 // PROPIO negocio (RN9 aplicado vía claim del JWT, no del parámetro — mismo patrón que
 // POST /:id/servicios y POST /:id/profesionales de arriba). Contrato: PATCH /negocios/:id, body
