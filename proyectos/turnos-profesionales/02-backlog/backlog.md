@@ -80,6 +80,7 @@ pierdan al planificar el lanzamiento):
 | E8 | Excepciones de disponibilidad (feriados/licencias) | P2 |
 | E13 | Configuración extendida de consultorio (negocio) | P2 |
 | E14 | Privacidad y seguridad de la cuenta (transversal) | P2 |
+| E15 | Modo Administrador v1 (Mobile) — cierra el gap de UI para HU-02/HU-03/HU-29/HU-31 (acotada) | P1 (nueva 2026-08-14, ver sección al final del documento) |
 
 > Nota: E9–E14 y las historias nuevas dentro de E0/E2/E5/E7 (HU-16 a HU-34) se agregaron el
 > 2026-08-05 a partir de capturas de pantalla de otra app del CEO (turnos/citas, de su
@@ -875,3 +876,206 @@ historias y en el Roadmap). Puede pasar a Fase 3 (Diseño detallado):
   API (HU-24/HU-34) y con Google Play Billing (HU-29/E11 — solo Android en v1).
 - UX/UI diseña las pantallas de toda la ampliación, incluyendo el estilo visual de la app
   hermana del CEO (pendiente desde el origen de esta ampliación, 2026-08-05).
+
+---
+
+## E15 — Modo Administrador v1 (Mobile) (P1, nueva 2026-08-14)
+
+**Origen y encargo.** El rol `administrador` tiene 6 endpoints en Backend (`negocios.ts`) que
+exigen `requireAuth('administrador')` y hoy no tienen NINGÚN consumidor: `main.dart` (`_Router`,
+líneas ~72-76) manda a cualquier usuario con `rol == administrador` directo a `LoginScreen()`,
+igual que a un usuario no autenticado, con el comentario "queda para una fase posterior". Esta
+sección consolida y prioriza una PRIMERA versión ("modo Administrador v1") para cerrar ese gap,
+priorizando lo que Backend ya soporta sin cambios. No rediseña pantallas (responsabilidad de
+UX/UI en Fase 3) ni redefine las HU ya redactadas en E0/E1/E10/E11/E13 más arriba — donde esas HU
+ya cubren el alcance necesario, esta sección solo señala qué parte se construye en esta ronda y
+qué parte queda para otra; donde hace falta una historia nueva (el shell en sí), se agrega acá.
+
+### Mapeo — los 6 endpoints de administrador sin consumidor, HU asociada y cobertura real
+
+| Endpoint (Backend, ya existe) | HU | Cobertura hoy | Decisión v1-Administrador |
+|---|---|---|---|
+| `POST /negocios/:id/servicios` | HU-03 | Completa: alta (este endpoint) + listado ya público (`GET /negocios/:id/servicios`, ya usado por HU-07) | **Entra en v1 — cero backend nuevo.** |
+| `POST /negocios/:id/profesionales` | HU-02 | Alta cubierta; **no existe** `GET /negocios/:id/profesionales` (listado del staff) — el único listado hoy (`GET /negocios/:id/servicios/:servicioId/profesionales`) es público y está acotado a un servicio puntual, no sirve como roster (un profesional recién dado de alta sin servicios propios no aparecería, ver `03-arquitectura/modelo-datos.md` §2ter) | **Entra en v1 — con 1 endpoint nuevo, trivial y simétrico a lo ya construido** (ver nota HU-02 abajo). Único ítem de esta épica que no es "cero backend nuevo". |
+| `PATCH /negocios/:id` | HU-31 (y el prometido por HU-00a) | Cubre exactamente `nombre`/`rubro`/`ubicacion` — el resto del alcance original de HU-31 (horario general, dirección detallada, teléfono, logo) no tiene columnas ni endpoint | **Entra en v1, ACOTADA a esos 3 campos.** El resto de HU-31 queda fuera (ver sección de exclusiones). |
+| `GET /negocios/:id/plan` | HU-29 | Completa | **Entra en v1 — cero backend nuevo.** |
+| `POST /negocios/:id/suscripcion` | HU-29 | Completa (activación simulada/mock, ver comentario del endpoint) | **Entra en v1 — cero backend nuevo.** |
+| `PATCH /negocios/:id/suscripcion/cancelar` | HU-29 | Completa | **Entra en v1 — cero backend nuevo.** |
+
+Dos hallazgos adicionales, fuera de la lista de 6 pero relevantes para esta ronda:
+
+- **HU-04** ("Como administrador, quiero asociar servicios a cada profesional") **ya está resuelta
+  en producción, pero por un camino distinto al redactado**: la asociación servicio↔profesional la
+  hace el propio PROFESIONAL (`POST /profesionales/:id/servicios`, `requireAuth('profesional')`,
+  comentario explícito en el código: "HU-04 / HU-04b: el profesional asocia un servicio a su
+  agenda..."), no el administrador — y ya tiene pantalla Mobile (`precios_senas_screen.dart`). No
+  requiere ninguna acción de esta épica; se deja registrado para que una futura reconciliación de
+  Product Manager ajuste el texto de HU-04 a lo realmente implementado, sin tocarlo desde acá.
+- **`GET/PATCH /usuario/perfil` y `GET/PATCH /usuario/privacidad`** (HU-32, `usuario.ts`) son
+  **rol-agnósticos a propósito** ("tanto 'Editar Perfil' como 'Privacidad y Seguridad' son
+  transversales a cualquier rol autenticado (cliente/profesional/administrador)", comentario de
+  cabecera del archivo) — ya usados por `editar_perfil_screen.dart`/`privacidad_screen.dart` del
+  lado Profesional. Se pueden reusar tal cual para la cuenta del administrador, cero backend
+  nuevo — incluido como bonus de bajo costo en el alcance de abajo, no como núcleo de la épica.
+
+### Historias de esta épica
+
+**HU-36 (v1, P1 dentro del backlog global — pero P0 interno de esta épica: nada más de E15 es
+alcanzable sin ella).** Como administrador de negocio, quiero ver un panel propio al iniciar
+sesión (con acceso a los datos de mi negocio, mis profesionales y mi plan Turnario Pro), para
+poder operar mi negocio desde la app en vez de quedar redirigido al login como si no tuviera
+cuenta.
+- Criterios de aceptación:
+  - `main.dart` (`_Router`) deja de mandar `Rol.administrador` a `LoginScreen()` y lo manda a un
+    shell propio (nombre/estructura de navegación a definir por UX/UI en Fase 3 — esta historia
+    no fija layout, solo el punto de entrada funcional).
+  - Si el administrador pertenece a 2+ negocios (`negocio_administrador`, N:M ya soportado,
+    `modelo-datos.md` §2ter), reusa el mismo mecanismo ya construido para HU-27 ("cambiar de
+    vista": `NegocioMembresia`, `Sesion.entrarANegocio`, `widgets/selector_negocio.dart`) — no se
+    diseña un selector nuevo.
+  - Backend: ninguno nuevo — se apoya en endpoints ya existentes (`GET /negocios`,
+    `GET /negocios/:id`, `GET /negocios/:id/plan`).
+
+**Nota de alcance — HU-31 en v1-Administrador (sin reescribir la HU original de E13, arriba).**
+Se construye reutilizando `configuracion_consultorio_screen.dart` (`05-codigo/mobile/lib/screens/
+profesional/`), habilitando modo edición cuando la sesión es de rol `administrador`, en vez de
+duplicar la pantalla — tal como ya lo dejó anotado el propio doc comment de esa clase y
+`memory/proyectos/turnos-profesionales/decisiones.md` (2026-08-12): "el backend ya soporta la
+edición completa, solo falta la UI del lado correcto". Acotada a `nombre`/`rubro`/`ubicacion`
+(lo único que acepta `PATCH /negocios/:id` hoy); horario general de atención, dirección
+detallada, teléfono/contacto y logo (resto del texto original de HU-31) quedan fuera de v1 (ver
+exclusiones).
+
+**Nota de alcance — HU-02 en v1-Administrador.** Pantalla de "Profesionales de mi negocio":
+alta (formulario email/password/nombre contra `POST /negocios/:id/profesionales`, ya cubre los
+casos 201/409 email tomado/402 límite de plan/409 ya activo documentados en el propio endpoint)
++ listado del roster actual. El listado **requiere un endpoint nuevo**,
+`GET /negocios/:id/profesionales` (`requireAuth('administrador')`, RN9 vía claim igual que el
+resto de este archivo — join trivial `negocio_profesional` + `profesional` + `usuario`, mismo
+patrón ya usado en otras lecturas de este mismo router). Se marca como recomendación para
+Backend, no como bloqueante de todo E15: si Backend no llega a esta ronda, HU-36/HU-31/HU-03/
+HU-29 igual pueden construirse y entregar valor con esta única pantalla acotada a "alta sin
+listado" como fallback temporal.
+
+**Nota de alcance — HU-03 en v1-Administrador.** Pantalla de "Servicios de mi negocio": alta
+(`POST /negocios/:id/servicios`) + listado (`GET /negocios/:id/servicios`, público, ya en uso
+por el flujo de reserva del cliente — HU-07). Sin gaps de backend; el más simple de los 5 flujos
+de esta épica.
+
+**Nota de alcance — HU-29 en v1-Administrador.** Pantalla de "Turnario Pro": ver plan actual y
+uso (`GET /negocios/:id/plan`), activar (`POST /negocios/:id/suscripcion`, body
+`{periodo: 'mensual'|'anual'}`, activación simulada/mock — sin cobro real todavía, ver comentario
+del endpoint) y cancelar (`PATCH /negocios/:id/suscripcion/cancelar`). Sin gaps de backend.
+**Nota separada, NO incluida en el alcance de esta épica sin aprobación:** el menú de
+Configuración del Profesional ya tiene un ítem "Turnario Pro · Suscripción" que hoy apunta a
+`ProximamenteScreen` (`configuracion_screen.dart`) pese a que `GET /negocios/:id/plan` también
+admite rol `profesional` (solo lectura — activar/cancelar siguen siendo exclusivos de
+administrador). Conectar ese ítem existente a una vista de solo lectura de la misma pantalla
+sería una mejora barata y coherente, pero **modifica una pantalla del lado Profesional ya
+entregada** — por la regla de gobierno de este proyecto ("ningún entregable aprobado se modifica
+sin autorización del Director General IA"), queda propuesta acá pero no incluida en el alcance
+sin ese visto bueno explícito.
+
+### Pantallas/flujos Mobile de v1-Administrador (resumen para Arquitecto/UX/UI — sin diseño acá)
+
+1. **Shell/Dashboard de Administrador** (HU-36, nueva) — punto de entrada, reemplaza el fallback
+   a `LoginScreen` en `main.dart`. Incluye selector multi-negocio si aplica (reuso de HU-27).
+2. **Datos del negocio** (HU-31 acotada) — reusa `configuracion_consultorio_screen.dart` en modo
+   edición.
+3. **Servicios del negocio** (HU-03) — alta + listado, cero backend nuevo.
+4. **Profesionales del negocio** (HU-02) — alta ya cubierta; listado sujeto al endpoint nuevo
+   recomendado arriba.
+5. **Turnario Pro** (HU-29) — ver plan/uso, activar, cancelar.
+6. *(Bonus, costo marginal)* **Mi Perfil / Privacidad y Seguridad** (HU-32) — reuso literal de
+   `editar_perfil_screen.dart`/`privacidad_screen.dart`, cero backend nuevo (rutas rol-agnósticas).
+
+### Fuera de alcance de v1-Administrador (con motivo)
+
+- **HU-28 (Reportes) — vista agregada de negocio/administrador.** La mitad "profesional"
+  (`GET /profesionales/:id/reportes`) ya está construida y tiene pantalla (`reportes_screen.dart`,
+  ver `memory/proyectos/turnos-profesionales/decisiones.md`). La vista de negocio completo (todos
+  los profesionales a la vez) que pide HU-28 para el administrador **no tiene backend** — el
+  propio código de Backend lo deja explícito: "Vista de negocio/administrador (todos los
+  profesionales a la vez): HU-28 la pide, pero la consigna de este ciclo la difiere
+  explícitamente. Cuando se construya, es un endpoint nuevo (ej. `GET /negocios/:id/reportes`), no
+  una extensión de este" (`profesionales.ts`). Requiere backend nuevo — fuera de v1-Administrador.
+- **HU-30 (Configuración de pagos — Mercado Pago).** Sin ningún endpoint hoy; su propio texto en
+  este backlog dice "mecanismo concreto de integración a definir por Arquitecto/Integraciones en
+  Fase 3". Requiere backend nuevo (y una definición de integración que todavía no existe) — fuera
+  de v1-Administrador. No bloquea el lanzamiento general (nota operativa ya registrada en el
+  Roadmap: se puede lanzar con todos los servicios en `requiere_sena = false`).
+- **HU-34 (credenciales de WhatsApp Business).** Sin backend; depende de HU-24 (canal WhatsApp),
+  hoy P2/no construido. Fuera de v1-Administrador.
+- **Resto del alcance original de HU-31** (horario general de atención, dirección detallada más
+  allá de "ubicación", teléfono/contacto, logo o imagen). Sin columnas de datos ni endpoint —
+  requiere DBA + Backend antes de poder construirse. Fuera de v1-Administrador.
+- **Baja/pausa de un profesional del negocio, o remoción de un servicio.** Ninguno de los dos
+  tiene endpoint (`negocios.ts` solo tiene alta para ambos recursos). Fuera de v1-Administrador.
+- **Import/export de pacientes (HU-22).** Ya diferida globalmente desde 2026-08-10 (ver Roadmap);
+  no es específica de administrador, se reafirma acá solo para que no se confunda con el resto de
+  exclusiones de esta épica.
+- **Nota relacionada, no una exclusión de esta épica — registro de negocio (HU-00a) sin pantalla
+  Mobile.** `POST /auth/registro-negocio` ya existe en Backend, pero ningún cliente Mobile lo
+  consume (ni para alta de negocio ni de cliente) — gap ya documentado desde antes de esta ronda
+  en `05-codigo/mobile/README.md` ("No hay registro de negocio/cliente desde la app... falta la
+  pantalla de registro"). No es uno de los 6 endpoints de este encargo y por eso no se incluye en
+  el alcance de v1-Administrador, pero se deja señalado: sin esa pantalla, un administrador nuevo
+  no puede autoregistrarse — hoy las cuentas de administrador para pruebas se crean vía API
+  directa. No bloquea construir ni demostrar E15 (alcanza con cuentas ya existentes o creadas por
+  API), pero si el objetivo es lanzar con negocios reales autoregistrándose, esta pantalla es un
+  prerrequisito aparte, no cubierto por esta entrega.
+
+### Preguntas abiertas — a validar con el CEO (Director General IA) antes de implementar
+
+**No se resuelven acá — son decisiones de producto/arquitectura que exceden el alcance de este
+Product Manager actuando solo.**
+
+1. **¿"Doble investidura" — un mismo usuario puede ser Profesional Y Administrador a la vez?**
+   Pregunta dejada abierta en `04-diseno/mapa-pantallas.md` §5.11 ("a confirmar con Product
+   Manager/Arquitecto si el modelo de datos actual lo permite"). **Hallazgo concreto de este
+   relevamiento: HOY NO — y no es una limitación de la app, es del modelo de datos.**
+   `usuario.rol` es un único valor (`cliente`/`profesional`/`administrador`,
+   `03-arquitectura/modelo-datos.md` fila "Usuario"), y la identidad está atada al email de forma
+   excluyente: el propio código de `POST /negocios/:id/profesionales` rechaza con 409 el alta de
+   un profesional si ese email ya pertenece a un usuario de otro rol ("un email es una única
+   identidad con un único rol, no se puede reusar como profesional"). En consecuencia, hoy una
+   persona que además de trabajar como profesional es dueña de su propio consultorio necesita DOS
+   cuentas (dos emails) — una por rol — y cada una entra a exactamente un shell (Cliente/
+   Profesional/Administrador), sin superposición posible. **Propuesta de Product Manager, sujeta a
+   aprobación:** (a) para v1-Administrador no hace falta resolver nada — el caso no es alcanzable
+   con el modelo actual, cero riesgo de dejar un caso a medio cubrir; (b) SI en el futuro el CEO
+   quiere que una misma persona/login sea ambas cosas a la vez, es un cambio de modelo de datos
+   (Arquitecto + DBA: por ejemplo, permitir que una identidad `profesional` también aparezca en
+   `negocio_administrador`, o generalizar `rol` a multivaluado) que excede esta entrega; de
+   aprobarse, la recomendación es modelarlo con el MISMO patrón ya construido para elegir negocio
+   (HU-27: "vista activa" con selector — `entrarANegocio`/`selector_negocio.dart`), es decir
+   "entrar como Administrador" o "entrar como Profesional" como una elección de sesión más, nunca
+   una pantalla fusionada. **Esto queda marcado como pregunta abierta para que el Director General
+   IA la valide con el CEO — Product Manager no la resuelve unilateralmente.**
+2. **¿El administrador debe tener acceso al historial de clientes/pacientes?** Pregunta abierta
+   desde el documento funcional original (`01-requisitos/documento-funcional.md` §6, punto 2:
+   "A7/D3 dejan al administrador sin acceso al historial por defecto — confirmar si es correcto"),
+   nunca revisitada en ninguna de las rondas de decisiones posteriores del CEO. **Propuesta de
+   Product Manager, sujeta a aprobación:** mantener el default actual (administrador SIN acceso
+   directo a la ficha/historial de un cliente puntual) para v1-Administrador — solo ve agregados
+   de negocio (HU-28, cuando se construya: turnos totales/completados/cancelados y monto
+   facturado, sin datos de un cliente en particular). Motivos: (1) es el status quo ya documentado
+   y ya reforzado técnicamente por Security en HU-20 (scope `(profesional_id, cliente_id)`,
+   `07-seguridad/informe-seguridad.md` adenda 2026-08-10) — cambiarlo requeriría RLS/backend
+   nuevo, contra el criterio de esta épica de no abrir otra ronda de Backend; (2) es la opción más
+   conservadora en privacidad, mismo criterio que Security ya aplicó a la pregunta análoga de
+   HU-33; (3) es consistente con el propio criterio ya resuelto por el CEO para HU-28 ("el
+   administrador ve el reporte de todo su negocio", en agregado — no historial individual). **Esto
+   queda marcado como pregunta abierta para que el Director General IA la valide con el CEO** — si
+   la respuesta es "sí debe verlo", es alcance nuevo de backend para una ronda futura, no de
+   v1-Administrador.
+
+### Siguiente paso de esta épica
+
+Con las 2 preguntas de arriba resueltas por el CEO (o confirmadas como "no bloquean, se mantiene
+el default propuesto"), E15 puede pasar a Fase 3: UX/UI diseña las 5-6 pantallas listadas arriba
+(puede reusar layout/lenguaje visual ya aprobado para `ProfesionalShell`/`ConfiguracionScreen`
+como punto de partida, no un sistema visual nuevo); Backend evalúa si suma el único endpoint
+nuevo recomendado (`GET /negocios/:id/profesionales`) a esta misma ronda o si Mobile arranca con
+el fallback "alta sin listado" mientras tanto; Arquitecto confirma que el patrón de shell/
+selector de HU-27 es reusable tal cual para el rol administrador antes de que Mobile empiece.
