@@ -71,6 +71,19 @@ class StatusPill extends StatelessWidget {
           PacienteEstado.inactivo => _PillKind.danger,
         };
 
+  /// Estado genérico activo/inactivo — mismo tratamiento visual que [StatusPill.paciente]
+  /// (activo=success/"Activo", inactivo=danger/"Inactivo"), sin acoplar el nombre del constructor
+  /// al dominio "paciente": lo usan pantallas de otros dominios con un flag `activo` simple, ej.
+  /// el roster de profesionales de un negocio (`screens/administrador/
+  /// profesionales_negocio_screen.dart`, HU-02/E15) — ahí `activo` es `negocio_profesional.activo`
+  /// (la membresía de ese profesional en ese negocio), no un estado de paciente. A diferencia de
+  /// `.turno`/`.paciente` de arriba, este SÍ puede ser `const` — el operador ternario (a
+  /// diferencia de un switch-expression) es una expresión constante válida (ver la corrección de
+  /// 2026-08-10 más arriba).
+  const StatusPill.activo(bool activo, {super.key})
+      : _label = activo ? 'Activo' : 'Inactivo',
+        _kind = activo ? _PillKind.success : _PillKind.danger;
+
   final String _label;
   final _PillKind _kind;
 
