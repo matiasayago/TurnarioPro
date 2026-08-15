@@ -5,10 +5,11 @@
 -- clínico + login con Google), HU-32 del 2026-08-11 (preferencias de privacidad de usuario, ver
 -- §2septies/§5quater — mención agregada acá; no se había sumado a este resumen en su propio
 -- ciclo), HU-14b/HU-25/HU-26 del 2026-08-12 (bandeja de notificaciones con destinatario/leído +
--- preferencias de notificación, ver §2octies/§5quinquies), y HU-29/E11 del 2026-08-14
--- (suscripción "Turnario Pro", ver §2novies/§5sexies) — ver 03-arquitectura/modelo-datos.md para
--- el detalle completo de cada una y memory/proyectos/turnos-profesionales/decisiones.md para la
--- traza de decisiones).
+-- preferencias de notificación, ver §2octies/§5quinquies), HU-29/E11 del 2026-08-14
+-- (suscripción "Turnario Pro", ver §2novies/§5sexies), y el fast-follow de E15 del 2026-08-15
+-- (acceso de SOLO LECTURA del administrador al historial de pacientes — ficha/tratamiento/
+-- nota_medica —, ver §5septies) — ver 03-arquitectura/modelo-datos.md para el detalle completo de
+-- cada una y memory/proyectos/turnos-profesionales/decisiones.md para la traza de decisiones).
 -- Convenciones: GUID como PK, auditoría completa, soft delete donde corresponde (docs/06-modelo-datos.md §3)
 --
 -- ARCHIVO DUPLICADO A PROPÓSITO — mantener sincronizado. Este archivo es la fuente de verdad del
@@ -1121,12 +1122,21 @@ CREATE POLICY turno_acceso_job_expiracion ON turno
 -- o cualquier profesional activo), acá el criterio es más estricto: SOLO el profesional dueño de
 -- la fila (RN7/RN13/D3 — "visible únicamente para el profesional que lo atendió/registró... No
 -- se comparte entre profesionales del mismo negocio"). Ni el administrador del negocio ni otro
--- profesional del mismo negocio pasan esta policy — coincide con el default ya documentado en
--- documento-funcional.md §6 ("Alcance de permisos del administrador... A7/D3 dejan al
--- administrador sin acceso al historial por defecto"), que ese documento deja como pregunta
--- menor todavía abierta, NO cerrada acá: si en un próximo ciclo el CEO confirma que el
--- administrador SÍ debe tener acceso, agregar una policy adicional (OR EXISTS contra
--- negocio_administrador, mismo patrón que `turno`) es aditivo y no rompe esta.
+-- profesional del mismo negocio pasan ESTA policy — sigue siendo así a propósito, incluso después
+-- del cambio de 2026-08-15 más abajo (bloque "Acceso de administrador al historial de pacientes",
+-- ubicado después de la policy de `nota_medica`, al cierre de esta misma sección): esta policy (y
+-- sus análogas `tratamiento_acceso_via_paciente`/`nota_medica_acceso_via_paciente`) sigue siendo,
+-- SIN NINGÚN CAMBIO, la ÚNICA fuente de autorización de ESCRITURA (INSERT/UPDATE/DELETE) sobre
+-- estas 3 tablas — el administrador NUNCA pasa a poder escribir acá; ver ese bloque para el
+-- razonamiento completo de por qué. Esto coincidía, hasta esa fecha, con el default documentado
+-- en documento-funcional.md §6, ítem 2 ("Alcance de permisos del administrador... A7/D3 dejan al
+-- administrador sin acceso al historial por defecto — confirmar si es correcto"), pregunta que
+-- ese documento dejaba como menor y todavía abierta — el CEO la resolvió confirmando que el
+-- administrador SÍ debe tener acceso (de SOLO LECTURA, ver bloque de abajo, no de escritura).
+-- Pendiente que Business Analyst/Product Manager actualicen formalmente D3/RN7/§6
+-- (documento-funcional.md) y la pregunta abierta análoga de la épica E15 (02-backlog/backlog.md)
+-- con este resultado — fuera del alcance de DBA, que modela el dato y no reescribe esos
+-- documentos.
 --
 -- Tampoco hay policy para que el propio cliente/paciente vea su ficha/tratamientos/notas: ninguna
 -- HU de este ciclo pide una vista de ese lado (Mobile, modo Cliente) — se puede agregar sin
@@ -1194,6 +1204,115 @@ CREATE POLICY nota_medica_acceso_via_paciente ON nota_medica
       JOIN profesional p ON p.id = pa.profesional_id
       WHERE pa.id = nota_medica.paciente_id
         AND p.usuario_id = NULLIF(current_setting('app.usuario_id', true), '')::uuid
+    )
+  );
+
+-- ============================================================================
+-- Acceso de administrador al historial de pacientes — SOLO LECTURA (fast-follow de E15, DBA,
+-- 2026-08-15)
+-- ============================================================================
+-- El CEO confirmó (sesión 2026-08-15 — ver memory/proyectos/turnos-profesionales/decisiones.md,
+-- entrada "E15 'Modo Administrador v1'") la pregunta que documento-funcional.md §6, ítem 2, dejaba
+-- abierta desde la Fase 2 ("Alcance de permisos del administrador del negocio sobre el historial
+-- de clientes... A7/D3 dejan al administrador sin acceso por defecto — confirmar si es
+-- correcto"), y que 02-backlog/backlog.md (épica E15) había registrado con una propuesta de
+-- Product Manager de MANTENER el default sin acceso: el CEO pidió expresamente "acceso completo"
+-- — rechazando esa propuesta conservadora — y, al no existir todavía backend para eso, aceptó la
+-- recomendación de tratarlo como este fast-follow separado (DBA primero, sobre este mismo diseño;
+-- Backend/Mobile en una ronda posterior). Pendiente que Business Analyst/Product Manager
+-- actualicen formalmente documento-funcional.md (D3/RN7/§6) y backlog.md (E15) con esta
+-- resolución — fuera del alcance de DBA, no se tocan esos 2 documentos acá.
+--
+-- ALCANCE DECIDIDO ACÁ — SOLO LECTURA (SELECT), no escritura — evaluado explícitamente por DBA,
+-- no asumido, contra el criterio de "no otorgar más permiso del que se pidió":
+-- 1) Lo pedido textualmente es "acceso completo AL HISTORIAL" — un historial se CONSULTA; nada en
+--    el pedido del CEO, ni en HU-20/HU-21/RN7/RN13/D3, ni en ninguna otra HU/backlog de este
+--    proyecto, menciona que el administrador deba poder EDITAR o BORRAR una ficha, un tratamiento
+--    o una nota médica ajena. "Completo" se lee acá como "el historial ENTERO (ficha +
+--    tratamientos + notas, no un subconjunto recortado)", no como "con permiso de escritura
+--    incluido" — es la lectura más consistente con qué fue lo que el CEO rechazó (el default de
+--    CERO acceso que proponía Product Manager), no con pedir un permiso más amplio y distinto.
+-- 2) RN7/RN13/D3 (documento-funcional.md §3) siguen íntegramente vigentes para la ESCRITURA: la
+--    ficha/tratamiento/nota médica es un registro de autoría clínica de QUIEN atendió — con
+--    implicancia médico-legal, no solo de producto (mismo espíritu que la nota de seguridad de
+--    HU-20/HU-33 sobre datos de salud, backlog.md). Dar a un actor no-clínico (el administrador)
+--    la capacidad de modificar o eliminar el registro clínico de OTRO profesional es un salto de
+--    alcance cualitativamente distinto a poder verlo — nadie lo pidió, y concederlo igual sería
+--    diseñar por encima de la instrucción real.
+-- 3) Principio de mínimo privilegio ya aplicado en este mismo archivo ante instrucciones
+--    ambiguas entre 2 lecturas posibles (ver, ej., `es_rubro_salud DEFAULT false`, o el alcance
+--    deliberadamente angosto de `notificacion_insert_evento_turno`): implementar la lectura más
+--    angosta que satisface el pedido explícito, dejando la más amplia como extensión futura
+--    documentada si se llega a pedir — nunca al revés.
+-- 4) Costo asimétrico de equivocarse: si el CEO pide después, explícitamente, que el
+--    administrador también edite, es una policy nueva y aditiva (mismo patrón que este bloque).
+--    Lo inverso — haber otorgado escritura de más y tener que retirarla — es operativamente más
+--    caro (hay que auditar si ya se usó para modificar/borrar un registro clínico ajeno) y expone
+--    datos de salud sensibles (D11/RN15) a un riesgo que nadie pidió asumir.
+--
+-- DISEÑO — 3 policies NUEVAS, `FOR SELECT` únicamente, una por tabla. NINGUNA de las 3 policies
+-- `FOR ALL` de arriba (`paciente_acceso_propio_profesional`/`tratamiento_acceso_via_paciente`/
+-- `nota_medica_acceso_via_paciente`) se modifica ni se separa en policies más chicas. Se evaluó
+-- explícitamente separar cada `FOR ALL` en `FOR SELECT` + policies de escritura — tal como
+-- sugería el comentario original de este bloque en ciclos anteriores ("agregar una policy
+-- adicional... mismo patrón que turno") — y se descarta por INNECESARIO, no por sobre-diseño:
+-- Postgres evalúa, para cada comando, TODAS las policies permisivas (`PERMISSIVE`, el default —
+-- ninguna policy de este archivo usa `AS RESTRICTIVE`) que aplican a ese comando, y las combina
+-- con OR. Una policy `FOR ALL` aplica a los 4 comandos (SELECT/INSERT/UPDATE/DELETE); una policy
+-- `FOR SELECT` nueva aplica SOLO a SELECT. Agregar la `FOR SELECT` nueva ya amplía el SELECT (se
+-- evalúa en OR junto al `USING` de la `FOR ALL` existente) SIN tocar INSERT/UPDATE/DELETE, que
+-- siguen dependiendo EXCLUSIVAMENTE del `USING`/`WITH CHECK` de la `FOR ALL` original, sin
+-- cambios — el mismo resultado final que "separar" la policy vieja, con MENOR superficie de
+-- cambio (0 líneas tocadas de las 3 policies ya aprobadas) y por lo tanto menor riesgo de
+-- regresión sobre algo que ya funciona en producción (Render).
+--
+-- Verificado además contra el código real de Backend antes de decidir que este agregado es
+-- inofensivo (no asumido): `../../backend/src/routes/profesionales.ts` — `GET`/`PATCH`
+-- `/:id/pacientes/:pacienteId` y `GET /:id/pacientes/:pacienteId/historial` — es HOY el único
+-- lugar que lee o escribe estas 3 tablas, y las 3 rutas exigen `requireAuth('profesional')` +
+-- `esPropioProfesional(req)` ("Solo podés ver/editar tus propios pacientes", 403 si no) ANTES de
+-- tocar la base, y llaman a `withTransaction(fn, { usuarioId: req.auth!.sub, ... })` — es decir,
+-- `app.usuario_id` en el contexto RLS de esas transacciones SIEMPRE es el propio profesional
+-- dueño de la fila, nunca un administrador. Ningún código hoy depende de que estas 3 tablas
+-- tengan una única policy `FOR ALL`, así que sumar policies de `SELECT` en paralelo no cambia el
+-- comportamiento de ninguna ruta existente. Backend todavía NO tiene ningún endpoint que lea
+-- estas tablas en contexto de administrador — esta migración deja lista la autorización a nivel
+-- de base de datos para cuando la ronda de Backend de este mismo fast-follow agregue ese
+-- endpoint (fuera del alcance de DBA, instrucción explícita de no tocar Backend/Mobile en este
+-- ciclo).
+--
+-- `negocio_id` para el chequeo: `paciente.negocio_id` ya existe en la fila (a diferencia de
+-- `suscripcion_negocio`/HU-29, que necesitó `app.negocio_id` de sesión por no tener FK directa a
+-- una identidad — ver bloque "Suscripción 'Turnario Pro'", más abajo) — no hace falta ninguna
+-- variable de sesión nueva. `tratamiento`/`nota_medica` lo resuelven vía `JOIN` a `paciente`,
+-- mismo patrón ya usado por `tratamiento_acceso_via_paciente`/`nota_medica_acceso_via_paciente`
+-- (arriba) para resolver "quién es el profesional dueño" sin duplicar la columna.
+CREATE POLICY paciente_select_admin_del_negocio ON paciente
+  FOR SELECT USING (
+    EXISTS (
+      SELECT 1 FROM negocio_administrador na
+      WHERE na.negocio_id = paciente.negocio_id
+        AND na.usuario_id = NULLIF(current_setting('app.usuario_id', true), '')::uuid
+    )
+  );
+
+CREATE POLICY tratamiento_select_admin_del_negocio ON tratamiento
+  FOR SELECT USING (
+    EXISTS (
+      SELECT 1 FROM paciente pa
+      JOIN negocio_administrador na ON na.negocio_id = pa.negocio_id
+      WHERE pa.id = tratamiento.paciente_id
+        AND na.usuario_id = NULLIF(current_setting('app.usuario_id', true), '')::uuid
+    )
+  );
+
+CREATE POLICY nota_medica_select_admin_del_negocio ON nota_medica
+  FOR SELECT USING (
+    EXISTS (
+      SELECT 1 FROM paciente pa
+      JOIN negocio_administrador na ON na.negocio_id = pa.negocio_id
+      WHERE pa.id = nota_medica.paciente_id
+        AND na.usuario_id = NULLIF(current_setting('app.usuario_id', true), '')::uuid
     )
   );
 

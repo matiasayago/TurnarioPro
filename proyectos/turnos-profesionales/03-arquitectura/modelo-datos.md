@@ -63,9 +63,9 @@ Siguiendo el estándar de la empresa (`docs/06-modelo-datos.md` §3):
 | **Turno** | Reserva concreta: cliente + profesional + servicio + horario + estado (ver máquina de estados en `documento-arquitectura.md` §3). `negocio_id` se resuelve desde `servicio.negocio_id` (inequívoco), no desde el profesional — ver §2ter. | N:1 Negocio, N:1 Profesional, N:1 Servicio, N:1 Usuario (cliente) |
 | **Pago** | Registro de intención/confirmación de pago de seña asociado a un Turno (D2). | 1:1 Turno (cuando aplica) |
 | **Notificacion** | Bandeja de notificaciones (HU-14b/HU-25, 2026-08-12 — ver §2octies): además del log original (tipo, envío), ahora sabe A QUIÉN notifica (`destinatario_usuario_id`, nullable por compat con código existente) y si ya se leyó (`leido`). Un turno puede originar 0..N notificaciones (confirmación/nueva reserva, cancelación, reprogramación, recordatorio); el texto final ("María Pérez confirmó su turno de las 10:00") se arma en Backend a partir de `turno_id`, no se guarda armado. | N:1 Turno, N:1 Usuario (destinatario) |
-| **Paciente** (HU-20, nueva 2026-08-10) | "Ficha" que un Profesional lleva de un Cliente, dentro de un Negocio — NO 1:1 con Usuario, ver §2quinquies (RN7/RN13/D3: privacidad por profesional). Campos básicos ya en Usuario (nombre/email/teléfono); acá viven fecha de nacimiento, género, dirección, alergias, contacto de emergencia, notas médicas generales (gateados a rubro salud, D11/RN15) y `activo` (D20/RN20, no gateado). | N:1 Negocio, N:1 Profesional, N:1 Usuario (cliente); 1:N Tratamiento, 1:N NotaMedica |
-| **Tratamiento** (HU-21/D8, nueva 2026-08-10) | Proceso de seguimiento asociado a un Paciente, independiente de un turno puntual (descripción, fecha de inicio, fecha de fin opcional). Privado por profesional (RN13), heredado de `Paciente` — ver §2quinquies. | N:1 Paciente |
-| **NotaMedica** (HU-21/D8, nueva 2026-08-10) | Anotación clínica/de seguimiento asociada a un Paciente, independiente de un turno puntual (fecha, texto). Privado por profesional (RN13), heredado de `Paciente` — ver §2quinquies. | N:1 Paciente |
+| **Paciente** (HU-20, nueva 2026-08-10) | "Ficha" que un Profesional lleva de un Cliente, dentro de un Negocio — NO 1:1 con Usuario, ver §2quinquies (RN7/RN13/D3: privacidad por profesional). Campos básicos ya en Usuario (nombre/email/teléfono); acá viven fecha de nacimiento, género, dirección, alergias, contacto de emergencia, notas médicas generales (gateados a rubro salud, D11/RN15) y `activo` (D20/RN20, no gateado). Escritura exclusiva del profesional dueño de la fila; desde 2026-08-15 el administrador del negocio tiene además lectura completa (SOLO LECTURA, no escritura) — ver §5septies. | N:1 Negocio, N:1 Profesional, N:1 Usuario (cliente); 1:N Tratamiento, 1:N NotaMedica |
+| **Tratamiento** (HU-21/D8, nueva 2026-08-10) | Proceso de seguimiento asociado a un Paciente, independiente de un turno puntual (descripción, fecha de inicio, fecha de fin opcional). Privado por profesional (RN13), heredado de `Paciente` — ver §2quinquies; administrador del negocio con lectura adicional desde 2026-08-15, mismo criterio que `Paciente` — ver §5septies. | N:1 Paciente |
+| **NotaMedica** (HU-21/D8, nueva 2026-08-10) | Anotación clínica/de seguimiento asociada a un Paciente, independiente de un turno puntual (fecha, texto). Privado por profesional (RN13), heredado de `Paciente` — ver §2quinquies; administrador del negocio con lectura adicional desde 2026-08-15, mismo criterio que `Paciente` — ver §5septies. | N:1 Paciente |
 | **UsuarioPreferencias** (HU-32, nueva 2026-08-11) | Preferencias de privacidad de la cuenta — tabla satélite 1:1 con Usuario (visibilidad de perfil, mostrar estado en línea, compartir datos de uso con la plataforma), transversal a ambos roles. NO gateada por negocio/profesional — ver §2septies. | 1:1 Usuario |
 | **UsuarioPreferenciasNotificacion** (HU-26, nueva 2026-08-12) | Preferencias de notificación de un Usuario — 3 canales (push/email/whatsapp), 2 tipos de aviso (citas y recordatorios / promociones) y 2 de sonido/vibración, los 7 booleanos planos. Compartida Cliente/Profesional. Tabla propia, NO columnas en `UsuarioPreferencias` (HU-32, ciclo paralelo) — ver §2octies para el porqué. | 1:1 Usuario |
 | **SuscripcionNegocio** (HU-29/E11, nueva 2026-08-14) | Plan/suscripción de un Negocio — freemium por límite de uso (columnas `plan` 'gratis'/'turnario_pro', `periodo` 'mensual'/'anual' nullable si es gratis, `vencimiento`, `estado` 'activa'/'vencida'/'cancelada'). Soporte de datos para la activación SIMULADA de "Turnario Pro" (mismo criterio que `MockPagoProvider`) — sin columnas todavía para la verificación real de Google Play (deliberado, ver §2novies). | 1:1 Negocio |
@@ -1088,6 +1088,23 @@ para que Backend/DevOps lo apliquen al levantar el entorno de desarrollo.
 > recién creado no va a tener `suscripcion_negocio` hasta esa sincronización). **No aplicado
 > todavía contra Render real** (a diferencia de `003`/`004`) — pendiente de que el Director
 > General IA lo revise y lo corra, mismo flujo que los ciclos anteriores.
+>
+> **Nota operativa (2026-08-15, DBA) — `007_paciente_historial_acceso_administrador.sql`
+> (fast-follow de la épica E15, ver §5septies).** Mismo mecanismo que las notas de arriba:
+> `001_init.sql` se actualizó con las 3 policies `FOR SELECT` nuevas (correcto para cualquier
+> ambiente que migre desde cero), pero no alcanza para Render — el delta vive en
+> [`05-codigo/database/migrations/007_paciente_historial_acceso_administrador.sql`](../05-codigo/database/migrations/007_paciente_historial_acceso_administrador.sql).
+> A diferencia del ciclo de `005`, **acá SÍ se sincronizaron ambas copias de `001_init.sql`**
+> (`05-codigo/database/migrations/` y `05-codigo/backend/migrations/`, verificadas byte-idénticas
+> en este mismo commit) — no queda la divergencia que sigue pendiente de `suscripcion_negocio`.
+> Puramente aditivo, sin DDL de esquema y sin backfill: 3 `CREATE POLICY ... FOR SELECT`
+> envueltos en un único bloque `DO` con guard contra `pg_policy` (mismo patrón que `005`). No toca
+> ninguna de las 3 policies `FOR ALL` ya aplicadas contra Render por
+> `002_pacientes_historial_auth_google.sql` — la escritura sobre
+> `paciente`/`tratamiento`/`nota_medica` sigue exclusivamente en manos del profesional dueño de
+> cada fila. **No aplicado todavía contra Render** (mismo patrón que `005`/`006`) — pendiente de
+> que el Director General IA lo revise y lo corra, con aprobación del CEO, igual que los ciclos
+> anteriores.
 
 ## 5. Row Level Security (Postgres, producción)
 
@@ -1530,6 +1547,86 @@ contra un Postgres real** en este ciclo (mismo caveat que el resto de este docum
 prioridad para quien aplique `005_suscripcion_negocio.sql` contra Render: confirmar que el
 backfill deja exactamente 1 fila `suscripcion_negocio` por `negocio` existente, todas en plan
 'gratis', antes de que Backend conecte el chequeo de límites sobre esta tabla.
+
+## 5septies. RLS de administrador — acceso de solo lectura al historial de pacientes (fast-follow de E15, DBA, 2026-08-15)
+
+**Origen.** El CEO confirmó, en la ronda de trabajo de la épica E15 ("Modo Administrador v1"), la
+pregunta que `documento-funcional.md` §6, ítem 2, dejaba abierta desde la Fase 2 ("Alcance de
+permisos del administrador del negocio sobre el historial de clientes... A7/D3 dejan al
+administrador sin acceso por defecto — confirmar si es correcto") y que `02-backlog/backlog.md`
+(épica E15) había registrado con una propuesta de Product Manager de **mantener** ese default sin
+acceso: el CEO pidió expresamente **"acceso completo"** al historial de pacientes de su negocio —
+rechazando la propuesta conservadora — y, al no existir todavía backend para eso en esa misma
+ronda, aceptó la recomendación de tratarlo como un **fast-follow separado** (DBA primero, sobre
+este mismo diseño; Backend/Mobile en una ronda posterior). Detalle completo de esa decisión en
+`memory/proyectos/turnos-profesionales/decisiones.md`, entrada "E15 'Modo Administrador v1'". Este
+apartado es esa ronda de DBA.
+
+**Alcance decidido: SOLO LECTURA, no escritura — evaluado explícitamente, no asumido.** "Acceso
+completo al historial" se interpreta acá como "el historial ENTERO visible" (ficha + tratamientos
++ notas, sin recortes), no como "con permiso de edición incluido": nada en el pedido del CEO, ni
+en HU-20/HU-21/RN7/RN13/D3, ni en ningún otro punto de `documento-funcional.md`/`backlog.md`, pide
+que el administrador pueda editar o borrar una ficha, un tratamiento o una nota médica ajena — y
+RN7/RN13/D3 siguen íntegramente vigentes para la escritura: ese registro es de autoría clínica del
+profesional que atendió, con implicancia médico-legal, no solo de producto. Se aplica acá el mismo
+criterio de mínimo privilegio que ya usa este documento ante instrucciones ambiguas entre 2
+lecturas posibles (§1, "Estado por defecto seguro..."; `es_rubro_salud` DEFAULT false, §2quinquies):
+implementar la lectura más angosta que satisface lo pedido explícitamente, dejando la más amplia
+(escritura para administrador) como extensión futura documentada y aditiva si algún día se pide —
+nunca al revés, por el costo asimétrico de tener que retirar un permiso de escritura ya otorgado
+sobre datos clínicos sensibles (D11/RN15) que nadie pidió.
+
+**Diseño — 3 policies `FOR SELECT` nuevas; ninguna de las 3 policies `FOR ALL` existentes
+(`paciente_acceso_propio_profesional`/`tratamiento_acceso_via_paciente`/
+`nota_medica_acceso_via_paciente`, §5ter) se toca ni se separa.** Se evaluó explícitamente separar
+cada `FOR ALL` en `FOR SELECT` + policies de escritura — la vía que ya sugería el comentario
+original de §5ter ("agregar una policy adicional... mismo patrón que turno") — y se descarta por
+innecesario: Postgres combina con OR, por comando, todas las policies `PERMISSIVE` (el default;
+ninguna policy de este esquema usa `RESTRICTIVE`) que aplican a ese comando — una `FOR ALL` aplica
+a los 4 comandos, una `FOR SELECT` nueva solo a `SELECT`. Agregar la `FOR SELECT` nueva ya amplía
+la lectura (se evalúa en OR junto al `USING` de la `FOR ALL` existente) sin tocar
+INSERT/UPDATE/DELETE, que siguen dependiendo exclusivamente de la `FOR ALL` original — mismo
+resultado final que "separar" la policy vieja, con menor superficie de cambio (0 líneas tocadas de
+policies ya aprobadas y en producción) y por lo tanto menor riesgo de regresión.
+
+Verificado contra el código real de Backend antes de dar por segura esta decisión (no asumido):
+`05-codigo/backend/src/routes/profesionales.ts` (`GET`/`PATCH /:id/pacientes/:pacienteId`,
+`GET /:id/pacientes/:pacienteId/historial`) es hoy el único lugar que lee o escribe estas 3
+tablas; las 3 rutas exigen `requireAuth('profesional')` + `esPropioProfesional(req)` antes de
+tocar la base y fijan `app.usuario_id` al propio profesional en `withTransaction(...)` — ningún
+código hoy depende de que estas tablas tengan una única policy `FOR ALL`, así que sumar policies
+de `SELECT` en paralelo no cambia el comportamiento de ninguna ruta existente. Backend todavía no
+tiene ningún endpoint que lea estas tablas en contexto de administrador — esta migración deja
+lista la autorización a nivel de base de datos para la ronda de Backend/Mobile de este mismo
+fast-follow.
+
+`negocio_id` para el chequeo de cada policy: `paciente.negocio_id` ya existe en la fila — a
+diferencia de `suscripcion_negocio`/HU-29 (§5sexies), que necesitó `app.negocio_id` de sesión por
+no tener FK directa a una identidad, acá no hace falta ninguna variable de sesión nueva.
+`tratamiento`/`nota_medica` lo resuelven vía `JOIN` a `paciente`, mismo patrón que sus propias
+policies `FOR ALL` (§5ter) ya usan para resolver "quién es el profesional dueño".
+
+Detalle línea por línea de cada policy en `05-codigo/database/migrations/001_init.sql` (bloque
+"Acceso de administrador al historial de pacientes — SOLO LECTURA") y en
+`007_paciente_historial_acceso_administrador.sql` (mismas policies, envueltas en un bloque `DO`
+con guard contra `pg_policy` para que ese script sea reintentable). **No verificado contra un
+Postgres real** en este ciclo (mismo caveat que el resto de este documento) — prioridad para quien
+aplique `007_paciente_historial_acceso_administrador.sql` contra Render: confirmar con
+`set_config('app.usuario_id', ...)` que (a) un administrador del negocio SÍ puede `SELECT` la
+ficha/tratamientos/notas de un paciente atendido por CUALQUIER profesional de su negocio, (b) un
+administrador de OTRO negocio sigue sin poder verlas (aislamiento de tenant intacto), y (c) un
+`UPDATE`/`INSERT`/`DELETE` intentado con contexto de administrador sigue denegado (fail-closed —
+la escritura no tiene ninguna policy que la habilite para ese rol).
+
+**Pendiente, fuera del alcance de DBA:** Business Analyst/Product Manager deben actualizar
+formalmente `documento-funcional.md` (D3/RN7/§6) y `02-backlog/backlog.md` (E15) con esta
+resolución — este documento y `001_init.sql` son la fuente de verdad del MODELO DE DATOS, no
+reemplazan esa actualización textual. Backend necesita un endpoint nuevo (ej. `GET
+/negocios/:id/pacientes/:pacienteId/historial` o equivalente, criterio de ruta a definir por
+Arquitecto/Backend) que corra con `requireAuth('administrador')` y lea estas 3 tablas bajo el
+contexto RLS del administrador para que esta policy tenga un consumidor real; Mobile necesita la
+pantalla correspondiente en `AdministradorShell`. Ninguno de los dos implementado en este ciclo
+(instrucción explícita: solo DBA en esta ronda, sin tocar Backend ni Mobile).
 
 ## 6. Índices críticos
 
