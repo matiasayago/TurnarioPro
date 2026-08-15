@@ -10,6 +10,7 @@ import '../../widgets/widgets.dart';
 import '../profesional/configuracion_consultorio_screen.dart';
 import '../profesional/editar_perfil_screen.dart';
 import '../profesional/privacidad_screen.dart';
+import 'pacientes_negocio_screen.dart';
 import 'profesionales_negocio_screen.dart';
 import 'servicios_negocio_screen.dart';
 import 'turnario_pro_screen.dart';
@@ -28,6 +29,12 @@ import 'turnario_pro_screen.dart';
 /// lado Profesional — cero backend nuevo). Mismos widgets del sistema de diseño que el resto de
 /// la app (`AppHeader`, `StatCard`, `AppColors`/`AppTypography`/`AppSpacing`/`AppRadius`), sin
 /// inventar un lenguaje visual nuevo.
+///
+/// **Fast-follow (2026-08-15):** se sumó un 5to ítem a "Mi negocio", `PacientesNegocioScreen`
+/// (acceso de SOLO LECTURA al historial de pacientes del negocio, `02-backlog/backlog.md` —
+/// "Fast-follow — acceso de administrador al historial de pacientes") — no formaba parte del
+/// alcance original de HU-36 (ver "Pregunta 2" en esa misma sección del backlog, secuenciada
+/// aparte por no tener backend todavía en la v1).
 ///
 /// No hay selector "actuar como Profesional/Administrador": el modelo de datos no permite que una
 /// misma cuenta tenga los dos roles a la vez (`usuario.rol` es un único valor — E15, sección
@@ -156,6 +163,11 @@ class _AdministradorShellState extends State<AdministradorShell> {
                     icon: Icons.people_outline,
                     label: 'Profesionales',
                     onTap: () => _irA(const ProfesionalesNegocioScreen()),
+                  ),
+                  _MenuTile(
+                    icon: Icons.folder_shared_outlined,
+                    label: 'Pacientes',
+                    onTap: () => _irA(const PacientesNegocioScreen()),
                   ),
                   _MenuTile(
                     icon: Icons.workspace_premium_outlined,
