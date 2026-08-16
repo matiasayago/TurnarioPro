@@ -7,6 +7,7 @@ import { requireAuth, AuthedRequest } from '../auth';
 import { asyncHandler } from '../middleware/asyncHandler';
 import {
   uuidSchema,
+  fechaIsoSchema,
   montoPositivoSchema,
   passwordSchema,
   respuestaValidacionFallida,
@@ -74,6 +75,22 @@ const altaProfesionalSchema = z.object({
   email: z.string().email('email debe ser una dirección de correo válida'),
   password: passwordSchema,
   nombre: z.string().min(1, 'nombre es requerido'),
+});
+
+// Reportes y Estadísticas (HU-28/E10) — filtros opcionales de GET /:id/reportes, al final de
+// este archivo (vista de negocio/administrador — ver el bloque de comentarios ahí para el
+// contrato completo). Mismo shape que `reportesQuerySchema` (profesionales.ts, lado Profesional,
+// ~línea 112) más `profesional_id`, que ahí no aplica (esa ruta ya está scopeada a un único
+// profesional por diseño) y acá sí, como filtro más. Duplicado local en vez de importado desde
+// profesionales.ts: ningún schema de este backend se comparte hoy entre routers — cada archivo de
+// rutas define los propios, incluso cuando coinciden campo a campo con otro (mismo criterio ya
+// aplicado en todo este archivo, ej. `negocioIdParamsSchema` vs. `profesionalIdParamsSchema` de
+// profesionales.ts, ambos `{ id: uuidSchema }`).
+const reportesNegocioQuerySchema = z.object({
+  desde: fechaIsoSchema.optional(),
+  hasta: fechaIsoSchema.optional(),
+  servicio_id: uuidSchema.optional(),
+  profesional_id: uuidSchema.optional(),
 });
 
 // HU-00b: cliente descubre negocios (RN9 — no se filtra por negocio_id porque es cross-tenant
@@ -918,5 +935,109 @@ negociosRouter.get(
           notas_medicas: resultado.notas_medicas,
         });
     }
+  })
+);
+
+// ============================================================================
+// Reportes y Estadísticas (HU-28/E10) — vista de NEGOCIO/administrador, TODOS los profesionales a
+// la vez. Completa lo que GET /profesionales/:id/reportes (profesionales.ts, ver el bloque de
+// comentarios "Reportes y Estadísticas" ahí, ~línea 1153) dejó documentado explícitamente afuera
+// de esa v1: "Vista de negocio/administrador (todos los profesionales a la vez): HU-28 la pide,
+// pero la consigna de ese ciclo la difería explícitamente [...] Cuando se construya, es un
+// endpoint nuevo (ej. GET /negocios/:id/reportes), no una extensión de este." Este es ese
+// endpoint nuevo.
+// ============================================================================
+
+// Contrato: GET /negocios/:id/reportes?desde=<ISO>&hasta=<ISO>&servicio_id=<uuid>&profesional_id=
+// <uuid> (los 4 query params son opcionales e independientes) -> 200 { desde, hasta, servicio_id,
+// profesional_id, turnos_totales, turnos_completados, turnos_cancelados, monto_facturado } | 400
+// query inválida | 403 rol distinto de administrador o `:id` ajeno.
+//
+// MISMA lógica/definiciones exactas que GET /profesionales/:id/reportes — `turnos_completados` =
+// `estado = 'confirmado' AND fin < now()`, "monto facturado" = suma de `servicio.precio_referencia`
+// (no la seña) de esos turnos completados, `turnos_totales` excluye `estado = 'reprogramado'`
+// (la fila vieja que deja HU-13 al reprogramar, para no duplicar la cita real),
+// `turnos_cancelados` = `estado = 'cancelado'` sin más condición — ver ese comentario
+// (profesionales.ts) para el razonamiento completo de cada una, no repetido acá. Mismo criterio de
+// período también: filtra por `turno.inicio`, no por `creado_en`, con ambos extremos normalizados
+// vía `new Date(x).toISOString()`.
+//
+// 2 diferencias con el lado profesional, ambas ya anticipadas por ese mismo comentario:
+//   - `WHERE t.negocio_id = :id` en vez de `t.profesional_id = :id` — el "administrador ve el
+//     reporte de todo su negocio (todos los profesionales)" que pide HU-28 explícitamente.
+//   - `profesional_id` pasa de fijo (era el `:id` de la URL del lado profesional, vía
+//     `esPropioProfesional`) a FILTRO OPCIONAL más, exactamente al mismo patrón que ya usan
+//     `desde`/`hasta`/`servicio_id` (`AND ($X::uuid IS NULL OR t.profesional_id = $X)`) — acá sí
+//     tiene sentido (a diferencia del lado profesional, donde ese comentario ya explica por qué
+//     no aplica ahí): esta ruta cubre TODOS los profesionales del negocio por default, y este
+//     filtro deja acotar el reporte a uno puntual sin perder la vista agregada como default.
+//
+// Sin gate de plan/Turnario Pro (`tieneAccesoTurnarioPro`, ver el bloque de Suscripción más
+// arriba en este archivo): ninguno de los 2 endpoints de reportes lo tiene hoy — no fue pedido
+// para esta funcionalidad, no se inventa acá.
+//
+// Auth: RN9 vía claim del JWT, mismo patrón que el resto de este archivo (comparación directa
+// contra `:id`, no una query aparte) — SIN el 400 "elegí un negocio primero" que sí tiene el lado
+// profesional: ese chequeo existe ahí porque un profesional puede no tener ninguna "vista activa"
+// seteada todavía (puede pertenecer a 0+ negocios, ver GET /profesionales/:id/turnos). Un
+// administrador en ESTE archivo siempre opera sobre su negocio fijo — mismo criterio que cada
+// otro endpoint de negocios.ts, ninguno repite ese chequeo.
+//
+// Sin policy nueva de RLS: `turno`/`servicio` ya tienen SELECT público a nivel de base
+// (`turno_select_publico`/`servicio_select_publico`, `USING (true)` — confirmado en
+// ../../database/migrations/001_init.sql) — mismo motivo por el que GET /profesionales/:id/reportes
+// tampoco necesitó ninguna nueva. `withTransaction` con contexto de todos modos, por consistencia
+// con el resto de este archivo (mismo criterio ya documentado junto a GET /:id/profesionales).
+negociosRouter.get(
+  '/:id/reportes',
+  requireAuth('administrador'),
+  asyncHandler(async (req: AuthedRequest, res) => {
+    const paramsParsed = negocioIdParamsSchema.safeParse(req.params);
+    if (!paramsParsed.success) return respuestaValidacionFallida(res, paramsParsed.error);
+    if (req.auth!.negocio_id !== req.params.id) {
+      return res.status(403).json({ error: 'No podés ver el reporte de otro negocio' });
+    }
+    const queryParsed = reportesNegocioQuerySchema.safeParse(req.query);
+    if (!queryParsed.success) return respuestaValidacionFallida(res, queryParsed.error);
+    const { desde, hasta, servicio_id, profesional_id } = queryParsed.data;
+    const desdeIso = desde ? new Date(desde).toISOString() : null;
+    const hastaIso = hasta ? new Date(hasta).toISOString() : null;
+
+    const filas = await withTransaction(
+      async (client) => {
+        const result = await client.query(
+          `SELECT
+             t.estado,
+             (t.estado = 'confirmado' AND t.fin < now()) AS completado,
+             s.precio_referencia
+           FROM turno t
+           JOIN servicio s ON s.id = t.servicio_id
+           WHERE t.negocio_id = $1
+             AND ($2::timestamptz IS NULL OR t.inicio >= $2)
+             AND ($3::timestamptz IS NULL OR t.inicio <= $3)
+             AND ($4::uuid IS NULL OR t.servicio_id = $4)
+             AND ($5::uuid IS NULL OR t.profesional_id = $5)`,
+          [req.params.id, desdeIso, hastaIso, servicio_id ?? null, profesional_id ?? null]
+        );
+        return result.rows as { estado: string; completado: boolean; precio_referencia: number | null }[];
+      },
+      { usuarioId: req.auth!.sub, negocioId: req.params.id }
+    );
+
+    const completados = filas.filter((f) => f.completado);
+    const turnos_totales = filas.filter((f) => f.estado !== 'reprogramado').length;
+    const turnos_cancelados = filas.filter((f) => f.estado === 'cancelado').length;
+    const monto_facturado = completados.reduce((acc, f) => acc + (f.precio_referencia ?? 0), 0);
+
+    res.json({
+      desde: desdeIso,
+      hasta: hastaIso,
+      servicio_id: servicio_id ?? null,
+      profesional_id: profesional_id ?? null,
+      turnos_totales,
+      turnos_completados: completados.length,
+      turnos_cancelados,
+      monto_facturado,
+    });
   })
 );
