@@ -386,14 +386,43 @@ ya documentaba este README, en `dashboard_screen.dart`) y `flutter build web` (c
 tree-shaking de íconos corrió sin errores, confirmando que todos los `Icons.*` nuevos resuelven a
 constantes válidas).
 
+## 🆕 Registro de Negocio (HU-00a) — pantalla de alta + auto-login
+
+Cierra el gap señalado en la sección "Modo Administrador v1" de arriba y en "Simplificaciones
+deliberadas" más abajo: `POST /auth/registro-negocio` ya existía en Backend (en producción), pero
+ningún cliente Mobile lo consumía — un administrador nuevo no podía autoregistrarse desde la app.
+
+- `lib/screens/registro_negocio_screen.dart` (nuevo): pantalla pre-autenticación, vive junto a
+  `login_screen.dart`, fuera de cualquier shell. Campos: Nombre del negocio* / Rubro (opcional) /
+  Ubicación (opcional) — sección "Datos del negocio" — y Tu nombre* / Email* / Contraseña*
+  (mínimo 8 caracteres, validado también del lado del cliente con el mismo mensaje que usa el
+  backend, `passwordSchema`) — sección "Tu cuenta de administrador", con una nota aclarando que
+  "Tu nombre" es la persona a cargo, no el negocio. 409 (email ya registrado) se distingue con un
+  mensaje específico, no el genérico del backend.
+- Al registrar con éxito: `sesion.iniciarSesion` directo (mismo patrón que ya usa
+  `login_screen.dart` para el login con Google) — esta respuesta nunca trae `negocios` (un negocio
+  recién creado es, por definición, el único del administrador nuevo), así que no hace falta el
+  selector de negocio de HU-27. La pantalla se `popUntil` de vuelta a la raíz de la navegación para
+  que quede visible el `AdministradorShell` que el `_Router` de `main.dart` ya renderiza debajo
+  apenas `Sesion` notifica el login.
+- `login_screen.dart`: un solo agregado puntual, sin rediseño — link `TextButton` al pie ("¿Todavía
+  no tenés tu negocio en la app? Registralo") que empuja `RegistroNegocioScreen` con
+  `Navigator.push`.
+- El registro de CLIENTE (HU-01) sigue sin pantalla propia — no era parte de este encargo (ver
+  doc-comment de `LoginScreen` y bullet de "Simplificaciones deliberadas" más abajo).
+
+**Verificado:** `flutter analyze` limpio (mismo único "info" preexistente de siempre, en
+`dashboard_screen.dart`).
+
 ## Pantallas implementadas (ver mapa completo en `04-diseno/mapa-pantallas.md`)
 
-**Cliente:** Login (+ Google, HU-35, solo Web — ver sección propia arriba), `ClienteShell` (bottom
-nav de 4 ítems, ver sección de arriba), Buscar Negocios (HU-00b), Detalle de Negocio/Servicios
-(HU-07), Elegir Profesional (HU-08), Horarios Disponibles (HU-09), Confirmar Turno (HU-09b), Mis
-Turnos (HU-12), Reprogramar Turno (HU-13). Las pantallas del flujo de reserva y Mis Turnos siguen
-con el `ThemeData` genérico anterior a este ciclo (el rediseño visual "Turnario Pro" fue
-exclusivamente del lado Profesional, según lo pedido); solo el `ClienteShell`/`AppBottomNavigationBar`
+**Cliente:** Login (+ Google, HU-35, solo Web; + link a Registro de Negocio, HU-00a, nuevo — ambas
+ver sección propia arriba), `ClienteShell` (bottom nav de 4 ítems, ver sección de arriba), Buscar
+Negocios (HU-00b), Detalle de Negocio/Servicios (HU-07), Elegir Profesional (HU-08), Horarios
+Disponibles (HU-09), Confirmar Turno (HU-09b), Mis Turnos (HU-12), Reprogramar Turno (HU-13). Las
+pantallas del flujo de reserva y Mis Turnos siguen con el `ThemeData` genérico anterior a este
+ciclo (el rediseño visual "Turnario Pro" fue exclusivamente del lado Profesional, según lo
+pedido); solo el `ClienteShell`/`AppBottomNavigationBar`
 y el botón de Google usan piezas del sistema de diseño nuevo. No incluye "Crear Cuenta" ni
 "¿Olvidaste tu contraseña?" — `mapa-pantallas.md` §5.17 documenta que esas dos partes no se
 capturaron, quedan fuera de HU-35. Notificaciones y Configuración (Cliente): placeholders
@@ -423,8 +452,10 @@ de esta ronda.
 - El selector de servicio en las pantallas del profesional (Excepciones, Configuración de
   Servicios, Gestión de Horarios) es un campo de texto libre con el ID del servicio, no un
   dropdown poblado desde la API — se resuelve en una siguiente iteración.
-- No hay registro de negocio/cliente desde la app (HU-00a se hizo vía API en las pruebas del
-  backend) — falta la pantalla de registro.
+- ~~No hay registro de negocio/cliente desde la app (HU-00a se hizo vía API en las pruebas del
+  backend) — falta la pantalla de registro.~~ — resuelto para HU-00a (negocio), ver "🆕 Registro de
+  Negocio (HU-00a)" arriba. Sigue sin pantalla el registro de CLIENTE (HU-01) — no era parte de
+  ese encargo.
 - No hay checkout de pago real embebido — la pantalla de Confirmar Turno solo avisa que se
   requiere seña (el backend usa un Mock de Mercado Pago, ver
   `../backend/src/integraciones/pagos.ts`).
