@@ -12,6 +12,7 @@ import '../profesional/editar_perfil_screen.dart';
 import '../profesional/privacidad_screen.dart';
 import 'pacientes_negocio_screen.dart';
 import 'profesionales_negocio_screen.dart';
+import 'reportes_negocio_screen.dart';
 import 'servicios_negocio_screen.dart';
 import 'turnario_pro_screen.dart';
 
@@ -35,6 +36,15 @@ import 'turnario_pro_screen.dart';
 /// "Fast-follow — acceso de administrador al historial de pacientes") — no formaba parte del
 /// alcance original de HU-36 (ver "Pregunta 2" en esa misma sección del backlog, secuenciada
 /// aparte por no tener backend todavía en la v1).
+///
+/// **HU-28/E10 (2026-08-16):** se sumó un 6to ítem a "Mi negocio", `ReportesNegocioScreen` (vista
+/// agregada de reportes/estadísticas de TODO el negocio — turnos totales/completados/cancelados y
+/// monto facturado, filtrable por período y por profesional) — completa, del lado administrador,
+/// la mitad "profesional" que ya existía de un ciclo anterior (`profesional/reportes_screen.dart`,
+/// sin cambios). Mismo criterio que el ítem "Pacientes" de arriba: no formaba parte del alcance
+/// original de HU-36 (E15) — el backend de esta vista agregada (`GET /negocios/:id/reportes`) se
+/// construyó recién en esta misma fecha, ver `02-backlog/backlog.md` (HU-28/E10, "Estado,
+/// 2026-08-16 — HU-28 completa en Backend").
 ///
 /// No hay selector "actuar como Profesional/Administrador": el modelo de datos no permite que una
 /// misma cuenta tenga los dos roles a la vez (`usuario.rol` es un único valor — E15, sección
@@ -168,6 +178,11 @@ class _AdministradorShellState extends State<AdministradorShell> {
                     icon: Icons.folder_shared_outlined,
                     label: 'Pacientes',
                     onTap: () => _irA(const PacientesNegocioScreen()),
+                  ),
+                  _MenuTile(
+                    icon: Icons.insert_chart_outlined,
+                    label: 'Reportes',
+                    onTap: () => _irA(const ReportesNegocioScreen()),
                   ),
                   _MenuTile(
                     icon: Icons.workspace_premium_outlined,
