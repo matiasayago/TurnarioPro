@@ -708,6 +708,24 @@ negocio/agenda, para tomar decisiones basadas en datos en vez de revisar turno p
   - Métricas más avanzadas (ocupación, ausentismo, pacientes nuevos vs. recurrentes) también
     quedan fuera de este alcance básico — no bloquean esta historia.
 
+**Estado, 2026-08-16 — HU-28 completa en Backend (las 2 mitades).** Lado profesional
+(`GET /profesionales/:id/reportes`, agenda propia) ya estaba construido de un ciclo anterior, que
+dejó documentado explícitamente que la vista de negocio quedaba para un endpoint nuevo aparte.
+Ese endpoint nuevo ya se construyó: `GET /negocios/:id/reportes?desde=<ISO>&hasta=<ISO>&
+servicio_id=<uuid>&profesional_id=<uuid>` (administrador únicamente, RN9) — misma lógica y mismas
+definiciones de métricas que el endpoint del profesional (turnos totales/completados/cancelados,
+monto facturado por `servicio.precio_referencia`), pero agregadas a nivel de todo el negocio
+(todos los profesionales a la vez, tal como pide el 3er criterio de aceptación de arriba), con
+`profesional_id` como filtro opcional adicional (no existe del lado profesional, que ya está
+acotado a un único profesional por diseño). Verificado por Backend con curl real contra Render:
+sin filtros, con filtro `profesional_id` sobre un negocio con 2 profesionales activos (aislando
+correctamente las métricas de cada uno), filtros de período combinados con `profesional_id`, y
+401/403 de autorización estándar. Sin gate de plan/Turnario Pro — no lo tiene ningún endpoint de
+reportes hoy (ver nota aparte más abajo, tabla de HU-29, sobre una propuesta de Product Manager
+que sí lista "Reportes" como función exclusiva de Turnario Pro, todavía sin cerrar por el CEO).
+Pendiente: pantalla Mobile de administrador que consuma este endpoint (ver E15 más abajo — no
+estaba en el alcance de esa ronda).
+
 ### E11 — Suscripción "Turnario Pro" (monetización) (P1, nueva — repriorizada y desbloqueada 2026-08-06)
 
 **HU-29.** Como administrador de negocio, quiero poder suscribirme a un plan pago ("Turnario
@@ -999,6 +1017,12 @@ sin ese visto bueno explícito.
   profesionales a la vez): HU-28 la pide, pero la consigna de este ciclo la difiere
   explícitamente. Cuando se construya, es un endpoint nuevo (ej. `GET /negocios/:id/reportes`), no
   una extensión de este" (`profesionales.ts`). Requiere backend nuevo — fuera de v1-Administrador.
+  **Actualización 2026-08-16 (Backend):** ese backend ya se construyó — `GET
+  /negocios/:id/reportes` (admin-only, RN9), mismas métricas/filtros que el endpoint del
+  profesional agregados a nivel de todo el negocio, más `profesional_id` como filtro opcional
+  nuevo — verificado con curl real contra Render (ver la sección de HU-28/E10 más arriba para el
+  detalle). El gap de backend queda cerrado; lo único que sigue faltando para esta épica es la
+  pantalla Mobile de administrador que lo consuma, no incluida en el alcance de esta ronda.
 - **HU-30 (Configuración de pagos — Mercado Pago).** Sin ningún endpoint hoy; su propio texto en
   este backlog dice "mecanismo concreto de integración a definir por Arquitecto/Integraciones en
   Fase 3". Requiere backend nuevo (y una definición de integración que todavía no existe) — fuera
