@@ -1348,3 +1348,28 @@ prueba, insertados a mano por no existir todavía un endpoint de alta para esas 
   en el historial, estados vacíos de tratamientos/notas correctos).
 - Con esto, el fast-follow queda completo y desplegable — pendiente el mismo flujo de siempre
   (PR → CI → aprobación del CEO → merge → deploy a Render).
+
+## Mobile: pantalla de registro de negocio (HU-00a) — PR #16 (2026-08-16)
+
+Tercera ronda de "modo Administrador" tras historial de pacientes (PR #14) y reportes agregados
+(PR #15) — esta vez elegida por el CEO entre 4 gaps ofrecidos (baja/pausa de profesional, resto de
+HU-31, Mercado Pago real, y esta). Solo Mobile: el endpoint `POST /auth/registro-negocio` ya
+existía en producción desde antes (`auth.ts`), sin ninguna UI que lo consumiera.
+
+- **Mobile**: pantalla nueva `screens/registro_negocio_screen.dart`, pre-autenticación, accesible
+  desde un link nuevo en `login_screen.dart` ("¿Todavía no tenés tu negocio en la app?
+  Registralo"). Alta única de negocio+administrador (nunca devuelve `negocios` array — un negocio
+  recién creado es por definición el único del admin nuevo — así que se salta el selector de
+  negocio de HU-27 y hace `sesion.iniciarSesion` directo, mismo patrón que el login con Google).
+  Validación de password client-side (mínimo 8, mismo mensaje que el backend) y manejo específico
+  del 409 (email ya registrado) con mensaje propio en vez del genérico.
+- **Verificado visualmente contra un negocio real, de punta a punta** (Director General IA, no
+  solo lectura de código): registro completo con datos nuevos → auto-login → aterriza directo en
+  `AdministradorShell` sin quedar tapado por la pantalla de registro (el `popUntil((route) =>
+  route.isFirst)` funciona) → estado inicial correcto de un negocio recién creado (Plan Gratis,
+  0/60 turnos, 0/1 profesionales) → los datos cargados en "Datos del Negocio" coinciden
+  exactamente con lo tipeado. Repetido registrando con el mismo email: banner rojo con el mensaje
+  específico esperado ("Ya existe una cuenta registrada con ese email..."), no el genérico.
+- Sin cambios de Backend ni DBA en este round — PR solo con los 3 archivos de Mobile
+  (`registro_negocio_screen.dart` nuevo, `login_screen.dart` + `README.md` con diffs mínimos).
+  No requiere deploy a Render (nada de backend cambió).
