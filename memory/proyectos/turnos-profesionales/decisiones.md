@@ -1595,3 +1595,39 @@ y en `05-codigo/mobile/README.md` (sección "🆕 Recuperación de contraseña")
   las 3 entradas anteriores de este mismo archivo — Backend/DBA/Director General IA, todas
   2026-08-16). Tampoco `04-diseno/mapa-pantallas.md` (UX/UI dejó explícitamente sin wireframe este
   flujo por falta de evidencia — HU-37 fija el comportamiento funcional, no el layout).
+
+## PR #17 — organización de rama + fallo real de CI + fix — Director General IA (2026-08-16)
+
+Dos hallazgos propios en el cierre de esta historia, ninguno de los dos "solo re-lanzar el CI":
+
+- **Todo el trabajo de HU-37 se había hecho sobre `feature/registro-negocio-mobile` (la rama del
+  PR #16, todavía sin mergear)** en vez de una rama propia — un descuido de organización, no un
+  problema de código. Se separó correctamente: `git stash push -u`, `git checkout main` (limpio,
+  sin HU-00a), rama nueva `feature/recuperacion-password` desde ahí, `git stash pop` (con 3
+  conflictos reales — `decisiones.md`/`mobile/README.md`/`login_screen.dart`, los 3 archivos que
+  ambas rondas tocaron — resueltos a mano quedándose solo con el contenido de HU-37, verificado
+  con `flutter analyze`/`tsc --noEmit` limpios después de resolver). 5 commits separados por rol
+  (Product Manager/DBA/Backend/Mobile/memoria), PR #17 contra `main` real, "Able to merge" sin
+  conflictos.
+- **El CI de Backend falló de verdad en el primer push (run 31965043406) — investigado con logs
+  reales, no asumido como flaky.** El paso de diagnóstico del workflow (mismo mecanismo ya
+  documentado en esta sesión: comentario del commit vía `GITHUB_TOKEN`, necesario porque la
+  descarga directa de logs sigue devolviendo 403 sin login) mostró la causa exacta: la fase de
+  roles/RLS terminó en verde ("OK FINAL"), pero `scripts/test-recuperacion-password.mjs` (dentro de
+  "Fase 1/2 - correr todos los scripts") falló en el request #11 con 429 — exactamente el MISMO
+  hallazgo de rate limiting que ya se había encontrado y corregido en el propio script para
+  verificación local (ver entrada "Verificación independiente de HU-37..." más arriba), pero que
+  nadie había propagado al workflow de CI: `.github/workflows/turnos-backend-ci.yml` ya seteaba
+  `RATE_LIMIT_LOGIN_MAX`/`RATE_LIMIT_REGISTRO_MAX` en alto para sus propios arranques de servidor,
+  pero nunca se agregó `RATE_LIMIT_RECUPERACION_MAX` (variable nueva de esta misma historia) a esa
+  misma lista.
+- **Fix aplicado (commit `a9da987`):** `RATE_LIMIT_RECUPERACION_MAX: "1000"` agregado en los 2
+  arranques de servidor del job (`Fase 1/2` y `Fase 2/2`, mismo patrón que las 2 variables ya
+  existentes) — no se tocó ningún código de aplicación, el rate limiter en sí funciona
+  correctamente (es exactamente lo que debe hacer contra tráfico real); el gap estaba solo en la
+  configuración del entorno de CI.
+- Reutilizable: cuando se agrega una variable de rate limiting nueva a un endpoint, revisar si
+  algún script de `scripts/*.mjs` la ejercita con volumen suficiente como para necesitar el mismo
+  override que ya reciben `RATE_LIMIT_LOGIN_MAX`/`RATE_LIMIT_REGISTRO_MAX` en el CI — no alcanza
+  con que el script pase localmente con el límite manualmente elevado si el workflow no hace lo
+  mismo.
