@@ -1631,3 +1631,17 @@ Dos hallazgos propios en el cierre de esta historia, ninguno de los dos "solo re
   override que ya reciben `RATE_LIMIT_LOGIN_MAX`/`RATE_LIMIT_REGISTRO_MAX` en el CI — no alcanza
   con que el script pase localmente con el límite manualmente elevado si el workflow no hace lo
   mismo.
+- **Después del fix de rate limit, el re-run (run 31965450421) mostró un fallo DISTINTO** —
+  `test-recuperacion-password.mjs` esta vez pasó completo (las 27 verificaciones en verde,
+  confirmando que el fix funcionó), pero `test-rn8-ventana-cancelacion.mjs` (Fase 2/2) falló en
+  "Setup falló: turno lejano #1 creado". Mismo protocolo ya establecido en esta sesión (ver
+  entrada "Primera corrida real del CI de Backend" más arriba, y task #35 de antes de esta sesión
+  — este script tiene flakiness ya documentada): se reprodujo el script EXACTO, con el código
+  exacto de este PR (rama `feature/recuperacion-password`), contra Render real, arrancando el
+  backend local sin override de `VENTANA_CANCELACION_MIN` (para que use el default de 120 min,
+  igual que la Fase 2 del CI) — **pasó limpio, las 2 direcciones (rechazo dentro de la ventana,
+  aceptación fuera de la ventana) verificadas sin fallos**. Confirma que no es una regresión real
+  (ninguno de los cambios de este PR toca turnos/disponibilidad/cancelación) sino la misma
+  fragilidad de entorno de CI ya conocida para este script puntual. Se usó "Re-run failed jobs"
+  desde la UI de GitHub (mismo mecanismo ya usado antes en esta sesión) en vez de pushear ningún
+  cambio de código — no había nada que arreglar en el repo.
