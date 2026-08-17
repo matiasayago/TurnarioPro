@@ -23,11 +23,18 @@ import 'turnario_pro_screen.dart';
 ///   global de la identidad) — el mismo flag que ya usa el límite de "1 profesional activo" del
 ///   plan gratis (HU-29), se muestra con el mismo `StatusPill` genérico que el resto de la app usa
 ///   para un flag activo/inactivo (`StatusPill.activo`).
+/// - Pausar/reactivar `PATCH /negocios/:id/profesionales/:profesionalId` (E15 fast-follow,
+///   2026-08-17 — ver `_cambiarEstado`/`_ProfesionalCard` más abajo), body `{ activo: boolean }`
+///   -> 200 `{ id, activo }` | 402 (solo reactivando) mismo límite/shape de error que el alta de
+///   arriba (`requiere_turnario_pro: true`) | 404 este profesional no tiene membresía en este
+///   negocio.
 ///
-/// Sin baja/pausa ni acceso a historial/ficha: `negocios.ts` no expone ningún endpoint para dar de
-/// baja/pausar un profesional todavía, y el acceso del administrador al historial de pacientes
-/// queda explícitamente fuera de esta ronda (ver "Fuera de alcance" de esta épica en el backlog) —
-/// el roster es de alta + solo lectura en esta pantalla, sin navegación por fila.
+/// Sin acceso a historial/ficha desde ESTE roster: navegar al detalle clínico de un paciente sigue
+/// sin ser parte de esta pantalla puntual — ese acceso ya existe, pero como pantalla separada
+/// (`pacientes_negocio_screen.dart`, fast-follow de 2026-08-15), no como navegación por fila desde
+/// acá. El roster SÍ deja de ser puramente de solo lectura con el fast-follow de pausar/reactivar
+/// de arriba: cada fila tiene ahora una acción (Pausar/Reactivar) — pero la card en sí sigue sin
+/// navegar a ningún lado al tocarla (a diferencia de, por ejemplo, `_PacienteNegocioCard`).
 class ProfesionalesNegocioScreen extends StatefulWidget {
   const ProfesionalesNegocioScreen({super.key});
 
@@ -65,6 +72,82 @@ class _ProfesionalesNegocioScreenState extends State<ProfesionalesNegocioScreen>
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Profesional agregado.')));
       await _refrescar();
     }
+  }
+
+  /// Pausar/reactivar la membresía de [profesional] en este negocio — `PATCH
+  /// /negocios/:id/profesionales/:profesionalId`, body `{ activo: nuevoActivo }`. Pausar pide
+  /// confirmación primero (`_confirmarPausa`) por ser una acción con consecuencia real (el
+  /// profesional deja de poder recibir turnos nuevos) — reactivar no la pide, mismo criterio ya
+  /// aplicado en el resto de esta app para acciones reversibles sin impacto hacia terceros (ver
+  /// p.ej. "Cerrar Sesión" en `profesional/configuracion_screen.dart`, que tampoco confirma).
+  ///
+  /// `context` es el de la card que disparó la acción (pasado por [_ProfesionalCard]/
+  /// [_ProfesionalCardState], no `this.context` del State) — se usa `context.mounted` en vez del
+  /// `mounted` del State para los guards post-`await`, porque es ESE contexto puntual (y no
+  /// necesariamente toda la pantalla) el que hay que validar antes de mostrar el diálogo/SnackBar.
+  ///
+  /// El 402 (reactivar con el plan gratis ya en el límite de "1 profesional activo") se distingue
+  /// con el mismo criterio que ya usa `_AltaProfesionalSheetState` más abajo: `requiere_turnario_pro`
+  /// explícito en el body del error, nunca parseando el texto del mensaje.
+  Future<void> _cambiarEstado(BuildContext context, _Profesional profesional, bool nuevoActivo) async {
+    if (!nuevoActivo) {
+      final confirmado = await _confirmarPausa(context, profesional.nombre);
+      if (confirmado != true || !context.mounted) return;
+    }
+
+    final sesion = context.read<Sesion>();
+    try {
+      await sesion.api.patch('/negocios/${sesion.negocioId}/profesionales/${profesional.id}', {'activo': nuevoActivo});
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(nuevoActivo ? '${profesional.nombre} fue reactivado.' : '${profesional.nombre} fue pausado.'),
+        ),
+      );
+      await _refrescar();
+    } on ApiException catch (e) {
+      if (!context.mounted) return;
+      if (e.statusCode == 402 && e.body?['requiere_turnario_pro'] == true) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(e.message),
+            duration: const Duration(seconds: 6),
+            action: SnackBarAction(
+              label: 'Ver Turnario Pro',
+              onPressed: () =>
+                  Navigator.push(context, MaterialPageRoute(builder: (_) => const TurnarioProScreen())),
+            ),
+          ),
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
+      }
+    } catch (e) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('No se pudo actualizar: $e')));
+    }
+  }
+
+  /// Diálogo nativo (`showDialog`+`AlertDialog`) — mismo patrón ya usado en esta app para
+  /// confirmaciones puntuales (ver `login_screen.dart`, `_pedirPasswordParaVincular`); no hay un
+  /// helper de confirmación reusable en `lib/widgets/` todavía, así que se sigue el mismo criterio
+  /// de "cada pantalla arma el suyo" que el resto de este código. `null` (dismiss sin elegir botón,
+  /// ej. tocar afuera o back) se trata igual que "Cancelar" por el caller (`!= true`).
+  Future<bool?> _confirmarPausa(BuildContext context, String nombreProfesional) {
+    return showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Pausar profesional'),
+        content: Text(
+          '$nombreProfesional va a dejar de poder recibir turnos nuevos hasta que lo reactivés. '
+          'Los turnos que ya tiene agendados no se cancelan.',
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(dialogContext).pop(false), child: const Text('Cancelar')),
+          FilledButton(onPressed: () => Navigator.of(dialogContext).pop(true), child: const Text('Pausar')),
+        ],
+      ),
+    );
   }
 
   @override
@@ -115,7 +198,10 @@ class _ProfesionalesNegocioScreenState extends State<ProfesionalesNegocioScreen>
                   )
                 else
                   for (final profesional in profesionales) ...[
-                    _ProfesionalCard(profesional: profesional),
+                    _ProfesionalCard(
+                      profesional: profesional,
+                      onCambiarEstado: (context, nuevoActivo) => _cambiarEstado(context, profesional, nuevoActivo),
+                    ),
                     const SizedBox(height: AppSpacing.md),
                   ],
                 const SizedBox(height: AppSpacing.base),
@@ -150,14 +236,43 @@ class _Profesional {
       );
 }
 
-class _ProfesionalCard extends StatelessWidget {
-  const _ProfesionalCard({required this.profesional});
+/// A diferencia de la versión previa (`StatelessWidget` puramente informativa), esta card ahora
+/// dispara una escritura (`onCambiarEstado`) — pasa a `StatefulWidget` únicamente para llevar
+/// `_procesando` (deshabilita la acción y muestra un spinner chico mientras el PATCH está en
+/// vuelo, mismo criterio que `PrimaryButton(loading: ...)` en el resto de la app). En el camino
+/// feliz esta card se descarta igual apenas `_refrescar()` reemplaza la lista completa (el
+/// `FutureBuilder` padre vuelve a "waiting"), así que `_procesando` solo llega a importar de
+/// verdad en los caminos de error/cancelación, donde la card sigue viva y el botón tiene que
+/// volver a quedar disponible.
+class _ProfesionalCard extends StatefulWidget {
+  const _ProfesionalCard({required this.profesional, required this.onCambiarEstado});
 
   final _Profesional profesional;
+
+  /// `BuildContext` del propio callback: se le pasa el `context` de ESTA card (no uno externo) —
+  /// ver el doc comment de `_ProfesionalesNegocioScreenState._cambiarEstado` para por qué importa.
+  final Future<void> Function(BuildContext context, bool nuevoActivo) onCambiarEstado;
+
+  @override
+  State<_ProfesionalCard> createState() => _ProfesionalCardState();
+}
+
+class _ProfesionalCardState extends State<_ProfesionalCard> {
+  bool _procesando = false;
+
+  Future<void> _tocar(bool nuevoActivo) async {
+    setState(() => _procesando = true);
+    await widget.onCambiarEstado(context, nuevoActivo);
+    // Si el PATCH tuvo éxito, `_refrescar()` (dentro de `onCambiarEstado`) ya reemplazó la lista
+    // completa y esta card está desmontada a esta altura (`mounted == false`) — este `setState`
+    // solo llega a ejecutarse de verdad en los caminos de error/cancelación de arriba.
+    if (mounted) setState(() => _procesando = false);
+  }
 
   @override
   Widget build(BuildContext context) {
     final colors = AppColors.of(context);
+    final profesional = widget.profesional;
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(AppSpacing.base),
@@ -166,27 +281,89 @@ class _ProfesionalCard extends StatelessWidget {
         borderRadius: BorderRadius.circular(AppRadius.card),
         boxShadow: AppRadius.cardShadow,
       ),
-      child: Row(
+      child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  profesional.nombre,
-                  style:
-                      AppTypography.subtitle(context).copyWith(color: colors.textPrimary, fontWeight: FontWeight.bold),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      profesional.nombre,
+                      style: AppTypography.subtitle(context)
+                          .copyWith(color: colors.textPrimary, fontWeight: FontWeight.bold),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(profesional.email, style: AppTypography.caption(context)),
+                  ],
                 ),
-                const SizedBox(height: 2),
-                Text(profesional.email, style: AppTypography.caption(context)),
-              ],
-            ),
+              ),
+              const SizedBox(width: AppSpacing.sm),
+              StatusPill.activo(profesional.activo),
+            ],
           ),
-          const SizedBox(width: AppSpacing.sm),
-          StatusPill.activo(profesional.activo),
+          const SizedBox(height: AppSpacing.sm),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: profesional.activo
+                ? _AccionProfesional(
+                    icon: Icons.pause_circle_outline,
+                    label: 'Pausar',
+                    color: colors.warning.base,
+                    loading: _procesando,
+                    onTap: () => _tocar(false),
+                  )
+                : _AccionProfesional(
+                    icon: Icons.play_circle_outline,
+                    label: 'Reactivar',
+                    color: colors.success.base,
+                    loading: _procesando,
+                    onTap: () => _tocar(true),
+                  ),
+          ),
         ],
       ),
+    );
+  }
+}
+
+/// Acción de fila — mismo patrón visual que `_AccionPaciente`
+/// (`profesional/gestion_pacientes_screen.dart`: `TextButton.icon` chico, ícono + label en
+/// `caption` bold), duplicado localmente a propósito, mismo criterio ya establecido en este código
+/// de que cada pantalla define sus propios widgets de fila en vez de compartir uno genérico. A
+/// diferencia de `_AccionPaciente` (siempre `primary`, 3 acciones de navegación sin distinción
+/// semántica entre ellas), acá el color SÍ distingue el tipo de acción — `warning` para pausar
+/// (reversible, pero con efecto real) vs. `success` para reactivar (constructiva) — mismo criterio
+/// semántico que ya usan `WarningButton`/`SuccessButton` (`widgets/buttons.dart`). Sin `Expanded`
+/// (a diferencia de `_AccionPaciente`): acá hay una única acción por card, no 2-3 compartiendo el
+/// ancho de una fila.
+class _AccionProfesional extends StatelessWidget {
+  const _AccionProfesional({
+    required this.icon,
+    required this.label,
+    required this.color,
+    required this.onTap,
+    this.loading = false,
+  });
+
+  final IconData icon;
+  final String label;
+  final Color color;
+  final VoidCallback onTap;
+  final bool loading;
+
+  @override
+  Widget build(BuildContext context) {
+    return TextButton.icon(
+      onPressed: loading ? null : onTap,
+      icon: loading
+          ? SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: color))
+          : Icon(icon, size: 18, color: color),
+      label: Text(label, style: AppTypography.caption(context).copyWith(color: color, fontWeight: FontWeight.w600)),
+      style: TextButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 4)),
     );
   }
 }
