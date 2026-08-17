@@ -7,10 +7,12 @@ import '../theme/app_spacing.dart';
 import '../widgets/google_sign_in_button.dart';
 import '../widgets/selector_negocio.dart';
 import 'recuperar_password_screen.dart';
+import 'registro_negocio_screen.dart';
 
-/// HU-01: login de cliente o profesional. El registro de negocio/administrador (HU-00a) y el
-/// registro de cliente (HU-01) se resuelven con pantallas propias no incluidas en este slice
-/// inicial — este login alcanza para probar el flujo con datos creados vía el backend/API.
+/// HU-01: login de cliente o profesional. El registro de negocio/administrador (HU-00a) tiene su
+/// propia pantalla (`registro_negocio_screen.dart`), enlazada desde acá con un link al pie (ver
+/// [build]) — el registro de cliente (HU-01) sigue sin pantalla propia, no incluida en este
+/// slice: este login alcanza para probar ese flujo con datos creados vía el backend/API.
 ///
 /// HU-35 (`02-backlog/backlog.md`): además del login por contraseña de abajo, esta pantalla
 /// ofrece "Iniciar sesión con Google" (wireframe en `04-diseno/mapa-pantallas.md` §5.17) — ver
@@ -288,6 +290,17 @@ class _LoginScreenState extends State<LoginScreen> {
               onSignedIn: _iniciarConGoogle,
               onError: _mostrarAviso,
               onUnavailable: () => _mostrarAviso('Login con Google no está disponible en este momento'),
+            ),
+            const SizedBox(height: 12),
+            // HU-00a: único punto de entrada Mobile a `RegistroNegocioScreen` — esa pantalla vive
+            // fuera de cualquier shell, pre-autenticación, igual que este login (ver su
+            // doc-comment). Deshabilitado mientras hay un login en curso, mismo criterio que ya
+            // usa el botón "Ingresar" de arriba.
+            TextButton(
+              onPressed: (_cargando || _googleCargando)
+                  ? null
+                  : () => Navigator.push(context, MaterialPageRoute(builder: (_) => const RegistroNegocioScreen())),
+              child: const Text('¿Todavía no tenés tu negocio en la app? Registralo'),
             ),
           ],
         ),
