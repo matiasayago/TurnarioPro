@@ -4,6 +4,7 @@ import '../api_client.dart';
 import '../state/sesion.dart';
 import '../theme/app_radius.dart';
 import '../theme/app_spacing.dart';
+import '../theme/app_typography.dart';
 import '../widgets/google_sign_in_button.dart';
 import '../widgets/selector_negocio.dart';
 import 'recuperar_password_screen.dart';
@@ -255,6 +256,18 @@ class _LoginScreenState extends State<LoginScreen> {
                   fit: BoxFit.contain,
                 ),
               ),
+            ),
+            const SizedBox(height: AppSpacing.md),
+            // Nombre de marca + bajada, del wireframe de referencia de esta pantalla
+            // (`04-diseno/mapa-pantallas.md` §5.17, tomado de `Screenshot_20260805_202552_
+            // Turnario.jpg`) — quedó pendiente de implementar hasta ahora, sin relación con
+            // ninguna historia nueva.
+            Text('Turnario', textAlign: TextAlign.center, style: AppTypography.displayTitle(context)),
+            const SizedBox(height: AppSpacing.xs),
+            Text(
+              'Gestiona tus citas de manera fácil',
+              textAlign: TextAlign.center,
+              style: AppTypography.subtitle(context),
             ),
             const SizedBox(height: AppSpacing.xl),
             TextField(controller: _emailCtrl, decoration: const InputDecoration(labelText: 'Email')),
