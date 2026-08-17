@@ -51,7 +51,7 @@ Siguiendo el estándar de la empresa (`docs/06-modelo-datos.md` §3):
 
 | Entidad | Descripción | Relaciones |
 |---|---|---|
-| **Negocio** | Comercio/consultorio, raíz de aislamiento multi-tenant (D1). `es_rubro_salud` (D11/RN15, ver §2quinquies) determina si sus profesionales ven los campos extendidos de `Paciente`. | N:M Usuario (administradores, vía `NegocioAdministrador`); 1:N Servicio, Cliente-en-negocio, `Paciente`; N:M Profesional (vía `NegocioProfesional`) — ver §2ter, generalización N:M 2026-08-06; 1:1 `SuscripcionNegocio` (HU-29, ver §2novies) |
+| **Negocio** | Comercio/consultorio, raíz de aislamiento multi-tenant (D1). `es_rubro_salud` (D11/RN15, ver §2quinquies) determina si sus profesionales ven los campos extendidos de `Paciente`. `ubicacion` (referencia corta de zona/ciudad, descubrimiento) convive desde 2026-08-17 con 4 columnas nuevas de perfil completo — `horario_atencion`, `direccion` (postal completa, distinta de `ubicacion`), `telefono`, `logo_url` (HU-31, todas nullable, ver §2undecies). | N:M Usuario (administradores, vía `NegocioAdministrador`); 1:N Servicio, Cliente-en-negocio, `Paciente`; N:M Profesional (vía `NegocioProfesional`) — ver §2ter, generalización N:M 2026-08-06; 1:1 `SuscripcionNegocio` (HU-29, ver §2novies) |
 | **Usuario** | Identidad base (email, teléfono, hash de contraseña o `google_id` — al menos uno de los dos, ver §2sexies/HU-35 —, rol: cliente/profesional/administrador). | 1:1 Profesional (si rol=profesional, identidad — no implica pertenencia a un negocio); N:M Negocio (si rol=administrador, vía `NegocioAdministrador`) — ver §2ter |
 | **Profesional** | Extiende Usuario; identidad profesional pura, sin negocio fijo propio (ver §2ter). `duracion_cita_min` opcional (D10, ver §2quater): si el profesional lo configuró, reemplaza `servicio.duracion_min` en todos sus turnos, sin importar el servicio ni el negocio. | N:M Negocio (vía `NegocioProfesional`), N:M Servicio (vía `ProfesionalServicio`), 1:N Disponibilidad, 1:N Turno |
 | **NegocioAdministrador** | Tabla de asociación N:M; reemplaza a la antigua columna `negocio.admin_usuario_id` (1:1). PK compuesta `(negocio_id, usuario_id)`. Ver §2ter. | N:1 Negocio, N:1 Usuario |
@@ -1122,6 +1122,149 @@ contraseña — token de un solo uso") y en `008_recuperacion_password.sql` (mis
 para aplicar a mano contra Render — ver §4). RLS (o, en este caso, la decisión de no habilitarla)
 en **§5octies**.
 
+## 2undecies. Datos operativos del negocio — horario, dirección, teléfono, logo (HU-31) — 2026-08-17
+
+**Origen.** HU-31 (`02-backlog/backlog.md`, épica E13) pide "completar datos operativos de mi
+negocio más allá del alta inicial (horario general de atención, dirección detallada, teléfono/
+contacto, logo o imagen), para que el cliente vea información completa y actualizada al elegir mi
+negocio". La ronda "Modo Administrador v1" (épica E15, 2026-08-15) ya conectó
+`PATCH /negocios/:id` a una pantalla real de edición (`configuracion_consultorio_screen.dart`, modo
+`Rol.administrador`), pero la dejó **acotada a los 3 campos que ya tenían columna**
+(`nombre`/`rubro`/`ubicacion`) — el propio `backlog.md` de esa ronda lo deja registrado como gap
+explícito de DBA/Backend, no de Mobile/UX: *"Resto del alcance original de HU-31 (horario general
+de atención, dirección detallada más allá de 'ubicación', teléfono/contacto, logo o imagen). Sin
+columnas de datos ni endpoint — requiere DBA + Backend antes de poder construirse."* Este ciclo
+cierra la mitad de DBA de ese gap: 4 columnas nuevas en `negocio`, **todas nullable** — un negocio
+ya existente no tiene ninguna cargada hasta que su administrador las complete. El endpoint
+(`PATCH /negocios/:id`) y la UI (`configuracion_consultorio_screen.dart`) quedan para una ronda
+posterior de Backend/Mobile (recomendación con archivo y línea aproximada al final de esta
+sección).
+
+### Las 4 columnas
+
+- **`horario_atencion` (TEXT, nullable)** — texto libre (ej. "Lunes a Viernes 9 a 18hs, Sábados 9
+  a 13hs"), **deliberadamente NO estructurado por día**. Es puramente informativo para el perfil
+  del negocio — **no participa en el cálculo de disponibilidad real de ningún profesional**, que
+  sigue resuelto enteramente por `Disponibilidad`/`ExcepcionDisponibilidad` (bloques recurrentes +
+  excepciones puntuales, **por profesional**, ya mucho más granular que un horario a nivel de
+  negocio). Modelar esto de forma estructurada (columnas por día/franja) hubiera duplicado esa
+  lógica sin necesidad, y peor, habría abierto la puerta a que ambas fuentes queden inconsistentes
+  entre sí (ej. el texto dice "Sábados cerrado" pero un profesional puntual sí tiene disponibilidad
+  cargada ese día) sin que nada en el esquema lo detecte — mismo criterio de "no duplicar una única
+  fuente de verdad" ya aplicado a `Paciente.genero`/`contacto_emergencia_relacion` (§2quinquies):
+  contenido informativo/de UI se modela como TEXT libre, no como estructura que controle lógica.
+- **`direccion` (TEXT, nullable)** — dirección postal completa (calle, altura, piso). Campo
+  **nuevo y distinto de `ubicacion`** (columna ya existente, sin cambios). Ver la investigación
+  completa en la subsección siguiente.
+- **`telefono` (TEXT, nullable)** — texto simple, sin `CHECK` de formato — mismo criterio que
+  `Usuario.telefono` (§2sexies) y `Paciente.contacto_emergencia_telefono` (§2quinquies): ninguna
+  columna de teléfono de este esquema valida formato a nivel de base de datos.
+- **`logo_url` (TEXT, nullable)** — URL de una imagen ya alojada en otro lado. Ver el porqué de
+  "URL pegada, no upload real" en la subsección dedicada más abajo.
+
+Las 4 son **nullable, sin `DEFAULT`** — mismo motivo que el resto de columnas agregadas a una tabla
+ya en uso en este esquema (`Usuario.telefono`/`google_id` en §2sexies, `Profesional.
+duracion_cita_min` en §2quater): agregar una columna nullable sin `DEFAULT` no rompe ninguna fila
+ni ningún `INSERT` existente que no la mencione. **Sin backfill** — a diferencia de
+`SuscripcionNegocio` (§2novies, que sí backfillea un plan `'gratis'` por defecto para negocios ya
+existentes), acá no hay ningún valor por defecto razonable: son datos que solo el dueño de cada
+negocio conoce, nadie más puede completarlos en su nombre. Comparten el `modificado_en` genérico
+que `Negocio` ya tenía desde la Fase 3 original — sin auditoría por columna individual.
+
+### ¿Por qué `direccion` es una columna nueva y no una ampliación de `ubicacion`?
+
+Investigado contra el código real antes de decidir (no asumido). `ubicacion` ya es una columna en
+uso, con un propósito concreto y distinto del que pide HU-31 para este campo nuevo:
+
+- Viaja en las 2 lecturas **públicas** de descubrimiento de negocios (`GET /negocios` y
+  `GET /negocios/:id`, `src/routes/negocios.ts`, HU-00b/HU-31) y en `POST /auth/registro-negocio`
+  (`src/routes/auth.ts`, alta inicial).
+- Mobile la consume como **referencia corta de zona/ciudad**: `buscar_negocios_screen.dart`
+  (pantalla de descubrimiento, HU-00b) la muestra concatenada con `rubro` en el subtítulo de cada
+  card (`[rubro, ubicacion].whereType<String>().join(' · ')`) — un texto pensado para convivir con
+  N negocios a la vez en una lista, no para una dirección postal completa.
+
+HU-31 pide algo con un propósito distinto y posterior en el embudo: alguien que **ya decidió ir** a
+ESTE negocio puntual y necesita la dirección exacta (calle, altura, piso) — un dato que no tiene
+sentido amontonado en la lista de descubrimiento junto a otros negocios, y que además el propio
+texto de HU-31 llama "dirección detallada" explícitamente para distinguirlo de la "ubicación" ya
+existente (`backlog.md`, exclusiones de la épica E15: *"dirección detallada más allá de
+'ubicación'"*). Sobrecargar `ubicacion` con este segundo propósito, en vez de agregar una columna,
+tendría además un costo retroactivo: redefiniría en silencio el significado de datos que negocios
+existentes ya cargaron bajo la semántica actual ("zona/ciudad corta", vía
+`registro_negocio_screen.dart` o `configuracion_consultorio_screen.dart`), sin ninguna forma de
+distinguir, fila por fila, si ese valor previo sigue sirviendo como dirección completa o no. Se
+opta por la alternativa más simple y sin ambigüedad: `ubicacion` sigue exactamente igual, con su
+mismo propósito de descubrimiento; `direccion` es un campo nuevo que coexiste con ella y se muestra
+en un contexto distinto (perfil completo de un negocio ya elegido, no el listado de búsqueda).
+Reutiliza el nombre genérico `direccion`, ya usado en `Paciente.direccion` (§2quinquies) con el
+mismo significado literal — mismo criterio de reúso de nombre que `nombre`/`creado_en`, columnas
+que también se repiten en más de una tabla de este esquema; no existe ninguna relación entre
+`Negocio.direccion` y `Paciente.direccion` más allá de compartir nombre y significado genérico,
+cada una vive scopeada a su propia tabla.
+
+### ¿Por qué `logo_url` es una URL pegada y no un upload de imagen real?
+
+Este esquema no tiene, ni este ciclo agrega, ningún servicio de almacenamiento de objetos (S3,
+Cloudinary o similar) — y no es una omisión sino una restricción real de cómo opera esta Factory:
+un agente de IA no puede aprovisionar por su cuenta credenciales nuevas para un servicio de storage
+externo. El patrón elegido, consistente con el resto de esta ronda de Configuración, es que el
+administrador pegue la URL de una imagen que ya subió a algún otro lado (un hosting de imágenes
+existente, una red social, etc.) — `logo_url TEXT`, sin ninguna columna binaria/BYTEA ni un path de
+archivo local.
+
+**Sin `CHECK` de formato de URL a nivel de base de datos** — mismo criterio que `Usuario.email`
+(tampoco tiene un `CHECK` de formato en este esquema; la validación de forma vive en `zod`, del
+lado de Backend, no en el DDL). Se recomienda a Backend agregar `z.string().url()` (o equivalente)
+al extender `actualizarNegocioSchema`, y a Mobile replicar la misma validación client-side antes de
+habilitar "Guardar" (mismo patrón ya usado en esta app para la longitud mínima de contraseña). No
+se valida — ni acá, ni se recomienda hacerlo de forma estricta a nivel de aplicación — que la URL
+sea efectivamente una imagen: eso solo puede confirmarse intentando cargarla, no por el formato del
+string. La recomendación para Mobile es un `Image.network(..., errorBuilder: ...)` con un ícono o
+placeholder de fallback si la URL no carga, no un chequeo previo de contenido.
+
+### Row Level Security e índices
+
+**Sin cambios de RLS.** `Negocio` sigue sin tener Row Level Security habilitada en ningún punto de
+este esquema (confirmado contra el código real: no hay ningún `ALTER TABLE negocio ENABLE ROW
+LEVEL SECURITY` en `001_init.sql`, y el propio comentario de `PATCH /negocios/:id` en
+`src/routes/negocios.ts` ya lo señala explícitamente) — nada que agregar en esta ronda.
+
+**Sin índice nuevo.** Ninguna consulta existente ni recomendada filtra por `horario_atencion`,
+`direccion`, `telefono` o `logo_url` — son campos de despliegue, de lectura directa junto al resto
+de la fila por `id` (`GET /negocios/:id`) o por listado completo (`GET /negocios`), igual que
+`rubro`/`ubicacion` hoy, que tampoco tienen índice propio. El índice implícito de la `PRIMARY KEY`
+ya cubre el único patrón de acceso puntual real.
+
+### Recomendación para Backend (no implementada acá, fuera de alcance de DBA)
+
+Extender `PATCH /negocios/:id`, `src/routes/negocios.ts`. Línea aproximada verificada contra el
+archivo tal como está al cierre de este ciclo — **ese mismo archivo ya tiene, en paralelo, cambios
+de Backend ajenos a HU-31** (un fast-follow de E15: soft-delete de servicio y pausa/reactivación de
+membresía de un profesional, sin relación con esta ronda), así que los números pueden correrse más
+si Backend sigue tocándolo antes de retomar esto:
+
+1. **`actualizarNegocioSchema` (línea ~67-71)** — sumar `horario_atencion`/`direccion`/`telefono`
+   con `z.string().nullable()` (mismo patrón que `rubro`/`ubicacion` hoy — **no** `.optional()`,
+   hace falta poder mandar `null` explícito para vaciar un campo ya cargado) y `logo_url` con una
+   validación de formato URL (ver subsección de arriba).
+2. **Body destructuring + `UPDATE`/`RETURNING` (línea ~643 y ~645-656)** — sumar las 4 columnas
+   nuevas, mismo patrón que `nombre`/`rubro`/`ubicacion` ya tienen hoy.
+3. **`GET /negocios` y `GET /negocios/:id` (línea ~116 y ~134)** — considerar sumar las 4 columnas
+   al `SELECT`, al menos en `GET /:id` (perfil completo de un negocio puntual, exactamente donde
+   HU-31 pide que "el cliente vea información completa... al elegir mi negocio"); si conviene
+   exponerlas también en el listado `GET /` es una decisión de UX/producto, no cerrada acá.
+4. **NO extender `POST /auth/registro-negocio` (`src/routes/auth.ts`) ni `POST /dev/seed`
+   (`src/routes/dev.ts`)** con estos 4 campos — HU-31 los define explícitamente como datos que se
+   completan "más allá del alta inicial", no en el registro.
+5. **Mobile** (`configuracion_consultorio_screen.dart`, fuera de alcance de DBA/Backend) — sumar 4
+   `TextEditingController` nuevos siguiendo el mismo patrón que `_ubicacionCtrl`, y considerar
+   previsualizar `logo_url` con `Image.network` en vez de solo el campo de texto crudo.
+
+Detalle línea por línea en `05-codigo/database/migrations/001_init.sql` (bloque "Datos operativos
+del negocio — horario/dirección/teléfono/logo") y en `009_negocio_datos_operativos.sql` (mismo
+contenido, delta para aplicar a mano contra Render — ver §4).
+
 ## 3. Diagrama conceptual
 
 Actualizado (2026-08-06) para reflejar la generalización N:M de §2ter: `Profesional` ya no
@@ -1272,6 +1415,23 @@ para que Backend/DevOps lo apliquen al levantar el entorno de desarrollo.
 > establecido en los 5 ciclos anteriores, no una omisión de este ciclo. **No aplicado todavía
 > contra Render** (mismo patrón que `005`/`006`/`007`) — pendiente de que el Director General IA lo
 > revise y lo corra, con aprobación del CEO.
+>
+> **Nota operativa (2026-08-17, DBA) — `009_negocio_datos_operativos.sql` (HU-31 — horario general
+> de atención, dirección detallada, teléfono, logo, ver §2undecies).** Mismo mecanismo que las
+> notas de arriba: `001_init.sql` se actualizó con las 4 columnas nuevas en `negocio`, todas
+> nullable (correcto para cualquier ambiente que migre desde cero; **ambas copias sincronizadas y
+> verificadas byte-idénticas con `diff`**, mismo estándar que `007`/`008`), pero no alcanza para
+> Render — el delta vive en
+> [`05-codigo/database/migrations/009_negocio_datos_operativos.sql`](../05-codigo/database/migrations/009_negocio_datos_operativos.sql).
+> Puramente aditivo, sin backfill (nullable sin `DEFAULT`; a diferencia de `005`, acá no hay ningún
+> valor por defecto razonable que backfillear — son datos que solo cada administrador conoce de su
+> propio negocio) y sin cambios de RLS/índices (`negocio` sigue sin RLS habilitada). **Mismo
+> patrón que `008`: este archivo NO se duplica en `05-codigo/backend/migrations/`** — mismo motivo
+> ya verificado ahí contra `runMigrations()`/`backend/src/db.ts` (lee únicamente el nombre de
+> archivo hardcodeado `"001_init.sql"`, nunca hace glob del directorio). **No aplicado todavía
+> contra Render** (mismo patrón que los ciclos anteriores) — pendiente de que el Director General
+> IA lo revise y lo corra, con aprobación del CEO. Sin cambios de Backend/Mobile en este ciclo
+> (fuera de alcance de DBA) — recomendación de dónde extender `PATCH /negocios/:id` en §2undecies.
 
 ## 5. Row Level Security (Postgres, producción)
 
@@ -1953,3 +2113,9 @@ en esta tabla") y en `008_recuperacion_password.sql`.
     token pendiente?" (la consulta de invalidación al pedir uno nuevo) Y, por ser UNIQUE, es en sí
     mismo la garantía a nivel de base de datos de "a lo sumo 1 token pendiente por usuario" — ver
     §2decies.
+- **Nuevo 2026-08-17 (HU-31, ver §2undecies):** **sin índice nuevo.** Las 4 columnas agregadas a
+  `negocio` (`horario_atencion`, `direccion`, `telefono`, `logo_url`) son campos de despliegue —
+  se leen siempre junto al resto de la fila, por `id` (`GET /negocios/:id`) o en el listado
+  completo (`GET /negocios`), igual que `rubro`/`ubicacion` hoy, que tampoco tienen índice propio.
+  Ninguna consulta existente ni recomendada filtra por ellas; el índice implícito de la
+  `PRIMARY KEY` ya cubre el único patrón de acceso puntual real.
