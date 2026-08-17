@@ -8,10 +8,11 @@
 -- preferencias de notificación, ver §2octies/§5quinquies), HU-29/E11 del 2026-08-14
 -- (suscripción "Turnario Pro", ver §2novies/§5sexies), el fast-follow de E15 del 2026-08-15
 -- (acceso de SOLO LECTURA del administrador al historial de pacientes — ficha/tratamiento/
--- nota_medica —, ver §5septies), y la recuperación de contraseña (token de un solo uso) del
--- 2026-08-16, prioridad alta del CEO (ver §2decies/§5octies) — ver 03-arquitectura/modelo-datos.md
--- para el detalle completo de cada una y memory/proyectos/turnos-profesionales/decisiones.md para
--- la traza de decisiones).
+-- nota_medica —, ver §5septies), la recuperación de contraseña (token de un solo uso) del
+-- 2026-08-16, prioridad alta del CEO (ver §2decies/§5octies), y el resto de datos operativos de
+-- HU-31 del 2026-08-17 (horario general de atención, dirección detallada, teléfono, logo — ver
+-- §2undecies) — ver 03-arquitectura/modelo-datos.md para el detalle completo de cada una y
+-- memory/proyectos/turnos-profesionales/decisiones.md para la traza de decisiones).
 -- Convenciones: GUID como PK, auditoría completa, soft delete donde corresponde (docs/06-modelo-datos.md §3)
 --
 -- ARCHIVO DUPLICADO A PROPÓSITO — mantener sincronizado. Este archivo es la fuente de verdad del
@@ -167,12 +168,129 @@ CREATE TABLE usuario (
 -- `es_rubro_salud = true` automáticamente — requiere una corrección manual puntual (sugerida en
 -- 03-arquitectura/modelo-datos.md), no un patrón de texto ciego, porque requiere criterio humano
 -- sobre qué valores de `rubro` realmente califican.
+--
+-- Datos operativos del negocio — horario/dirección/teléfono/logo (HU-31, `02-backlog/
+-- backlog.md`, épica E13) — 2026-08-17, DBA. HU-31 pide "completar datos operativos de mi negocio
+-- más allá del alta inicial (horario general de atención, dirección detallada, teléfono/contacto,
+-- logo o imagen)". La ronda "Modo Administrador v1" (E15, 2026-08-15) ya conectó
+-- `PATCH /negocios/:id` a una pantalla real (`configuracion_consultorio_screen.dart`, modo edición
+-- para `Rol.administrador`), pero la dejó ACOTADA a los 3 campos que YA tenían columna
+-- (`nombre`/`rubro`/`ubicacion`) — documentado explícitamente en esa misma ronda como gap de DBA/
+-- Backend, no de Mobile/UX (`backlog.md`, tabla de la épica E15: "Resto del alcance original de
+-- HU-31... Sin columnas de datos ni endpoint — requiere DBA + Backend antes de poder
+-- construirse"). Este ciclo cierra la mitad de DBA de ese gap: 4 columnas nuevas, TODAS nullable
+-- — un negocio ya existente no tiene ninguna cargada hasta que su administrador las complete
+-- desde Configuración de Consultorio; sin backfill posible ni con sentido (a diferencia de
+-- `es_rubro_salud`, que sí tenía un candidato de backfill manual documentado arriba), porque son
+-- datos que solo el dueño del negocio conoce. PATCH/Mobile quedan fuera de este ciclo — ver
+-- recomendación para Backend al final de este bloque y `03-arquitectura/modelo-datos.md`
+-- §2undecies para el razonamiento completo.
+--
+-- `horario_atencion` (TEXT) — texto libre, DELIBERADAMENTE NO estructurado por día (ej. "Lunes a
+-- Viernes 9 a 18hs, Sábados 9 a 13hs" tal cual lo escriba el administrador, sin columnas por
+-- día/franja). Es puramente INFORMATIVO para el perfil del negocio — NO participa en el cálculo
+-- de disponibilidad real de ningún profesional, que sigue resuelto enteramente por
+-- `disponibilidad`/`excepcion_disponibilidad` (bloques recurrentes + excepciones puntuales, POR
+-- PROFESIONAL, ya mucho más granular que cualquier horario a nivel de negocio) — modelar esto
+-- como una segunda fuente de "horarios" duplicaría esa lógica sin necesidad y, peor, abriría la
+-- puerta a que ambas fuentes queden inconsistentes entre sí (ej. el texto libre dice "Sábados
+-- cerrado" pero un profesional puntual sí tiene disponibilidad cargada ese día) sin que nada en
+-- el esquema lo detecte. Mismo criterio de "no sobre-diseñar / no duplicar una única fuente de
+-- verdad" ya aplicado en este archivo a `genero`/`contacto_emergencia_relacion` de `paciente`
+-- (TEXT libre en vez de estructura, porque el contenido es informativo/de UI, no una regla de
+-- negocio que dependa de valores específicos).
+--
+-- `direccion` (TEXT) — dirección postal completa (calle, altura, piso), campo NUEVO Y DISTINTO de
+-- `ubicacion` (columna ya existente, SIN CAMBIOS). Investigado contra el código real antes de
+-- decidir si hacía falta un campo separado o alcanzaba con ampliar `ubicacion` (no asumido): hoy
+-- `ubicacion` viaja en las 2 lecturas públicas de descubrimiento (`GET /negocios` y
+-- `GET /negocios/:id`, `src/routes/negocios.ts`) y Mobile la consume como referencia CORTA de
+-- zona/ciudad, mostrada junto a `rubro` en el subtítulo de cada card del listado de "Buscar
+-- Negocios" (HU-00b, `buscar_negocios_screen.dart`: `[rubro, ubicacion].join(' · ')`) — un texto
+-- pensado para convivir con N negocios a la vez en una lista, no para una dirección postal
+-- completa. `direccion` resuelve un propósito distinto y posterior en el embudo: alguien que YA
+-- decidió ir a ESTE negocio puntual y necesita saber exactamente adónde, un dato que no tiene
+-- sentido amontonado en la lista de descubrimiento junto a otros negocios. Sobrecargar `ubicacion`
+-- con este propósito nuevo además redefiniría retroactivamente el significado de datos ya
+-- cargados por negocios existentes (vía `registro_negocio_screen.dart` o el propio
+-- `configuracion_consultorio_screen.dart` de la ronda anterior) bajo su semántica actual ("zona/
+-- ciudad corta"), sin ninguna forma de distinguir, para esas filas, si el valor ya cargado sigue
+-- sirviendo como dirección completa o no. `ubicacion` sigue sin cambios, con su mismo propósito de
+-- descubrimiento; ambos campos coexisten y se muestran en contextos distintos (recomendación de
+-- Mobile más abajo). Reutiliza el nombre genérico `direccion` ya usado en `paciente.direccion`
+-- (mismo criterio que `nombre`/`creado_en`, columnas que también se repiten en más de una tabla de
+-- este esquema con el mismo significado) — no hay ninguna relación entre ambas filas, cada una
+-- vive scopeada a su propia tabla.
+--
+-- `telefono` (TEXT) — texto simple, sin `CHECK` de formato, mismo criterio ya aplicado a
+-- `usuario.telefono` (ver `CREATE TABLE usuario`, más arriba) y a
+-- `paciente.contacto_emergencia_telefono`: ninguna columna de teléfono de este esquema valida
+-- formato a nivel de base de datos (distintos países/formatos, sin ninguna HU que pida un formato
+-- único) — queda como posible mejora de UX en la capa de aplicación, no como constraint.
+--
+-- `logo_url` (TEXT) — URL de una imagen YA alojada en otro lado, NO un upload de archivo real ni
+-- una columna binaria/BYTEA: este esquema no tiene (ni este ciclo agrega) ningún servicio de
+-- almacenamiento de objetos (S3/Cloudinary/similar) — un agente de IA operando esta Factory no
+-- puede aprovisionar por su cuenta credenciales nuevas para un servicio de storage externo, así
+-- que el patrón elegido es que el administrador pegue la URL de una imagen que ya subió a algún
+-- otro lado (mismo criterio ya aplicado en esta Factory para no depender de infraestructura de
+-- storage nueva). Sin `CHECK` de formato de URL a nivel de base de datos — mismo criterio que
+-- `usuario.email` (tampoco tiene un `CHECK` de formato en el esquema; la validación de forma vive
+-- en `zod`, del lado de Backend): se recomienda a Backend agregar `z.string().url()` (o
+-- equivalente) al extender `actualizarNegocioSchema`, y a Mobile replicar la misma validación
+-- client-side antes de habilitar "Guardar" (mismo patrón ya usado en esta app para la longitud
+-- mínima de contraseña). No se valida que la URL sea efectivamente una IMAGEN (ni acá ni se
+-- recomienda hacerlo de forma estricta a nivel de aplicación): eso solo puede confirmarse
+-- intentando cargarla — la recomendación para Mobile es un `Image.network(..., errorBuilder:
+-- ...)` con un ícono/placeholder de fallback si la URL no carga, no un chequeo previo de
+-- contenido.
+--
+-- Las 4 nullable, sin `DEFAULT`: mismo motivo que el resto de columnas agregadas a una tabla ya en
+-- uso en este esquema (`usuario.telefono`/`google_id`, `profesional.duracion_cita_min`) — agregar
+-- una columna nullable sin DEFAULT no rompe ninguna fila ni ningún INSERT existente que no la
+-- mencione. Comparten el `modificado_en` genérico que la tabla ya tenía desde la Fase 3 original
+-- (sin auditoría por columna individual), mismo criterio que el resto de columnas mutables de este
+-- esquema. Sin Row Level Security nueva: `negocio` sigue sin tener RLS habilitada en ningún punto
+-- de este archivo (ver el comentario de `PATCH /negocios/:id` en `src/routes/negocios.ts`, que ya
+-- lo confirma contra el código real) — nada que agregar acá. Sin índice nuevo: ninguna consulta
+-- existente ni recomendada filtra por `horario_atencion`/`direccion`/`telefono`/`logo_url` (son
+-- campos de despliegue/lectura directa por `id`, igual que `rubro`/`ubicacion` hoy, que tampoco
+-- tienen índice propio) — el índice implícito de la PK ya cubre el único patrón de acceso real
+-- (`GET /negocios/:id`).
+--
+-- Recomendación para Backend (no implementada acá, fuera de alcance de DBA) — extender
+-- `PATCH /negocios/:id`, `src/routes/negocios.ts`. Línea aproximada verificada contra el archivo
+-- TAL COMO ESTÁ en este momento (ya incluye cambios de Backend ajenos a este ciclo, un fast-follow
+-- de E15 sin relación con HU-31) — puede correrse más si Backend sigue tocando este archivo:
+--   1) `actualizarNegocioSchema` (línea ~67-71) — sumar `horario_atencion`/`direccion`/`telefono`
+--      con `z.string().nullable()` (mismo patrón que `rubro`/`ubicacion`, NO `.optional()` — hace
+--      falta poder mandar `null` explícito para vaciar un campo ya cargado) y `logo_url` con una
+--      validación de formato URL (ver más arriba).
+--   2) Body destructuring + UPDATE (línea ~643 y ~645-656) — sumar las 4 columnas nuevas al
+--      `UPDATE negocio SET ...` y a su `RETURNING`, mismo patrón que `nombre`/`rubro`/`ubicacion`
+--      ya tienen hoy.
+--   3) `GET /negocios` y `GET /negocios/:id` (línea ~116 y ~134) — considerar sumar las 4 columnas
+--      al `SELECT`, al menos en `GET /:id` (perfil completo de un negocio puntual, que es
+--      exactamente donde HU-31 pide que "el cliente vea información completa... al elegir mi
+--      negocio"); si conviene exponerlas también en el listado `GET /` es una decisión de
+--      UX/producto, no cerrada acá.
+--   4) NO extender `POST /auth/registro-negocio` (`src/routes/auth.ts`) ni `POST /dev/seed`
+--      (`src/routes/dev.ts`) con estos 4 campos — HU-31 los define explícitamente como datos que
+--      se completan "más allá del alta inicial", no en el registro; el alta de negocio sigue
+--      pidiendo únicamente nombre/rubro/ubicacion, sin cambios.
+--   5) Mobile (`configuracion_consultorio_screen.dart`) — sumar 4 `TextEditingController` nuevos
+--      siguiendo el mismo patrón que `_ubicacionCtrl`, y considerar previsualizar `logo_url` con
+--      `Image.network` en vez de mostrar solo el campo de texto crudo.
 CREATE TABLE negocio (
   id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   nombre            TEXT NOT NULL,
   rubro             TEXT,
   es_rubro_salud    BOOLEAN NOT NULL DEFAULT false,
   ubicacion         TEXT,
+  horario_atencion  TEXT,
+  direccion         TEXT,
+  telefono          TEXT,
+  logo_url          TEXT,
   creado_en         TIMESTAMPTZ NOT NULL DEFAULT now(),
   creado_por        UUID,
   modificado_en     TIMESTAMPTZ,

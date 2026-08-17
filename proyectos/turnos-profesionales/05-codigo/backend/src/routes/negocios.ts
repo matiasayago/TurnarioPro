@@ -42,6 +42,14 @@ const negocioIdParamsSchema = z.object({ id: uuidSchema });
 // real de la fila puntual para desambiguar cuál de esas fichas se está pidiendo.
 const negocioFichaParamsSchema = z.object({ id: uuidSchema, fichaId: uuidSchema });
 
+// E15 fast-follow (02-backlog/backlog.md, "Fuera de alcance de v1-Administrador": "Baja/pausa de
+// un profesional del negocio, o remoción de un servicio... Ninguno de los dos tiene endpoint" —
+// `negocios.ts` solo tenía alta para ambos recursos). Usados por DELETE /:id/servicios/:servicioId
+// y PATCH /:id/profesionales/:profesionalId, más abajo — mismo criterio de params compuestos que
+// `negocioFichaParamsSchema` arriba (`:id` + un segundo id de recurso hijo).
+const negocioServicioParamsSchema = z.object({ id: uuidSchema, servicioId: uuidSchema });
+const negocioProfesionalParamsSchema = z.object({ id: uuidSchema, profesionalId: uuidSchema });
+
 const altaServicioSchema = z.object({
   nombre: z.string().min(1, 'nombre es requerido'),
   duracion_min: montoPositivoSchema,
@@ -56,10 +64,27 @@ const altaServicioSchema = z.object({
 // guardar. `nombre` requerido (columna NOT NULL en `negocio`); `rubro`/`ubicacion` nullable pero
 // NO `.optional()` — hay que poder mandar `null` explícito para vaciar un campo que antes tenía
 // valor, mismo motivo que en `fichaPacienteSchema`.
+//
+// `horario_atencion`/`direccion`/`telefono`/`logo_url` (2026-08-17) — resto del alcance de HU-31
+// que la ronda "Modo Administrador v1"/E15 había dejado pendiente explícitamente de DBA+Backend
+// (ver `02-backlog/backlog.md` y `03-arquitectura/modelo-datos.md` §2undecies, DBA — modelado
+// completo de las 4 columnas nuevas en `negocio`, todas `TEXT` nullable sin `DEFAULT`). Mismo
+// criterio EXACTO que `rubro`/`ubicacion` de arriba: `z.string().nullable()`, NO `.optional()`
+// — hace falta poder mandar `null` explícito para vaciar un campo ya cargado, no solo omitirlo.
+// `logo_url` suma `.url()` — recomendación explícita de DBA en esa misma sección: `negocio` no
+// tiene ningún `CHECK` de formato de URL a nivel de base, así que esta es la única validación de
+// forma que existe. A propósito NO se valida que la URL sea efectivamente una imagen (ni acá ni
+// en ningún otro punto de este backend) — eso DBA lo deja fuera explícitamente, solo puede
+// confirmarse cargándola; queda para que Mobile lo maneje con un `Image.network(...,
+// errorBuilder: ...)` de fallback si la URL no carga.
 const actualizarNegocioSchema = z.object({
   nombre: z.string().min(1, 'nombre es requerido'),
   rubro: z.string().nullable(),
   ubicacion: z.string().nullable(),
+  horario_atencion: z.string().nullable(),
+  direccion: z.string().nullable(),
+  telefono: z.string().nullable(),
+  logo_url: z.string().url('logo_url debe ser una URL válida').nullable(),
 });
 
 // HU-29 (Turnario Pro) — body de POST /:id/suscripcion (activación simulada), más abajo. Mismo
@@ -76,6 +101,12 @@ const altaProfesionalSchema = z.object({
   password: passwordSchema,
   nombre: z.string().min(1, 'nombre es requerido'),
 });
+
+// Body de PATCH /:id/profesionales/:profesionalId (E15 fast-follow, más abajo) — pausar/reactivar
+// una membresía ya existente. Un solo campo, requerido (no `.optional()`): este PATCH es
+// deliberadamente un toggle explícito, no un patch parcial de varios campos como
+// `actualizarNegocioSchema` de abajo.
+const actualizarMembresiaProfesionalSchema = z.object({ activo: z.boolean() });
 
 // Reportes y Estadísticas (HU-28/E10) — filtros opcionales de GET /:id/reportes, al final de
 // este archivo (vista de negocio/administrador — ver el bloque de comentarios ahí para el
@@ -95,6 +126,20 @@ const reportesNegocioQuerySchema = z.object({
 
 // HU-00b: cliente descubre negocios (RN9 — no se filtra por negocio_id porque es cross-tenant
 // por diseño). Público — pool.query directo, sin transacción ni contexto RLS.
+//
+// A PROPÓSITO NO suma `horario_atencion`/`direccion`/`telefono`/`logo_url` (HU-31, ver GET /:id
+// más abajo, que sí las suma) — llamada de diseño de Backend, dejada explícitamente abierta por
+// DBA (`03-arquitectura/modelo-datos.md` §2undecies: "si conviene exponerlas también en el
+// listado... es una decisión de UX/producto, no cerrada acá"). Mismo criterio que DBA ya aplicó
+// para justificar `direccion` como columna nueva en vez de reusar `ubicacion`: estas 4 columnas
+// son "perfil completo de un negocio YA ELEGIDO" (texto literal de HU-31), no datos de
+// descubrimiento — `buscar_negocios_screen.dart` (Mobile, HU-00b) arma hoy el subtítulo de cada
+// card concatenando únicamente `rubro`/`ubicacion`. Sumar acá 4 columnas más (potencialmente
+// texto largo, ej. `horario_atencion`) infla la respuesta de un listado sin paginar con datos
+// que hoy ningún consumidor renderiza ahí (Mobile no se tocó en este ciclo). Si una ronda futura
+// de UX/Mobile decide mostrar el logo en las cards del listado, alcanza con sumar `logo_url`
+// puntualmente acá — no hace falta repetir este razonamiento para los otros 3, que siguen sin
+// encajar en una vista de lista.
 negociosRouter.get(
   '/',
   asyncHandler(async (_req, res) => {
@@ -111,13 +156,23 @@ negociosRouter.get(
 // fila en vez de forzar a Mobile a traer la lista completa y filtrar del lado cliente. Mismo
 // criterio de "público por diseño" que el resto de las lecturas de este archivo. `404` si no
 // existe o está soft-deleted (`eliminado_en`), mismo filtro que ya aplica GET /.
+//
+// Suma `horario_atencion`/`direccion`/`telefono`/`logo_url` (2026-08-17, HU-31 — ver
+// `03-arquitectura/modelo-datos.md` §2undecies) al SELECT, a diferencia de GET / (arriba, ver su
+// comentario para el porqué de esa exclusión): este es explícitamente el endpoint de "perfil
+// completo de un negocio ya elegido" que pide la propia HU-31 ("que el cliente vea información
+// completa... al elegir mi negocio"). Las 4 pueden venir `null` (columnas nullable sin backfill,
+// DBA) para cualquier negocio que todavía no las completó desde Configuración de Consultorio —
+// Mobile ya maneja valores nulos de `rubro`/`ubicacion` en esta misma respuesta, mismo criterio.
 negociosRouter.get(
   '/:id',
   asyncHandler(async (req, res) => {
     const paramsParsed = negocioIdParamsSchema.safeParse(req.params);
     if (!paramsParsed.success) return respuestaValidacionFallida(res, paramsParsed.error);
     const result = await pool.query(
-      'SELECT id, nombre, rubro, ubicacion, es_rubro_salud FROM negocio WHERE id = $1 AND eliminado_en IS NULL',
+      `SELECT id, nombre, rubro, ubicacion, es_rubro_salud, horario_atencion, direccion, telefono,
+              logo_url
+       FROM negocio WHERE id = $1 AND eliminado_en IS NULL`,
       [req.params.id]
     );
     const negocio = result.rows[0];
@@ -185,6 +240,99 @@ negociosRouter.post(
     );
 
     res.status(201).json({ id });
+  })
+);
+
+// E15 fast-follow (02-backlog/backlog.md, "Fuera de alcance de v1-Administrador": "remoción de un
+// servicio... Ninguno de los dos tiene endpoint" — este router solo tenía alta, arriba). Soft
+// delete — MISMO patrón que el resto del esquema (`servicio.eliminado_en` ya existía desde Fase 3
+// sin ningún endpoint que lo usara, ver `database/migrations/001_init.sql`): nunca `DELETE`
+// físico, para no romper la FK `turno.servicio_id` (NOT NULL) de turnos ya existentes.
+//
+// Contrato: DELETE /negocios/:id/servicios/:servicioId -> 200 { id, eliminado: true } | 400
+// :id/:servicioId inválidos | 403 rol distinto de administrador, o negocio ajeno | 404 el servicio
+// no existe, ya estaba eliminado, o pertenece a otro negocio (mismo 404 uniforme para los 3 casos,
+// mismo criterio que el resto de este archivo — no filtrar a quien llama por qué motivo puntual).
+//
+// INVESTIGACIÓN DE IMPACTO hecha ANTES de escribir esto (pedida explícitamente por la consigna),
+// query por query de `servicio` en todo `src/`:
+//  - YA filtraban `eliminado_en IS NULL` (sin cambios, un servicio dado de baja desaparece de acá
+//    solo): GET /negocios/:id/servicios (catálogo público, HU-07) y
+//    GET /profesionales/:id/servicios (servicios propios del profesional, con seña).
+//  - NO filtraban y SÍ dejaban reservar un servicio ya eliminado (el riesgo real que señaló la
+//    consigna) — corregidas en este mismo cambio, agregando `AND eliminado_en IS NULL` al SELECT
+//    de `servicio`: `POST /turnos` (turnos.ts) y `POST /profesionales/:id/turnos` (alta manual,
+//    profesionales.ts) — ver el comentario puntual en cada una. Mismo 404 que ya existía ahí para
+//    "no existe", ningún contrato nuevo.
+//  - NO filtran y quedan SIN TOCAR a propósito (documentado como hallazgo, no corregido — ninguna
+//    permite reservar por sí sola, que era el riesgo real; corregirlas igual sería exceder el
+//    alcance mínimo de esta ronda sin confirmar con el Director General IA):
+//      1. GET /:id/servicios/:servicioId/profesionales (HU-08, arriba en este archivo): solo
+//         alcanzable con un `servicioId` que ya se conocía de antes de eliminarlo (el paso previo
+//         normal, GET /:id/servicios, ya lo excluye) — listaría profesionales para un servicio
+//         eliminado, pero no permite reservar.
+//      2. POST /profesionales/:id/servicios (profesionales.ts): un profesional podría
+//         auto-asociarse a un servicio_id ya eliminado si lo conoce de antes — no aparece en
+//         ningún catálogo para descubrirlo, y tampoco habilita reservar.
+//      3. PATCH /turnos/:id/reprogramar (turnos.ts): lee `duracion_min` del servicio YA ASIGNADO
+//         al turno que se reprograma (no uno elegido de nuevo) — A PROPÓSITO no se filtra acá: un
+//         cliente con un turno vigente para un servicio que el negocio discontinuó después debe
+//         poder seguir reprogramando/cancelando esa cita ya existente ("no romper turnos
+//         existentes", pedido explícito, aplica también a esta escritura, no solo a lecturas de
+//         historial/reportes).
+//      4. GET /profesionales/:id/slots (calcularSlotsDisponibles, dominio/disponibilidad.ts):
+//         tampoco filtra `servicio.eliminado_en` al leer `duracion_min` — sigue devolviendo una
+//         grilla de horarios "disponibles" para un servicio_id ya eliminado (confirmado en vivo
+//         en scripts/test-baja-profesional-y-eliminacion-servicio.mjs, no solo leído en el
+//         código). No permite reservar por sí solo (el fix de arriba en POST /turnos ya lo
+//         bloquea) — mismo criterio que el punto 1 de esta lista. Comparte causa raíz con el
+//         hallazgo análogo de `negocio_profesional.activo` documentado en PATCH
+//         /:id/profesionales/:profesionalId, más abajo en este archivo: ninguna de las 2 columnas
+//         se filtra nunca dentro de `calcularSlotsDisponibles`.
+//  - A propósito NUNCA se tocan (correcto por diseño, no un gap): reportes
+//    (GET /negocios/:id/reportes, GET /profesionales/:id/reportes) y GET /clientes/:id/historial —
+//    necesitan seguir sumando/mostrando turnos históricos de un servicio ya eliminado (facturación
+//    pasada real); filtrarlos ahí rompería exactamente el historial que la consigna pidió no
+//    romper.
+//
+// Turnos EXISTENTES (pasados o futuros) que referencian este servicio_id: se dejan intactos — este
+// endpoint nunca toca `turno`. Cancelar en cadena los turnos futuros ya agendados contra este
+// servicio queda A PROPÓSITO fuera de este endpoint (no lo pide la consigna, y si se notifica/
+// reembolsa al cliente por esa cancelación es una decisión de producto que no corresponde asumir
+// en este ciclo) — lo único que cambia es que nadie puede reservar un turno NUEVO contra este
+// servicio de acá en más.
+negociosRouter.delete(
+  '/:id/servicios/:servicioId',
+  requireAuth('administrador'),
+  asyncHandler(async (req: AuthedRequest, res) => {
+    const paramsParsed = negocioServicioParamsSchema.safeParse(req.params);
+    if (!paramsParsed.success) return respuestaValidacionFallida(res, paramsParsed.error);
+    if (req.auth!.negocio_id !== req.params.id) {
+      return res.status(403).json({ error: 'No podés administrar recursos de otro negocio' });
+    }
+
+    const eliminado = await withTransaction(
+      async (client) => {
+        // `servicio_update_admin_del_negocio` (RLS, migrations/001_init.sql) ya acota este UPDATE
+        // a un administrador de `servicio.negocio_id` — igual se filtra `negocio_id = $3`
+        // EXPLÍCITO en el WHERE, mismo criterio de defensa en profundidad que el resto de este
+        // archivo (ej. GET /:id/pacientes/:fichaId, más abajo): sin este filtro, la RLS por sí
+        // sola no distingue "no existe" de "existe pero es de otro negocio" para armar el 404.
+        const result = await client.query(
+          `UPDATE servicio SET eliminado_en = $1, modificado_en = $1
+           WHERE id = $2 AND negocio_id = $3 AND eliminado_en IS NULL
+           RETURNING id`,
+          [nowIso(), req.params.servicioId, req.params.id]
+        );
+        return result.rows[0] as { id: string } | undefined;
+      },
+      { usuarioId: req.auth!.sub, negocioId: req.params.id }
+    );
+
+    if (!eliminado) {
+      return res.status(404).json({ error: 'Servicio no encontrado en este negocio' });
+    }
+    res.json({ id: eliminado.id, eliminado: true });
   })
 );
 
@@ -389,12 +537,133 @@ negociosRouter.get(
   })
 );
 
+// E15 fast-follow (02-backlog/backlog.md, "Fuera de alcance de v1-Administrador": "Baja/pausa de
+// un profesional del negocio... Ninguno de los dos tiene endpoint" — este router solo tenía alta,
+// arriba). Actualiza ÚNICAMENTE `negocio_profesional.activo` — la membresía de ESTE profesional en
+// ESTE negocio, nunca su identidad (`profesional`/`usuario`, que puede seguir activa en otros
+// negocios — generalización N:M, modelo-datos.md §2ter). Bidireccional a propósito (`activo: true`
+// además de `false`, body explícito en vez de un verbo DELETE): "pausar" es reversible por diseño,
+// sin tener que volver a pasar por POST /:id/profesionales (que también reactivaría, vía su rama
+// de reuso de identidad, pero exige re-mandar email/password/nombre en el body — innecesario para
+// el simple toggle de una membresía que ya existe).
+//
+// Contrato: PATCH /negocios/:id/profesionales/:profesionalId, body { activo: boolean } -> 200
+// { id, activo } | 400 :id/:profesionalId inválidos, o body inválido | 402 (solo si activo:true)
+// el negocio (plan gratis) ya está en el límite de 1 profesional activo, ver más abajo | 403 rol
+// distinto de administrador, o negocio ajeno | 404 este profesional no tiene membresía en este
+// negocio (nunca perteneció, o :profesionalId no existe).
+//
+// QUÉ IMPLICA PAUSAR (activo=false) PARA EL RESTO DEL SISTEMA — verificado contra el código real
+// antes de escribir esto (pedido explícito de la consigna), no asumido:
+//  - Reserva de turnos NUEVOS: YA queda bloqueada de punta a punta, sin tocar nada más. HU-08
+//    (GET /:id/servicios/:servicioId/profesionales, arriba) ya filtra `np.activo = true` — un
+//    profesional pausado deja de aparecer como opción al elegir profesional. `POST /turnos`
+//    (turnos.ts) y `POST /profesionales/:id/turnos` (alta manual) YA exigían
+//    `negocio_profesional.activo = true` antes de aceptar el turno (404 si no) — doble barrera
+//    (oferta + reserva) que ya existía, ninguna de las dos necesitó cambios para este endpoint.
+//  - Login / "vista activa": el profesional pausado SIGUE pudiendo loguearse (su cuenta/password
+//    no se tocan) — lo que deja de pasar es que ESTE negocio aparezca entre sus negocios activos
+//    (`emitirLoginParaUsuario`, auth.ts, ya filtra `np.activo = true`) y que pueda volver a
+//    seleccionarlo como vista activa (`POST /auth/entrar-a-negocio` ya re-valida `activo = true`
+//    contra la tabla real, no contra el JWT). Si este era su único negocio, loguea igual pero sin
+//    `negocio_id` en el token (mismo camino ya resuelto que "0 negocios", nada nuevo); si
+//    pertenece a otros negocios (N:M), sigue operando ahí con total normalidad.
+//  - Listado del administrador (GET /:id/profesionales, arriba): A PROPÓSITO no cambia — ya
+//    devuelve `activo` por fila para TODA la membresía, pensado desde que se escribió ese
+//    endpoint exactamente para este caso ("Mobile puede mostrar... quién cuenta contra el límite y
+//    quién no (membresía pausada)", ver su propio comentario). Un profesional pausado sigue en el
+//    roster, marcado `activo: false` — nunca desaparece de la lista.
+//  - Turnos YA EXISTENTES (pasados o futuros) con este profesional: sin cambios, a propósito —
+//    mismo criterio que la baja de servicio (ver DELETE /:id/servicios/:servicioId, arriba en este
+//    archivo). Este endpoint nunca toca `turno`.
+//  - HALLAZGO documentado, NO corregido en este ciclo (fuera del alcance mínimo — no habilita
+//    reservar, así que no es el riesgo que señaló la consigna): `GET /profesionales/:id/slots`
+//    (dominio/disponibilidad.ts) NO filtra por `negocio_profesional.activo` — calcula la grilla
+//    solo a partir de `disponibilidad`/`turno`/`excepcion_disponibilidad` de ese profesional_id,
+//    sin mirar su membresía. Un cliente que ya tenía guardado ese profesional_id (ej. reservó con
+//    él antes de la pausa) podría seguir viendo horarios "disponibles" pidiendo ese endpoint
+//    directo — pero no podría completar la reserva (`POST /turnos` la rechaza con 404, ver
+//    arriba). Corregirlo tocaría `calcularSlotsDisponibles`, compartida con `POST /turnos` para
+//    RN1/RN2 — de mayor alcance que este fast-follow puntual; se señala para una ronda futura de
+//    Backend en vez de tocarla acá sin confirmar.
+//  - JWT ya emitido ANTES de pausar: este endpoint no invalida tokens en curso (esta API no tiene
+//    revocación de sesión) — un profesional con un token ya emitido con `negocio_id` = este
+//    negocio lo sigue pudiendo usar con normalidad hasta que expire (2h, ver `signToken`,
+//    src/auth.ts) para lo que ese token ya autorizaba (ej. ver su propia agenda). Efecto pleno
+//    recién en el próximo login/`entrar-a-negocio`, o al expirar el token — ventana acotada (2h
+//    máximo), aceptable para este alcance.
+//
+// Idempotente en ambos sentidos (pausar ya pausado, o reactivar ya activo, no fallan) — mismo
+// criterio que `PATCH /:id/suscripcion/cancelar`, más abajo en este archivo.
+//
+// HU-29 (Turnario Pro) — el límite "1 profesional activo" del plan gratis SÍ aplica acá, en la
+// dirección `activo: true`: sin este chequeo, este endpoint sería una SEGUNDA vía (además de
+// POST /:id/profesionales) para reactivar una membresía pausada saltándose el límite que ese otro
+// endpoint sí exige en su propia rama de reactivación (ver arriba,
+// `verificarLimiteProfesionalesActivos` antes de su `UPDATE ... SET activo = true`). Se aplica
+// ÚNICAMENTE en la transición real inactivo->activo (leída antes de escribir, ver abajo) — si la
+// membresía YA estaba activa y se vuelve a pedir `activo: true`, no suma a nadie nuevo, no se
+// bloquea un no-op. `activo: false` (pausar) nunca se bloquea por este límite — pausar siempre
+// reduce el conteo, nunca lo aumenta.
+negociosRouter.patch(
+  '/:id/profesionales/:profesionalId',
+  requireAuth('administrador'),
+  asyncHandler(async (req: AuthedRequest, res) => {
+    const paramsParsed = negocioProfesionalParamsSchema.safeParse(req.params);
+    if (!paramsParsed.success) return respuestaValidacionFallida(res, paramsParsed.error);
+    if (req.auth!.negocio_id !== req.params.id) {
+      return res.status(403).json({ error: 'No podés administrar recursos de otro negocio' });
+    }
+    const bodyParsed = actualizarMembresiaProfesionalSchema.safeParse(req.body);
+    if (!bodyParsed.success) return respuestaValidacionFallida(res, bodyParsed.error);
+    const { activo } = bodyParsed.data;
+
+    const resultado = await withTransaction(
+      async (client) => {
+        const membresiaResult = await client.query(
+          'SELECT activo FROM negocio_profesional WHERE negocio_id = $1 AND profesional_id = $2',
+          [req.params.id, req.params.profesionalId]
+        );
+        const membresia = membresiaResult.rows[0] as { activo: boolean } | undefined;
+        if (!membresia) return { tipo: 'no_encontrado' as const };
+
+        if (activo && !membresia.activo) {
+          const limiteProfesionales = await verificarLimiteProfesionalesActivos(client, req.params.id);
+          if (!limiteProfesionales.permitido) {
+            return { tipo: 'limite_alcanzado' as const, motivo: limiteProfesionales.motivo! };
+          }
+        }
+
+        await client.query(
+          'UPDATE negocio_profesional SET activo = $1, modificado_en = $2 WHERE negocio_id = $3 AND profesional_id = $4',
+          [activo, nowIso(), req.params.id, req.params.profesionalId]
+        );
+        return { tipo: 'ok' as const };
+      },
+      { usuarioId: req.auth!.sub, negocioId: req.params.id }
+    );
+
+    switch (resultado.tipo) {
+      case 'no_encontrado':
+        return res.status(404).json({ error: 'Este profesional no pertenece a este negocio' });
+      case 'limite_alcanzado':
+        // HU-29 — mismo 402 (no 403) y mismo motivo que POST /:id/profesionales, arriba: ver
+        // `cuerpoLimitePlanAlcanzado` (dominio/suscripciones.ts).
+        return res.status(402).json(cuerpoLimitePlanAlcanzado(resultado.motivo));
+      case 'ok':
+        return res.json({ id: req.params.profesionalId, activo });
+    }
+  })
+);
+
 // HU-31: Configuración de Consultorio — el administrador edita los datos descriptivos de SU
 // PROPIO negocio (RN9 aplicado vía claim del JWT, no del parámetro — mismo patrón que
 // POST /:id/servicios y POST /:id/profesionales de arriba). Contrato: PATCH /negocios/:id, body
-// { nombre: string, rubro: string | null, ubicacion: string | null } -> 200
-// { id, nombre, rubro, ubicacion, es_rubro_salud } | 400 datos inválidos | 403 rol distinto de
-// administrador o negocio ajeno | 404 negocio inexistente/eliminado.
+// { nombre: string, rubro: string | null, ubicacion: string | null, horario_atencion: string |
+// null, direccion: string | null, telefono: string | null, logo_url: string | null } -> 200
+// { id, nombre, rubro, ubicacion, es_rubro_salud, horario_atencion, direccion, telefono,
+// logo_url } | 400 datos inválidos (incluye `logo_url` con formato de URL inválido) | 403 rol
+// distinto de administrador o negocio ajeno | 404 negocio inexistente/eliminado.
 //
 // `es_rubro_salud` queda A PROPÓSITO fuera de este PATCH — no está en el alcance que definió
 // este ciclo ("nombre, rubro, ubicacion"). Ese flag gatea si se muestran los campos extendidos de
@@ -402,6 +671,21 @@ negociosRouter.get(
 // de producto que exceden un campo más de un formulario descriptivo — se deja para que Product
 // Manager/CTO IA decidan explícitamente si corresponde exponerlo, y en tal caso probablemente
 // con su propio flujo de confirmación, no como parte de este PATCH.
+//
+// `horario_atencion`/`direccion`/`telefono`/`logo_url` (2026-08-17) — resto del alcance de HU-31
+// que la ronda "Modo Administrador v1"/E15 había dejado pendiente explícitamente de DBA+Backend
+// (ver `02-backlog/backlog.md` y `03-arquitectura/modelo-datos.md` §2undecies, que ya deja una
+// recomendación de archivo/línea para este mismo PATCH). Mismo patrón EXACTO que
+// `nombre`/`rubro`/`ubicacion`: viajan en el body completo (no parcial, ver
+// `actualizarNegocioSchema` más arriba) y se pisan siempre los 4, sea con un valor nuevo o con
+// `null` para vaciar un campo ya cargado — este handler NO arma el `UPDATE` de forma dinámica
+// (no hay ningún `SET` condicional según qué vino en el body, a diferencia de un patch parcial),
+// así que sumar columnas acá es directo: mismos placeholders posicionales, mismo `RETURNING`.
+// Confirmado contra el código real (no asumido) que NO hace falta tocar `POST
+// /auth/registro-negocio` (`src/routes/auth.ts`) ni `POST /dev/seed` (`src/routes/dev.ts`):
+// ambos siguen insertando `negocio` con únicamente `(id, nombre, rubro, ubicacion, creado_en)` —
+// HU-31 define estos 4 campos explícitamente como datos que se completan "más allá del alta
+// inicial", no en el registro.
 //
 // `withTransaction` con contexto pese a que `negocio` HOY NO TIENE Row Level Security habilitada
 // (verificado en database/migrations/001_init.sql — no hay ningún `ALTER TABLE negocio ENABLE
@@ -423,15 +707,28 @@ negociosRouter.patch(
     }
     const bodyParsed = actualizarNegocioSchema.safeParse(req.body);
     if (!bodyParsed.success) return respuestaValidacionFallida(res, bodyParsed.error);
-    const { nombre, rubro, ubicacion } = bodyParsed.data;
+    const { nombre, rubro, ubicacion, horario_atencion, direccion, telefono, logo_url } = bodyParsed.data;
 
     const negocio = await withTransaction(
       async (client) => {
         const result = await client.query(
-          `UPDATE negocio SET nombre = $1, rubro = $2, ubicacion = $3, modificado_en = $4, modificado_por = $5
-           WHERE id = $6 AND eliminado_en IS NULL
-           RETURNING id, nombre, rubro, ubicacion, es_rubro_salud`,
-          [nombre, rubro, ubicacion, nowIso(), req.auth!.sub, req.params.id]
+          `UPDATE negocio SET nombre = $1, rubro = $2, ubicacion = $3, horario_atencion = $4,
+             direccion = $5, telefono = $6, logo_url = $7, modificado_en = $8, modificado_por = $9
+           WHERE id = $10 AND eliminado_en IS NULL
+           RETURNING id, nombre, rubro, ubicacion, es_rubro_salud, horario_atencion, direccion,
+             telefono, logo_url`,
+          [
+            nombre,
+            rubro,
+            ubicacion,
+            horario_atencion,
+            direccion,
+            telefono,
+            logo_url,
+            nowIso(),
+            req.auth!.sub,
+            req.params.id,
+          ]
         );
         return result.rows[0];
       },

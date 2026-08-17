@@ -46,11 +46,16 @@ class RegistroNegocioScreen extends StatefulWidget {
 
 class _RegistroNegocioScreenState extends State<RegistroNegocioScreen> {
   final _nombreNegocioCtrl = TextEditingController();
-  final _rubroCtrl = TextEditingController();
   final _ubicacionCtrl = TextEditingController();
   final _nombreAdminCtrl = TextEditingController();
   final _emailCtrl = TextEditingController();
   final _passwordCtrl = TextEditingController();
+
+  // A diferencia del resto de los campos de esta pantalla, "Rubro" ya no es un `TextField` de
+  // texto libre (ver [CampoRubro], `widgets/campo_rubro.dart`) — el valor final a mandar al
+  // backend lo entrega directo su `onChanged`, con el mismo criterio "vacío es null" que
+  // [_vacioANull] aplica al resto de los campos opcionales de acá.
+  String? _rubro;
 
   bool _enviando = false;
   String? _mensaje;
@@ -59,7 +64,6 @@ class _RegistroNegocioScreenState extends State<RegistroNegocioScreen> {
   @override
   void dispose() {
     _nombreNegocioCtrl.dispose();
-    _rubroCtrl.dispose();
     _ubicacionCtrl.dispose();
     _nombreAdminCtrl.dispose();
     _emailCtrl.dispose();
@@ -102,7 +106,7 @@ class _RegistroNegocioScreenState extends State<RegistroNegocioScreen> {
     try {
       final resp = await sesion.api.post('/auth/registro-negocio', {
         'nombre_negocio': nombreNegocio,
-        'rubro': _vacioANull(_rubroCtrl.text),
+        'rubro': _rubro,
         'ubicacion': _vacioANull(_ubicacionCtrl.text),
         'email': email,
         'password': password,
@@ -170,10 +174,10 @@ class _RegistroNegocioScreenState extends State<RegistroNegocioScreen> {
                     decoration: const InputDecoration(labelText: 'Nombre del negocio *'),
                   ),
                   const SizedBox(height: AppSpacing.md),
-                  TextField(
-                    controller: _rubroCtrl,
+                  CampoRubro(
+                    valorInicial: _rubro,
                     enabled: !_enviando,
-                    decoration: const InputDecoration(labelText: 'Rubro'),
+                    onChanged: (valor) => _rubro = valor,
                   ),
                   const SizedBox(height: AppSpacing.md),
                   TextField(
