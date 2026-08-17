@@ -414,19 +414,74 @@ ningún cliente Mobile lo consumía — un administrador nuevo no podía autoreg
 **Verificado:** `flutter analyze` limpio (mismo único "info" preexistente de siempre, en
 `dashboard_screen.dart`).
 
+## 🆕 Recuperación de contraseña (HU-37) — 2 pantallas nuevas + link en Login
+
+Cierra un gap de autenticación pedido por el CEO con prioridad alta: el backend de HU-37
+(`POST /auth/recuperar-password` / `POST /auth/reset-password`) ya estaba en producción (Render),
+verificado de punta a punta por el Director General IA (ver
+`memory/proyectos/turnos-profesionales/decisiones.md`), sin ningún cliente Mobile que lo
+consumiera — un usuario que se registró con email+contraseña y nunca vinculó Google (HU-35) quedaba
+permanentemente bloqueado, sin ninguna salida, dentro de la app.
+
+- `lib/screens/recuperar_password_screen.dart` (nuevo, paso 1 de 2): pantalla pre-autenticación,
+  accesible desde un link nuevo en `login_screen.dart` ("¿Olvidaste tu contraseña?", entre
+  "Ingresar" y el botón de Google). Pide el email y llama a `POST /auth/recuperar-password` — como
+  ese endpoint SIEMPRE responde 200 con el mismo mensaje genérico, exista o no la cuenta (criterio
+  de no-enumeración explícito de HU-37, sin distinguir tampoco el caso de cuenta 100%-Google), no
+  hay ningún código de error de negocio que manejar acá; el único catch cubre problemas de
+  red/rate-limiting. Al recibir el 200, avisa el mensaje genérico por `SnackBar` (no por el banner
+  de la pantalla, que se abandona de inmediato) y empuja (`Navigator.push`, no reemplaza)
+  `CanjearTokenPasswordScreen`, pasándole el email tipeado solo como referencia visual — nunca se
+  reenvía al backend en el paso siguiente.
+- `lib/screens/canjear_token_password_screen.dart` (nuevo, paso 2 de 2): pide el token (campo
+  multilínea/monoespaciado — el token real son 64 caracteres hexadecimales, ilegible en una sola
+  línea) y la contraseña nueva + confirmación (comparadas del lado del cliente antes de enviar,
+  además de la validación de longitud mínima ya estándar en esta app — mismo mínimo y mismo mensaje
+  que `passwordSchema`, igual criterio que `registro_negocio_screen.dart`). Llama a
+  `POST /auth/reset-password`; el 400 (`"Token inválido o vencido"`, mismo mensaje para token
+  inexistente/ya usado/vencido — HU-37 pide explícitamente no distinguirlos) se muestra tal cual lo
+  manda el backend. **Sin auto-login, a diferencia de `RegistroNegocioScreen` (HU-00a):** este
+  endpoint no firma ningún JWT nuevo, así que el 200 vuelve al login
+  (`Navigator.popUntil((route) => route.isFirst)`) en vez de a un shell autenticado — funciona sin
+  ningún caso especial porque `Sesion` nunca llegó a autenticarse en este flujo, y `_Router`
+  (`main.dart`) sigue mostrando `LoginScreen` en esa misma ruta raíz.
+- **`token_dev`** (campo de ayuda de testing que el backend agrega a la respuesta de
+  `/auth/recuperar-password` solo con `ENABLE_DEV_ROUTES=true`, nunca en producción real) **se
+  ignora a propósito** — `CanjearTokenPasswordScreen` pide el token con un campo de texto vacío,
+  igual que lo pediría contra producción real, nunca autorrellenado.
+- `login_screen.dart`: un solo agregado puntual, sin rediseño — link `TextButton` nuevo
+  ("¿Olvidaste tu contraseña?") entre el botón "Ingresar" y el botón de Google, mismo criterio de
+  deshabilitado durante un login en curso que el resto de los controles de la pantalla.
+
+**Verificado:** `flutter` no estaba en el PATH de esta sesión (`which flutter` no lo encontró), pero
+sí está instalado en `C:\flutter` (3.44.9 estable, mismo SDK que otras rondas) — invocado con la
+ruta completa. `flutter pub get` + `flutter analyze` (limpio: único hallazgo, el mismo `info`
+preexistente y ajeno a este cambio de siempre, `prefer_const_constructors` en
+`dashboard_screen.dart:383`) + `flutter build web` (compila, `√ Built build\web`, sin errores) — los
+tres en verde para los 3 archivos de este cambio (`recuperar_password_screen.dart`,
+`canjear_token_password_screen.dart`, `login_screen.dart`).
+
+**Fuera de alcance de esta ronda (explícito en la consigna del CEO/Director General IA, no un
+gap):** proveedor de email real (bloqueante de LANZAMIENTO, no de desarrollo — Mock en Backend, ver
+`02-backlog/backlog.md`/`../backend/src/integraciones/email.ts`); deep-linking (no hay
+infraestructura de links en la app, ninguna otra historia del backlog lo requiere tampoco); cambiar
+la contraseña estando ya logueado (pantalla distinta, sin HU propia todavía, ver "fuera de alcance"
+de HU-37 en el backlog).
+
 ## Pantallas implementadas (ver mapa completo en `04-diseno/mapa-pantallas.md`)
 
-**Cliente:** Login (+ Google, HU-35, solo Web; + link a Registro de Negocio, HU-00a, nuevo — ambas
-ver sección propia arriba), `ClienteShell` (bottom nav de 4 ítems, ver sección de arriba), Buscar
-Negocios (HU-00b), Detalle de Negocio/Servicios (HU-07), Elegir Profesional (HU-08), Horarios
-Disponibles (HU-09), Confirmar Turno (HU-09b), Mis Turnos (HU-12), Reprogramar Turno (HU-13). Las
-pantallas del flujo de reserva y Mis Turnos siguen con el `ThemeData` genérico anterior a este
-ciclo (el rediseño visual "Turnario Pro" fue exclusivamente del lado Profesional, según lo
-pedido); solo el `ClienteShell`/`AppBottomNavigationBar`
-y el botón de Google usan piezas del sistema de diseño nuevo. No incluye "Crear Cuenta" ni
-"¿Olvidaste tu contraseña?" — `mapa-pantallas.md` §5.17 documenta que esas dos partes no se
-capturaron, quedan fuera de HU-35. Notificaciones y Configuración (Cliente): placeholders
-"Próximamente".
+**Cliente:** Login (+ Google, HU-35, solo Web; + link a Registro de Negocio, HU-00a; + link a
+Recuperar Contraseña, HU-37 — las tres ven sección propia arriba), `ClienteShell` (bottom
+nav de 4 ítems, ver sección de arriba), Buscar Negocios (HU-00b), Detalle de Negocio/Servicios
+(HU-07), Elegir Profesional (HU-08), Horarios Disponibles (HU-09), Confirmar Turno (HU-09b), Mis
+Turnos (HU-12), Reprogramar Turno (HU-13). Las pantallas del flujo de reserva y Mis Turnos siguen
+con el `ThemeData` genérico anterior a este ciclo (el rediseño visual "Turnario Pro" fue
+exclusivamente del lado Profesional, según lo pedido); solo el `ClienteShell`/
+`AppBottomNavigationBar`, el botón de Google y las pantallas de Registro de Negocio/Recuperar
+Contraseña/Canjear Token usan piezas del sistema de diseño nuevo. No incluye "Crear Cuenta"
+(`mapa-pantallas.md` §5.17 documenta que esa parte no se capturó, queda fuera de HU-35) —
+"¿Olvidaste tu contraseña?" sí, ver HU-37 arriba. Notificaciones y Configuración (Cliente):
+placeholders "Próximamente".
 
 **Profesional:** Dashboard (HU-27, incluye selector "cambiar de vista" entre negocios — ver
 sección propia arriba), Gestión de Horarios (HU-05 + HU-16 + HU-18, reemplaza a

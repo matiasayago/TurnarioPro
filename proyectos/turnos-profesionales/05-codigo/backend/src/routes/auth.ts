@@ -1,13 +1,15 @@
 import { Router, Response } from 'express';
 import { z } from 'zod';
 import bcrypt from 'bcryptjs';
+import crypto from 'crypto';
 import { v4 as uuid } from 'uuid';
 import { OAuth2Client } from 'google-auth-library';
 import { pool, nowIso, withTransaction } from '../db';
 import { signToken, requireAuth, AuthedRequest, JwtClaims, Rol } from '../auth';
-import { loginLimiter, registroLimiter } from '../middleware/rateLimit';
+import { loginLimiter, registroLimiter, recuperacionPasswordLimiter } from '../middleware/rateLimit';
 import { asyncHandler } from '../middleware/asyncHandler';
 import { passwordSchema, uuidSchema, respuestaValidacionFallida } from '../dominio/validacion';
+import { emailProvider } from '../integraciones/email';
 
 export const authRouter = Router();
 
@@ -491,5 +493,191 @@ authRouter.post(
 
     const token = signToken({ sub: usuarioId, rol: 'cliente' });
     res.status(201).json({ token });
+  })
+);
+
+// ============================================================================
+// HU-37 (02-backlog/backlog.md, extiende E4/HU-01/HU-35) — recuperación de contraseña.
+// Implementa casi al pie de la letra la "Recomendación para Backend" que dejó DBA en
+// 03-arquitectura/modelo-datos.md §2decies/§5octies y en el bloque "Recuperación de
+// contraseña — token de un solo uso" de migrations/001_init.sql — ver esos documentos para el
+// razonamiento completo (por qué tabla nueva, por qué SHA-256 y no bcrypt para `token_hash`,
+// por qué esta tabla NO tiene RLS, por qué invalidar tokens anteriores antes de insertar uno
+// nuevo). Contrato de alcance ya cerrado por Product Manager/DBA/Director General IA, no se
+// reabre acá.
+// ============================================================================
+
+// Duración recomendada por Product Manager (HU-37): 30 minutos desde que se genera el token.
+// Configurable a propósito (mismo criterio que EXPIRACION_PAGO_MIN/VENTANA_CANCELACION_MIN en
+// turnos.ts) — únicamente para poder simular "token vencido" en pruebas automatizadas sin
+// esperar 30 minutos reales; el default de la aplicación es siempre 30.
+const RECUPERACION_PASSWORD_TTL_MIN = Number(process.env.RECUPERACION_PASSWORD_TTL_MIN ?? 30);
+
+// 256 bits de entropía — alta a propósito (ver modelo-datos.md §2decies, columna `token_hash`):
+// es lo que permite usar un hash rápido no adaptativo en vez de bcrypt sin abrir una superficie
+// de fuerza bruta viable.
+function generarTokenRecuperacion(): string {
+  return crypto.randomBytes(32).toString('hex');
+}
+
+// SHA-256, NO bcrypt — recomendación explícita de DBA (ver modelo-datos.md §2decies): el token
+// ya es de alta entropía (generado por el servidor, nunca elegido por una persona), así que no
+// necesita el costo computacional adaptativo de bcrypt para resistir fuerza bruta; usar bcrypt
+// acá solo sumaría (a) CPU innecesaria en cada intento de canje — spamear el endpoint de canje
+// con hashes inválidos forzaría ese costo adaptativo en cada intento, una superficie de DoS
+// barata que un hash rápido no abre — y (b) el límite de 72 bytes de entrada de bcrypt, sin
+// ningún beneficio real a cambio.
+function hashTokenRecuperacion(tokenPlano: string): string {
+  return crypto.createHash('sha256').update(tokenPlano).digest('hex');
+}
+
+// Mitigación de enumeración de usuarios (criterio explícito de HU-37, pendiente de validación de
+// Security): SIEMPRE el mismo mensaje genérico, con el mismo código 200, exista o no la cuenta —
+// y también si la cuenta existe pero es 100% Google (`password_hash IS NULL`, HU-35): no tiene
+// contraseña que restablecer, así que tampoco genera token, sin delatar esa diferencia acá.
+const MENSAJE_GENERICO_RECUPERAR_PASSWORD = {
+  ok: true,
+  mensaje: 'Si el email está registrado, vas a recibir instrucciones para recuperar tu contraseña.',
+};
+
+// HU-37: paso 1 del flujo (backlog.md — "El usuario ingresa su email en una pantalla nueva de
+// Mobile"). Body: `{ email }`.
+authRouter.post(
+  '/recuperar-password',
+  recuperacionPasswordLimiter,
+  asyncHandler(async (req, res) => {
+    const { email } = req.body;
+    if (!email) {
+      return res.status(400).json({ error: 'email es requerido' });
+    }
+
+    // `usuario` no tiene RLS (mismo patrón ya usado en /registro-cliente y /login sobre esta
+    // misma tabla) — sin transacción ni contexto para esta lectura.
+    const usuarioResult = await pool.query('SELECT id, password_hash FROM usuario WHERE email = $1', [
+      email,
+    ]);
+    const usuario = usuarioResult.rows[0] as { id: string; password_hash: string | null } | undefined;
+
+    // Fuera de alcance de esta historia (backlog.md, "Fuera de alcance... explícito"): una
+    // cuenta solo-Google (`password_hash IS NULL`, `ck_usuario_password_o_google`) no tiene
+    // contraseña que restablecer — no genera token real, y no delata esa diferencia (se cae
+    // directo a la respuesta genérica de abajo, igual que "no existe la cuenta").
+    if (usuario?.password_hash) {
+      const tokenPlano = generarTokenRecuperacion();
+      const tokenHash = hashTokenRecuperacion(tokenPlano);
+      const expiraEn = new Date(Date.now() + RECUPERACION_PASSWORD_TTL_MIN * 60_000).toISOString();
+
+      // Sin contexto RLS — esta tabla deliberadamente no lleva RLS (modelo-datos.md §5octies):
+      // un pedido de recuperación es anónimo por email, no hay ningún actor autenticado que
+      // setear como `app.usuario_id`. `withTransaction` acá solo aporta atomicidad BEGIN/COMMIT
+      // entre las 2 sentencias, no contexto de policies.
+      await withTransaction(async (client) => {
+        // Invalidar cualquier token pendiente ANTES de insertar el nuevo — en ESE orden, por el
+        // índice único parcial `uq_token_recuperacion_password_usuario_pendiente` (a lo sumo 1
+        // token pendiente por usuario, ver modelo-datos.md §2decies "varias recuperaciones
+        // seguidas"). Invertir el orden haría fallar el INSERT con 23505.
+        await client.query(
+          'UPDATE token_recuperacion_password SET usado_en = now() WHERE usuario_id = $1 AND usado_en IS NULL',
+          [usuario.id]
+        );
+        await client.query(
+          'INSERT INTO token_recuperacion_password (usuario_id, token_hash, expira_en) VALUES ($1, $2, $3)',
+          [usuario.id, tokenHash, expiraEn]
+        );
+      });
+
+      await emailProvider.enviarRecuperacionPassword(email, tokenPlano);
+
+      // HU-37 (backlog.md) / modelo-datos.md §2decies: mientras el provider sea el Mock (no hay
+      // proveedor de email real todavía), el token debe quedar visible para poder probar el
+      // flujo de punta a punta — acá vía la propia respuesta del endpoint, bajo el
+      // mismo gateo de ENABLE_DEV_ROUTES que ya usa src/routes/dev.ts (además del log de
+      // MockEmailProvider, ver src/integraciones/email.ts). Un campo con nombre inequívoco
+      // (`token_dev`), NUNCA presente si ENABLE_DEV_ROUTES no está activo explícitamente — en
+      // Render queda en "false" (ver render.yaml), así que esto nunca sale así en producción.
+      if (process.env.ENABLE_DEV_ROUTES === 'true') {
+        return res.json({ ...MENSAJE_GENERICO_RECUPERAR_PASSWORD, token_dev: tokenPlano });
+      }
+    }
+
+    return res.json(MENSAJE_GENERICO_RECUPERAR_PASSWORD);
+  })
+);
+
+const resetPasswordSchema = z.object({
+  token: z.string().min(1, 'token es requerido'),
+  password: passwordSchema,
+});
+
+/**
+ * Señal interna para forzar el ROLLBACK de la transacción de canje cuando el segundo UPDATE (ver
+ * más abajo) pierde la carrera de un doble-submit — a diferencia de "token no encontrado" (que
+ * no llega a mutar nada y se resuelve con un `return` normal dentro de la transacción), acá YA
+ * corrió el UPDATE de `usuario.password_hash` en la misma transacción: hace falta LANZAR (no
+ * `return`) para que `withTransaction` haga ROLLBACK en vez de COMMIT y ese cambio nunca se
+ * persista. Mismo espíritu que el manejo de 23505 de `uq_turno_slot_activo` en turnos.ts, aunque
+ * acá el motor no lanza ninguna excepción propia — el UPDATE simplemente no matchea ninguna fila.
+ */
+class CanjeTokenEnCarreraError extends Error {}
+
+// HU-37: paso 2 del flujo (backlog.md — "el usuario recibe un token por email y lo copia/pega
+// junto con la nueva contraseña en una segunda pantalla de la app"). Body: `{ token, password }`
+// — el token es la ÚNICA prueba de identidad acá, nunca se recibe `usuario_id` ni email.
+authRouter.post(
+  '/reset-password',
+  recuperacionPasswordLimiter,
+  asyncHandler(async (req, res) => {
+    const bodyParsed = resetPasswordSchema.safeParse(req.body);
+    if (!bodyParsed.success) return respuestaValidacionFallida(res, bodyParsed.error);
+    const { token, password } = bodyParsed.data;
+
+    const tokenHash = hashTokenRecuperacion(token);
+
+    let resultado: { valido: boolean };
+    try {
+      resultado = await withTransaction(async (client) => {
+        const tokenResult = await client.query(
+          `SELECT id, usuario_id FROM token_recuperacion_password
+           WHERE token_hash = $1 AND usado_en IS NULL AND expira_en > now()`,
+          [tokenHash]
+        );
+        const fila = tokenResult.rows[0] as { id: string; usuario_id: string } | undefined;
+        if (!fila) {
+          return { valido: false };
+        }
+
+        await client.query('UPDATE usuario SET password_hash = $1 WHERE id = $2', [
+          bcrypt.hashSync(password, 10),
+          fila.usuario_id,
+        ]);
+
+        // El `AND usado_en IS NULL` extra (ya filtrado también en el SELECT de arriba) cierra la
+        // carrera de un doble submit concurrente con el mismo token: si otro request canjeó
+        // este mismo token en el instante entre el SELECT y este UPDATE, acá `rowCount` da 0.
+        const canjeResult = await client.query(
+          'UPDATE token_recuperacion_password SET usado_en = now() WHERE id = $1 AND usado_en IS NULL',
+          [fila.id]
+        );
+        if (!canjeResult.rowCount) {
+          throw new CanjeTokenEnCarreraError();
+        }
+
+        return { valido: true };
+      });
+    } catch (err) {
+      if (err instanceof CanjeTokenEnCarreraError) {
+        resultado = { valido: false };
+      } else {
+        throw err;
+      }
+    }
+
+    if (!resultado.valido) {
+      // Mismo mensaje para "el token nunca existió", "ya venció" y "ya fue usado" (incluida la
+      // carrera de arriba) — sin distinguir cuál de las razones (criterio explícito de HU-37: no
+      // darle a un atacante información sobre si el token existió alguna vez).
+      return res.status(400).json({ error: 'Token inválido o vencido' });
+    }
+    return res.json({ ok: true, mensaje: 'Contraseña actualizada correctamente.' });
   })
 );

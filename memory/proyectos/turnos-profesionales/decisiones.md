@@ -1373,3 +1373,322 @@ existía en producción desde antes (`auth.ts`), sin ninguna UI que lo consumier
 - Sin cambios de Backend ni DBA en este round — PR solo con los 3 archivos de Mobile
   (`registro_negocio_screen.dart` nuevo, `login_screen.dart` + `README.md` con diffs mínimos).
   No requiere deploy a Render (nada de backend cambió).
+
+## Recuperación de contraseña — modelo de datos (token de un solo uso) — DBA (2026-08-16)
+
+Pedido del CEO, prioridad alta. Verificado por grep antes de modelar (no asumido): no existía nada
+de este mecanismo ni en el esquema ni en el código — `usuario` solo tenía `password_hash`/
+`google_id` para login normal (HU-35), sin ningún camino de reset. Alcance de la ronda (token
+distinto del JWT de sesión, siempre hasheado, expiración corta, invalidable tras un solo uso o al
+expirar) ya venía decidido por el Director General IA — este ciclo es solo el modelado de datos;
+Backend implementa los endpoints en una ronda posterior. Detalle completo, razonamiento columna por
+columna y RLS en `03-arquitectura/modelo-datos.md` §2decies/§5octies. Resumen para reutilizar:
+
+- **Tabla nueva `token_recuperacion_password`** (no columnas en `usuario`: acá la cardinalidad SÍ
+  fuerza tabla separada, 0..N tokens por usuario a lo largo del tiempo, no 1:1). Sin prefijo
+  `usuario_` a propósito — ese prefijo se reserva para la familia `usuario_preferencias*`
+  (preferencias planas 1:1), y esto no lo es. Columnas: `usuario_id` (FK), `token_hash` (NOT NULL
+  UNIQUE — nunca el token en texto plano, mismo criterio que `password_hash`; se recomienda a
+  Backend un hash rápido no adaptativo tipo SHA-256, no bcrypt, porque el token ya es de alta
+  entropía y bcrypt sumaría costo de CPU por validación sin ganar nada), `expira_en` (NOT NULL, sin
+  default — Backend lo calcula), `usado_en` (TIMESTAMPTZ nullable — NULL = vigente; con valor = ya
+  no sirve, sea porque se usó o porque quedó invalidado por un pedido más nuevo del mismo usuario,
+  misma columna cubre ambos motivos a propósito), `creado_en`. Sin `creado_por`/`modificado_por`
+  (no por la regla de "auditoría reducida" de `usuario_preferencias` — acá NUNCA hay actor
+  autenticado en ninguna escritura, ni siquiera indirectamente). Sin soft delete (nada referencia
+  esta tabla).
+- **Decisión propia de esta ronda, no solo "seguir la plantilla" de tablas anteriores — invalidar
+  tokens anteriores del mismo usuario al pedir uno nuevo** (en vez de dejarlos expirar solos):
+  reduce la cantidad de secretos vigentes simultáneos si el usuario reintenta varias veces seguidas
+  ("no me llegó el mail"), sin perjudicar ese mismo caso de reintento (el link más reciente sigue
+  funcionando). Garantizado a nivel de base de datos, no solo por convención: índice único parcial
+  `uq_token_recuperacion_password_usuario_pendiente` sobre `(usuario_id) WHERE usado_en IS NULL` —
+  a lo sumo 1 token pendiente por usuario, Backend queda obligado a invalidar antes de insertar uno
+  nuevo o el INSERT falla por unicidad (23505).
+- **Decisión más relevante del ciclo — esta tabla NO lleva Row Level Security**, a diferencia de
+  las últimas 5 tablas nuevas del esquema (todas con `FORCE ROW LEVEL SECURITY` desde el primer
+  commit). Verificado contra `backend/src/db.ts`/`src/routes/auth.ts` antes de decidir (no
+  asumido): el patrón de RLS de este esquema depende de `current_setting('app.usuario_id')`,
+  seteado siempre a partir de un actor YA AUTENTICADO — y ningún acceso a esta tabla tiene eso
+  disponible en ningún momento de su ciclo de vida. Pedir la recuperación es anónimo (por email,
+  sin sesión, mismo caso que `POST /auth/registro-cliente` sobre `usuario`, que tampoco corre con
+  contexto RLS). Canjear el token es peor todavía que "no autenticado": es estructuralmente
+  imposible saber `usuario_id` ANTES de la consulta `WHERE token_hash = ?` que es, precisamente, la
+  que lo descubre — una policy `usuario_id = app.usuario_id` exigiría conocer de antemano el valor
+  que la propia consulta todavía tiene que resolver. La protección real de esta tabla no es RLS —
+  es alta entropía del token + hash + expiración corta + un solo uso + el índice único parcial de
+  arriba, mismo principio de fondo que ya explica por qué `usuario.password_hash` tampoco depende
+  de RLS en el login. Se evaluó y descartó agregar RLS con una policy permisiva transitoria (mismo
+  patrón que `turno_select_publico`) por no sumar protección real y sí una falsa sensación de
+  seguridad a quien lea el esquema.
+- **Migraciones:** `05-codigo/database/migrations/001_init.sql` y
+  `05-codigo/backend/migrations/001_init.sql` actualizados con la tabla nueva y verificados
+  byte-idénticos (`git diff --no-index` sin salida). Delta incremental
+  `05-codigo/database/migrations/008_recuperacion_password.sql` (puramente aditivo, sin backfill,
+  idempotente vía `CREATE TABLE`/`CREATE UNIQUE INDEX ... IF NOT EXISTS`, reversible — bloque
+  ROLLBACK comentado al final). **A diferencia de `002`–`007`, este archivo 008 NO se duplicó en
+  `05-codigo/backend/migrations/`** — verificado contra `db.ts` que `runMigrations()` lee
+  únicamente el nombre de archivo hardcodeado `"001_init.sql"` (nunca hace glob de la carpeta), y
+  confirmado que ninguno de los 5 incrementales anteriores tiene copia ahí tampoco (ese directorio
+  solo tiene `001_init.sql`) — se sigue el patrón ya establecido en los ciclos anteriores en vez de
+  duplicar un archivo que `runMigrations()` nunca va a ejecutar.
+- **No implementado en este ciclo, fuera de alcance de DBA:** código de Backend (2 endpoints
+  nuevos, hashing del token, envío del email — recomendaciones detalladas dejadas en
+  `001_init.sql`/`modelo-datos.md` §2decies) ni Mobile (pantallas "Olvidé mi contraseña"/"Nueva
+  contraseña"). No aplicado contra Render — pendiente de revisión del Director General IA y
+  aprobación del CEO, mismo flujo que las migraciones anteriores.
+
+## Recuperación de contraseña — endpoints de Backend (HU-37) — Backend (2026-08-16)
+
+Continúa el ciclo de DBA (entrada anterior) — implementa "casi al pie de la letra" la
+"Recomendación para Backend" que ya había dejado escrita DBA en `001_init.sql`/`modelo-datos.md`
+§2decies/§5octies, sin reabrir ninguna de esas decisiones (tabla, nombre, algoritmo de hash,
+ausencia de RLS). Detalle completo en los comentarios de
+`05-codigo/backend/src/routes/auth.ts`. Resumen para reutilizar:
+
+- **`src/integraciones/email.ts` (nuevo)** — `EmailProvider`/`MockEmailProvider`, mismo patrón
+  que `pagos.ts` (`PagoProvider`/`MockPagoProvider`). El Mock no envía nada real; el token en
+  texto plano solo se loguea a consola si `ENABLE_DEV_ROUTES === 'true'` (mismo gate que
+  `src/routes/dev.ts`) — nunca deja rastro del secreto fuera de ese modo.
+- **`POST /auth/recuperar-password` / `POST /auth/reset-password`** (`src/routes/auth.ts`):
+  SHA-256 (no bcrypt) para `token_hash`, por la razón que ya dejó DBA (token de alta entropía, no
+  necesita costo adaptativo). TTL de 30 min configurable vía `RECUPERACION_PASSWORD_TTL_MIN` (el
+  default de la app siempre es 30 — la variable existe únicamente para poder simular "token
+  vencido" en pruebas sin esperar 30 minutos reales). Orden invalidar-pendiente-luego-insertar
+  respetado tal cual lo exige el índice único parcial. La carrera de doble-submit en el canje
+  (`UPDATE token_recuperacion_password ... WHERE id = $1 AND usado_en IS NULL`, `rowCount === 0`)
+  se resuelve lanzando una excepción propia (`CanjeTokenEnCarreraError`) DENTRO de la transacción
+  para forzar `ROLLBACK` del `UPDATE usuario` que ya había corrido antes en esa misma
+  transacción — un simple `return` ahí habría dejado que `withTransaction` hiciera `COMMIT` igual
+  y persistiera un cambio de contraseña que debía abortarse.
+- **Rate limiting — limiter dedicado nuevo (`recuperacionPasswordLimiter`), no se reusó
+  `loginLimiter` tal cual** (`src/middleware/rateLimit.ts`): `loginLimiter` cuenta solo intentos
+  FALLIDOS (`skipSuccessfulRequests`), pero `POST /auth/recuperar-password` responde 200 SIEMPRE
+  (criterio de no-enumeración) — con `skipSuccessfulRequests` ese límite nunca contaría nada,
+  dejando el endpoint sin protección real contra spam de emails. El limiter nuevo cuenta TODOS los
+  intentos (mismo patrón que `registroLimiter`) y se reusa, misma instancia, en ambos endpoints
+  nuevos.
+- **Decisión propia de esta ronda, dentro de una opción que el propio contrato ya dejaba abierta**
+  ("el token debe quedar visible... ej. en un log del servidor, O en la respuesta del endpoint
+  bajo el mismo gateo de `ENABLE_DEV_ROUTES`", `001_init.sql`/`modelo-datos.md` §2decies): además
+  del log, la respuesta de `POST /auth/recuperar-password` expone un campo `token_dev` (nombre
+  inequívoco, nunca presente si `ENABLE_DEV_ROUTES` no está activo) cuando sí se generó un token.
+  Permite un script de verificación 100% HTTP, sin depender de leer stdout de un proceso servidor
+  externo.
+- **Verificación end-to-end contra Postgres real, no solo `tsc --noEmit`:** este entorno no tiene
+  Docker instalado, y el único Postgres nativo ya presente (servicio de Windows,
+  `postgresql-x64-18`) exige `scram-sha-256` sin credenciales conocidas — no se intentó adivinar
+  contraseñas (bloqueado explícitamente por el propio sistema de permisos al primer intento, y de
+  todos modos no hubiera sido un camino razonable). En cambio se inicializó una instancia Postgres
+  18 **efímera y aislada** con `initdb`/`pg_ctl` propios (puerto 5433, autenticación `trust` solo
+  para esa instancia descartable, datos en el directorio temporal de la sesión, nunca en el repo),
+  se arrancó el backend apuntándole (`runMigrations()` corrió `001_init.sql` completo desde cero,
+  confirmado con `\d token_recuperacion_password`), y se la borró por completo al terminar. No se
+  tocó en ningún momento el `DATABASE_URL` de Render que ya estaba en `backend/.env` (apunta a la
+  base real del proyecto, sin la tabla nueva porque el gate de `runMigrations()` salta el script
+  completo en una base ya migrada — correrle scripts de prueba hubiera sido, además, un riesgo
+  innecesario sobre datos que no son descartables).
+- **Script nuevo `scripts/test-recuperacion-password.mjs`, corrido en verde**: caso feliz completo
+  (pedir → canjear → la password vieja deja de funcionar → la nueva sí), reintento de un token ya
+  canjeado (400), no-enumeración verificada por status+contenido en 2 casos (email inexistente Y
+  cuenta 100%-Google responden exactamente igual, sin `token_dev`), invalidación de tokens
+  anteriores al pedir uno nuevo (confirmado también a nivel de fila, no solo por HTTP), password
+  corta rechazada sin "quemar" el token (zod corre antes de tocar la base), token vencido
+  (corrida con `RECUPERACION_PASSWORD_TTL_MIN=0.1` para no esperar 30 minutos reales), token con
+  formato inválido, campos faltantes. Para el caso "cuenta 100%-Google" (`password_hash IS NULL`)
+  el script abre su propia conexión a Postgres (paquete `pg`, ya dependencia de producción del
+  backend) e inserta la fila directo — es el único script de la carpeta que lo hace, documentado
+  en su propio encabezado, porque `POST /auth/google` exige un ID token real y este entorno no
+  tiene `GOOGLE_CLIENT_ID` configurado.
+- **Regresión confirmada, no solo asumida:** `smoke-test.mjs`, `test-validaciones-campos.mjs` y
+  `test-autorizacion-cruzada.mjs` corridos contra el mismo servidor (auth.ts/rateLimit.ts son
+  archivos compartidos con el resto del backend) — los tres en verde, sin ajustes.
+- **No implementado / pendiente, fuera de alcance de este ciclo:** proveedor de email real
+  (bloqueante de LANZAMIENTO, no de desarrollo — ver nota operativa en `02-backlog/backlog.md`);
+  pantallas Mobile ("Olvidé mi contraseña"/"Nueva contraseña", sin wireframe todavía, pendiente de
+  UX/UI); aplicar `008_recuperacion_password.sql` contra Render (pendiente de aprobación del CEO,
+  mismo flujo que las migraciones anteriores); revisión de Security del criterio de
+  no-enumeración y de la invalidación de sesiones JWT ya emitidas al resetear la contraseña (
+  ambos ya señalados como pendientes explícitos por HU-37/Product Manager, no nuevos de este
+  ciclo).
+
+## Verificación independiente de HU-37 contra Render real + 2 hallazgos propios — Director General IA (2026-08-16)
+
+Continuación directa de la entrada anterior (Backend). Revisión de código (diffs completos de
+`auth.ts`/`email.ts`/`rateLimit.ts`, incluida la confirmación de que `withTransaction` (`db.ts`)
+hace `ROLLBACK` real ante cualquier excepción — clave para validar que `CanjeTokenEnCarreraError`
+efectivamente revierte el `UPDATE usuario.password_hash` cuando pierde la carrera de doble-submit)
++ `tsc --noEmit` propio (limpio) + aplicación de `008_recuperacion_password.sql` contra Render
+(aprobación explícita del CEO, aplicada vía script Node con `pg` — sin `psql` en este entorno,
+mismo mecanismo ya usado para migraciones anteriores) + verificación end-to-end propia corriendo
+`test-recuperacion-password.mjs` contra el backend local apuntando a Render real (no solo contra la
+instancia efímera de Backend).
+
+- **Migración 008 aplicada y verificada a nivel de esquema real**: `information_schema.columns` +
+  `pg_indexes` contra Render confirmaron las 6 columnas y los 3 índices esperados
+  (`_pkey`/`token_hash` UNIQUE/el parcial `uq_..._usuario_pendiente`) antes de correr ningún test
+  funcional encima.
+- **2 hallazgos propios en el script de verificación de Backend, corregidos en el momento (no
+  relanzado un agente para esto, cambio mecánico y acotado):**
+  1. `test-recuperacion-password.mjs` abre su propia conexión `pg.Client` sin manejar TLS — contra
+     Render falla con `ECONNRESET` (mismo síntoma ya documentado antes en esta sesión para el
+     backend en sí). Backend nunca lo detectó porque probó únicamente contra su instancia Postgres
+     efímera local (sin TLS). Fix: mismo criterio que `resolveSsl()` de `db.ts`, leer
+     `DATABASE_SSL=true` y pasar `{ rejectUnauthorized: false }`.
+  2. La batería completa (~15 requests) comparte `recuperacionPasswordLimiter` entre
+     `/recuperar-password` y `/reset-password` — con el default de la aplicación (10/15min) el
+     propio script se topa con su propio rate limit a mitad de camino (falló, reproducido,
+     exactamente en el request #11) y el resto de los casos fallan en cascada con 429 en vez de
+     los códigos esperados. No es un bug del rate limiter (protege el endpoint correctamente) sino
+     del script, que no lo tenía en cuenta. Backend tampoco lo topó en su propia corrida — no
+     quedó documentado cómo evitó el límite en su ambiente. Fix: documentado en el propio
+     encabezado del script (arrancar el SERVIDOR, no el script, con `RATE_LIMIT_RECUPERACION_MAX`
+     alto para verificación), mismo criterio que ya usaba el header para `RECUPERACION_PASSWORD_TTL_MIN`.
+- **Verificación end-to-end propia, en verde, contra Render real** (backend local con
+  `DATABASE_URL`/`DATABASE_SSL=true` de Render, `RECUPERACION_PASSWORD_TTL_MIN=0.1`,
+  `RATE_LIMIT_RECUPERACION_MAX=100`): los 27 checks del script pasaron, incluido el caso "token
+  vencido" (espera real de ~8s). Backend local detenido al terminar; los usuarios de prueba
+  (`recuperacion-*@test.com`, `google-only-*@test.com`) quedaron en Render, mismo criterio ya
+  aplicado a los fixtures de prueba de rondas anteriores (no se limpian).
+- Con esto, Backend de HU-37 queda verificado de punta a punta contra producción real, no solo
+  contra el reporte del agente — pendiente Mobile (pantallas) y, después, el mismo flujo de
+  siempre (PR → CI → aprobación del CEO → merge → deploy, esta vez si con deploy porque sí hay
+  cambios de Backend).
+
+## Mobile: pantallas de recuperación de contraseña (HU-37) — 2026-08-16
+
+Cierra el lado Mobile de HU-37, sobre el contrato de Backend ya verificado de punta a punta contra
+Render real en la entrada anterior (mismo día) — no se reabrió ninguna decisión de Backend/DBA de
+esas dos rondas (nombre de campos, mensajes exactos, criterio de no-enumeración, TTL, `token_dev`).
+Detalle completo en el doc-comment de cada pantalla nueva
+(`05-codigo/mobile/lib/screens/recuperar_password_screen.dart`/`canjear_token_password_screen.dart`)
+y en `05-codigo/mobile/README.md` (sección "🆕 Recuperación de contraseña"). Resumen para reutilizar:
+
+- **2 pantallas nuevas + 1 link**, mismo patrón pre-autenticación que `registro_negocio_screen.dart`
+  (HU-00a): `recuperar_password_screen.dart` (paso 1, pide email → `POST /auth/recuperar-password`)
+  y `canjear_token_password_screen.dart` (paso 2, pide token + contraseña nueva + confirmación →
+  `POST /auth/reset-password`), encadenadas con `Navigator.push` (nunca `pushReplacement`, para
+  poder volver atrás). `login_screen.dart` suma un `TextButton` ("¿Olvidaste tu contraseña?") entre
+  "Ingresar" y el botón de Google — decisión de UX propia (la consigna dejaba la ubicación exacta a
+  criterio): cerca de "Ingresar" porque resuelve el mismo caso de uso, antes del login con Google y
+  del registro de negocio (flujos sin relación con "olvidé mi contraseña").
+- **Sin auto-login, a diferencia de HU-00a — la diferencia central de este flujo respecto a la
+  plantilla que ya existía:** `POST /auth/reset-password` no firma ningún JWT nuevo, así que el 200
+  del paso 2 no llama nunca `sesion.iniciarSesion`; solo hace
+  `Navigator.popUntil((route) => route.isFirst)`. Alcanza sin ningún caso especial porque `_Router`
+  (`main.dart`) reacciona al estado de `Sesion` (nunca autenticada en este flujo) y sigue mostrando
+  `LoginScreen` en esa misma ruta raíz — mismo mecanismo de navegación que HU-00a, resultado distinto
+  por construcción, no por un branch nuevo.
+- **Mensaje genérico del backend (paso 1) y mensaje de éxito (paso 2) se muestran por `SnackBar`, no
+  por el banner de feedback de la pantalla — decisión basada en un patrón ya existente en el código,
+  no inventada:** se verificó que `registro_negocio_screen.dart`/`editar_perfil_screen.dart` ya
+  usan ese mismo criterio (banner solo para error persistente; éxito transitorio por
+  `ScaffoldMessenger`, que en este proyecto es global a nivel de `MaterialApp` y sigue visible aunque
+  ya se haya navegado a la pantalla siguiente). El texto que se muestra es literalmente
+  `resp['mensaje']` tal como lo manda el backend, nunca una copia hardcodeada en el cliente.
+- **Campo de token multilínea + monoespaciado** (`minLines: 2, maxLines: 4`,
+  `AppTypography.body(context).copyWith(fontFamily: 'monospace')`) — el token real son 64
+  caracteres hexadecimales, ilegibles forzados a una sola línea. `token_dev` (campo que el backend
+  agrega a la respuesta del paso 1 solo con `ENABLE_DEV_ROUTES=true`) se ignora a propósito: el
+  campo de token arranca vacío siempre, igual que se comportaría contra producción real.
+- **Validación client-side igual de estricta que HU-00a:** contraseña mínimo 8 caracteres, mismo
+  mensaje exacto que `passwordSchema` (`'La contraseña debe tener al menos 8 caracteres'`, sin
+  punto final, para que coincida literal); agregado nuevo de esta ronda — comparación contra
+  "confirmar contraseña" antes de enviar, ya que el paso 2 no existía en ningún flujo anterior de
+  esta app. El 400 del backend (`"Token inválido o vencido"`, mismo mensaje para las 3 causas
+  posibles) se muestra tal cual, sin intentar distinguirlas del lado del cliente tampoco.
+- **Hallazgo de entorno, reutilizable:** el `README.md` de rondas anteriores documentaba "este
+  entorno no tiene el SDK de Flutter" para varias rondas de Backend, y por otro lado, para rondas de
+  Mobile más recientes, que sí lo tenía en el PATH. En esta sesión puntual `flutter`/`dart` no
+  resolvían en el PATH de la shell (`which flutter` fallaba), pero el SDK sí seguía instalado en
+  `C:\flutter` — invocando el binario por ruta completa (`/c/flutter/bin/flutter.bat`) se pudo
+  correr `flutter pub get` + `flutter analyze` + `flutter build web` con normalidad. Mismo
+  lineamiento ya registrado más arriba en este archivo ("nunca asumir Flutter/Dart/Docker/psql
+  instalados... verificar con `--version`"), con un matiz nuevo: tampoco asumir que no está
+  instalado solo porque no resuelve en el PATH por defecto de la shell — vale la pena revisar
+  ubicaciones conocidas (`C:\flutter`) antes de descartar la verificación real.
+- **Verificado:** `flutter analyze` limpio (único hallazgo: el mismo `prefer_const_constructors`
+  preexistente y ajeno a este cambio, `dashboard_screen.dart:383`, mismo baseline que rondas
+  anteriores) y `flutter build web` (`√ Built build\web`, sin errores) — ambos corridos sobre los 3
+  archivos tocados/nuevos de este cambio. `flutter doctor` confirma que este entorno sigue sin
+  Android SDK ni Visual Studio (sin cambios respecto de lo ya documentado) — Web sigue siendo el
+  único target verificable acá; no se intentó `flutter build apk`. No se corrió la app contra un
+  backend real ni se probó visualmente en un browser — queda para verificación aparte del Director
+  General IA, mismo criterio ya usado en rondas anteriores de Mobile sin entorno de ejecución
+  interactivo.
+- **No tocado:** `05-codigo/backend/` ni `05-codigo/database/` (contrato ya cerrado y verificado en
+  las 3 entradas anteriores de este mismo archivo — Backend/DBA/Director General IA, todas
+  2026-08-16). Tampoco `04-diseno/mapa-pantallas.md` (UX/UI dejó explícitamente sin wireframe este
+  flujo por falta de evidencia — HU-37 fija el comportamiento funcional, no el layout).
+
+## PR #17 — organización de rama + fallo real de CI + fix — Director General IA (2026-08-16)
+
+Dos hallazgos propios en el cierre de esta historia, ninguno de los dos "solo re-lanzar el CI":
+
+- **Todo el trabajo de HU-37 se había hecho sobre `feature/registro-negocio-mobile` (la rama del
+  PR #16, todavía sin mergear)** en vez de una rama propia — un descuido de organización, no un
+  problema de código. Se separó correctamente: `git stash push -u`, `git checkout main` (limpio,
+  sin HU-00a), rama nueva `feature/recuperacion-password` desde ahí, `git stash pop` (con 3
+  conflictos reales — `decisiones.md`/`mobile/README.md`/`login_screen.dart`, los 3 archivos que
+  ambas rondas tocaron — resueltos a mano quedándose solo con el contenido de HU-37, verificado
+  con `flutter analyze`/`tsc --noEmit` limpios después de resolver). 5 commits separados por rol
+  (Product Manager/DBA/Backend/Mobile/memoria), PR #17 contra `main` real, "Able to merge" sin
+  conflictos.
+- **El CI de Backend falló de verdad en el primer push (run 31965043406) — investigado con logs
+  reales, no asumido como flaky.** El paso de diagnóstico del workflow (mismo mecanismo ya
+  documentado en esta sesión: comentario del commit vía `GITHUB_TOKEN`, necesario porque la
+  descarga directa de logs sigue devolviendo 403 sin login) mostró la causa exacta: la fase de
+  roles/RLS terminó en verde ("OK FINAL"), pero `scripts/test-recuperacion-password.mjs` (dentro de
+  "Fase 1/2 - correr todos los scripts") falló en el request #11 con 429 — exactamente el MISMO
+  hallazgo de rate limiting que ya se había encontrado y corregido en el propio script para
+  verificación local (ver entrada "Verificación independiente de HU-37..." más arriba), pero que
+  nadie había propagado al workflow de CI: `.github/workflows/turnos-backend-ci.yml` ya seteaba
+  `RATE_LIMIT_LOGIN_MAX`/`RATE_LIMIT_REGISTRO_MAX` en alto para sus propios arranques de servidor,
+  pero nunca se agregó `RATE_LIMIT_RECUPERACION_MAX` (variable nueva de esta misma historia) a esa
+  misma lista.
+- **Fix aplicado (commit `a9da987`):** `RATE_LIMIT_RECUPERACION_MAX: "1000"` agregado en los 2
+  arranques de servidor del job (`Fase 1/2` y `Fase 2/2`, mismo patrón que las 2 variables ya
+  existentes) — no se tocó ningún código de aplicación, el rate limiter en sí funciona
+  correctamente (es exactamente lo que debe hacer contra tráfico real); el gap estaba solo en la
+  configuración del entorno de CI.
+- Reutilizable: cuando se agrega una variable de rate limiting nueva a un endpoint, revisar si
+  algún script de `scripts/*.mjs` la ejercita con volumen suficiente como para necesitar el mismo
+  override que ya reciben `RATE_LIMIT_LOGIN_MAX`/`RATE_LIMIT_REGISTRO_MAX` en el CI — no alcanza
+  con que el script pase localmente con el límite manualmente elevado si el workflow no hace lo
+  mismo.
+- **Después del fix de rate limit, el re-run (run 31965450421) mostró un fallo DISTINTO** —
+  `test-recuperacion-password.mjs` esta vez pasó completo (las 27 verificaciones en verde,
+  confirmando que el fix funcionó), pero `test-rn8-ventana-cancelacion.mjs` (Fase 2/2) falló en
+  "Setup falló: turno lejano #1 creado". Mismo protocolo ya establecido en esta sesión (ver
+  entrada "Primera corrida real del CI de Backend" más arriba, y task #35 de antes de esta sesión
+  — este script tiene flakiness ya documentada): se reprodujo el script EXACTO, con el código
+  exacto de este PR (rama `feature/recuperacion-password`), contra Render real, arrancando el
+  backend local sin override de `VENTANA_CANCELACION_MIN` (para que use el default de 120 min,
+  igual que la Fase 2 del CI) — **pasó limpio, las 2 direcciones (rechazo dentro de la ventana,
+  aceptación fuera de la ventana) verificadas sin fallos**. Confirma que no es una regresión real
+  (ninguno de los cambios de este PR toca turnos/disponibilidad/cancelación) sino la misma
+  fragilidad de entorno de CI ya conocida para este script puntual. Se usó "Re-run failed jobs"
+  desde la UI de GitHub (mismo mecanismo ya usado antes en esta sesión) en vez de pushear ningún
+  cambio de código — no había nada que arreglar en el repo.
+- **Lección de proceso, propia:** un push de memoria (commit `60b6677`) hecho DESPUÉS de confirmar
+  "All checks have passed" volvió a disparar el evento `pull_request: synchronize` (el filtro de
+  paths de `push` no matchea `memory/`, pero `pull_request` re-evalúa el PR completo en cada sync,
+  sin importar qué toque el commit puntual — ver la entrada anterior sobre por qué `push` y
+  `pull_request` se comportan distinto acá) y `test-rn8` volvió a fallar, esta vez en un punto
+  DISTINTO ("turno cercano #2" en vez de "turno lejano #1") — la firma clásica de flakiness no
+  determinística, no de una regresión (un bug real fallaría siempre en el mismo lugar). Segundo
+  "Re-run failed jobs", verde. Para la próxima: evitar pushear commits triviales (memoria/docs)
+  después de que un PR ya quedó en verde y lo único que falta es aprobación de merge — cada push
+  reinicia la ventana de exposición a la flakiness del CI.
+- **PR #17 mergeado** (commit `2ce4bb1` a `main`, aprobación explícita del CEO) y **desplegado a
+  Render** (aprobación explícita separada): Render no tiene auto-deploy configurado en este
+  proyecto (confirmado — los últimos 12 deploys del servicio son todos `TRIGGER: Manual`), se
+  disparó "Deploy latest commit" a mano desde el dashboard. Verificado en producción real tras el
+  build (polling de `POST /auth/recuperar-password` hasta dejar de dar 404): la respuesta es
+  exactamente `{"ok":true,"mensaje":"..."}` **sin `token_dev`** (confirma `ENABLE_DEV_ROUTES=false`
+  en Render, tal como se esperaba — el secreto nunca se filtra en el ambiente real) y
+  `POST /auth/reset-password` con un token inválido responde `400 {"error":"Token inválido o
+  vencido"}` correctamente. HU-37 queda completa: diseñada, implementada, verificada de punta a
+  punta contra Render real, mergeada y desplegada — pendiente solo el proveedor de email real
+  (bloqueante de que el flujo sirva de verdad a un usuario final, no de que el código funcione) y
+  la revisión de Security ya señalada como pendiente explícito.
