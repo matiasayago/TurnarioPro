@@ -48,6 +48,16 @@ pierdan al planificar el lanzamiento):
 - **Mercado Pago (E12/HU-30):** el lanzamiento inicial puede salir con todos los servicios
   configurados "sin seña" (`requiere_sena = false`, RN10, ya soportado hoy) mientras se tramita
   la habilitación de la cuenta de Mercado Pago del negocio — no bloquea el lanzamiento de v1.
+- **Recuperación de contraseña por email (E4/HU-37) — pendiente de proveedor externo, y a
+  diferencia de Mercado Pago arriba, SÍ bloqueante de LANZAMIENTO para este flujo puntual (no del
+  resto de v1).** Se construye con una interfaz abstracta + provider Mock (sin envío real) hasta
+  que el CEO provea una cuenta de un proveedor de email real (SendGrid/Resend/AWS SES) — mismo
+  patrón ya usado para Mercado Pago (arriba) y Google OAuth (HU-35, `GOOGLE_CLIENT_ID`). La
+  diferencia con Mercado Pago: ahí existe un modo "sin seña" totalmente funcional para lanzar sin
+  la integración; acá no hay equivalente — mientras no haya credenciales de email reales, un
+  usuario real que olvide su contraseña sigue sin poder recuperarla en producción. No bloquea el
+  desarrollo ni las pruebas (el Mock alcanza para eso), solo la disponibilidad real de este flujo
+  puntual una vez en producción.
 - **Datos de salud / HU-20 — bloqueante de LANZAMIENTO, no de desarrollo.** El CEO va a
   consultar a un abogado sobre la Ley 25.326 (datos sensibles/de salud) antes de habilitar HU-20
   con datos reales de pacientes en producción. HU-20 se construye y prueba con normalidad en
@@ -69,7 +79,7 @@ pierdan al planificar el lanzamiento):
 | E1 | Alta de servicios y profesionales por negocio | P0 |
 | E2 | Gestión de disponibilidad del profesional | P0 (extendida, ver HU-16 a HU-18) |
 | E3 | Reserva de turno (cliente), con seña opcional por profesional | P0 |
-| E4 | Autenticación y perfiles | P0 (extendida, ver HU-35) |
+| E4 | Autenticación y perfiles | P0 (extendida, ver HU-35, HU-37) |
 | E7 | Notificaciones (confirmación y recordatorio) | P0 (extendida, ver HU-24 a HU-26) |
 | E5 | Gestión de clientes e historial (profesional) | P1 (extendida, ver HU-19 a HU-23 y HU-33; HU-22 diferida, ver nota) |
 | E6 | Cancelación y reprogramación de turnos | P1 |
@@ -231,6 +241,109 @@ la app sin depender de crear y recordar una contraseña propia.
     `08-despliegue/google-oauth.md` §5). Ninguna de las tres bloqueó nunca el resto del backlog
     ni el resto de E4 (HU-01/HU-02 siguieron funcionando sin cambios) — condicionaban únicamente
     el diseño detallado e implementación de esta historia puntual.
+
+**HU-37 (v1, P0 — nueva, extiende HU-01/HU-35).** Como cliente o profesional que se registró con
+email y contraseña, quiero poder recuperar el acceso a mi cuenta cuando olvido mi contraseña,
+para no quedar bloqueado de forma permanente si no vinculé una cuenta de Google (HU-35) como
+método alternativo de acceso.
+- Criterios de aceptación:
+  - **Origen (CEO vía Director General IA, 2026-08-16) y gap verificado:** el CEO pidió esta
+    funcionalidad marcándola explícitamente como prioritaria. Verificado por grep (Product
+    Manager, 2026-08-16) que hoy no existe absolutamente nada de esto:
+    `05-codigo/backend/src/routes/auth.ts` solo tiene `/login`, `/registro-cliente`,
+    `/registro-negocio` (HU-00a) y `/google` (HU-35) — sin ningún endpoint de reset/forgot
+    password; `05-codigo/mobile/lib/screens/login_screen.dart` tampoco tiene ningún link ni
+    pantalla relacionada (solo el botón "Ingresar", el de Google y el link a registrar negocio).
+    Un usuario que se registró con email+contraseña y nunca vinculó Google queda hoy
+    **permanentemente bloqueado, sin ninguna salida**, dentro de la app.
+  - **No es alcance nuevo desde cero — cierra un gap de una aprobación del CEO que había quedado
+    a medio formalizar.** UX/UI ya había registrado "recuperación de contraseña" dentro del mismo
+    ítem que el CEO aprobó el 2026-08-09 junto con el login con Google
+    (`04-diseno/mapa-pantallas.md` §9.4, ítem 2: "Pantalla de Login/Registro real... + login
+    social con Google... + recuperación de contraseña" → "Decisión del CEO (2026-08-09):
+    aprobado, se suma al alcance"). De ese ítem aprobado, Product Manager en su momento solo
+    formalizó la mitad de Google como HU-35 — la recuperación de contraseña nunca se convirtió en
+    su propia historia y quedó sin rastro en la tabla de trazabilidad de UX/UI (§7: la fila
+    "Login / Registro" lista únicamente HU-35). Esta historia cierra esa mitad pendiente. El
+    wireframe de referencia (§5.17, a partir de `Screenshot_20260805_202552_Turnario.jpg`) ya
+    muestra el link "¿Olvidaste tu contraseña?" en la pantalla de Login, pero UX/UI dejó
+    explícitamente sin diseñar el flujo en sí ("no se capturó la pantalla de 'Crear Cuenta'... ni
+    el flujo de '¿Olvidaste tu contraseña?' — quedan sin wireframe por falta de evidencia, no se
+    inventan") — el diseño detallado de pantallas sigue pendiente de UX/UI en Fase 3; esta HU fija
+    el comportamiento funcional, no el layout.
+  - **Prioridad P0, a diferencia de HU-35 (justificación de Product Manager):** el CEO la marcó
+    explícitamente como prioritaria. Además, a diferencia de HU-35 (login con Google, P1 — "el
+    flujo de email/contraseña ya implementado... sigue funcionando exactamente igual... con o sin
+    ella"), la ausencia de esta historia deja a cualquier usuario de contraseña sin vinculación de
+    Google en un estado terminal sin salida dentro del producto — no es una fricción reducible,
+    es una cuenta inaccesible de forma permanente. Se prioriza junto con HU-01/HU-02 como parte de
+    lo que completa (no solo lo que agrega valor sobre) el sistema de autenticación ya P0 de esta
+    épica.
+  - **Flujo funcional en 2 pasos, sin deep-linking — alcance ya decidido por el Director General
+    IA para desbloquear a Backend/DBA/Mobile en paralelo, no es una decisión de producto abierta a
+    reabrir por quien tome esta historia:**
+    1. El usuario ingresa su email en una pantalla nueva de Mobile (solicitud de recuperación).
+    2. El usuario recibe un token por email y lo copia/pega junto con la nueva contraseña en una
+       segunda pantalla de la app — no un link que abra la app sola: hoy no hay deep-linking
+       configurado en el proyecto (ninguna otra historia de este backlog lo requiere tampoco).
+  - **Token de un solo uso, aleatorio y criptográficamente seguro:** generado por el backend, no
+    reutiliza el JWT normal de sesión (`signToken`/`JWT_SECRET`, `src/auth.ts`, hoy expira a las
+    2h) — es un mecanismo propio, de un solo uso, con propósito y ciclo de vida distintos al de la
+    sesión. Se guarda **hasheado** en base de datos, nunca en texto plano — mismo criterio que ya
+    aplica a `usuario.password_hash` (`database/migrations/001_init.sql`). Expira a los **30
+    minutos** de generado (valor propuesto por Product Manager, sujeto a ajuste — mismo criterio
+    ya usado para otros valores concretos de este backlog, ej. los 30 días de HU-19 o el precio de
+    HU-29; no bloquea el desarrollo). Una vez usado para restablecer la contraseña, o vencido ese
+    plazo, deja de ser válido — un segundo intento con el mismo token debe rechazarse.
+  - **Envío por email — sin proveedor integrado hoy; se construye con interfaz abstracta + Mock,
+    mismo patrón ya usado para Mercado Pago:** verificado por grep que el proyecto no tiene hoy
+    ningún proveedor de email integrado (sin `nodemailer`/`sendgrid`/`smtp`/`ses`). Se construye
+    siguiendo el mismo patrón que `05-codigo/backend/src/integraciones/pagos.ts`
+    (`PagoProvider`/`MockPagoProvider`): una interfaz propia (ej. `EmailProvider`, con un método
+    para enviar el email de recuperación) y una implementación Mock para desarrollo. El envío real
+    queda pendiente de que el CEO provea una cuenta de un proveedor de email (SendGrid/Resend/AWS
+    SES) — mismo criterio ya aplicado a `MP_ACCESS_TOKEN` (HU-30) y a `GOOGLE_CLIENT_ID` (HU-35):
+    no bloquea el desarrollo ni las pruebas, solo el envío real en producción (ver también la nota
+    en "Notas operativas de rollout", al inicio de este documento). Mientras el provider sea el
+    Mock, el token debe quedar visible para poder probar el flujo de punta a punta (ej. en un log
+    del servidor, o en la respuesta del endpoint bajo el mismo gateo de `ENABLE_DEV_ROUTES` que ya
+    usa `src/routes/dev.ts`) — nunca expuesto así en un entorno con `ENABLE_DEV_ROUTES`
+    desactivado.
+  - **Nunca revelar si el email existe (mitigación de enumeración de usuarios):** la respuesta del
+    endpoint que solicita la recuperación es **siempre el mismo mensaje de éxito**, exista o no
+    una cuenta con ese email en el sistema — no debe poder distinguirse por status code, mensaje
+    ni tiempo de respuesta cuál de los dos casos ocurrió. El mismo criterio aplica si el email
+    corresponde a una cuenta dada de alta únicamente por Google (ver "fuera de alcance" más
+    abajo): el mensaje de éxito no cambia, aunque no se genere ni se intente enviar ningún token.
+    **Pendiente de que Security lo valide** cuando revise esta historia (todavía no revisada) —
+    mismo criterio que otras historias de este backlog que se construyen con un criterio de
+    seguridad ya incorporado desde el diseño, pendientes de confirmación formal (ver HU-20, HU-22).
+  - La nueva contraseña cargada en el segundo paso cumple la misma política mínima ya vigente
+    (MEDIUM-1, `passwordSchema`/`PASSWORD_MIN_LENGTH = 8`, `src/dominio/validacion.ts`) — no una
+    regla nueva ni distinta a la que ya rige en `/registro-cliente`/`/registro-negocio`.
+  - **Recomendado, no bloqueante, para Backend/Security al construirla:** los dos endpoints nuevos
+    (solicitar recuperación, confirmar token + nueva contraseña) deberían llevar el mismo tipo de
+    rate limiting que ya exige HIGH-1 para `/auth/login`/`/auth/registro-*`
+    (`src/middleware/rateLimit.ts`) — sin esto, el propio endpoint de recuperación se vuelve una
+    superficie nueva de abuso (spam de emails, fuerza bruta del token de un solo uso), aunque no
+    filtre existencia de cuentas.
+  - **Pendiente para DBA:** modelar la entidad nueva que hoy no existe (token de recuperación:
+    referencia a `usuario`, hash del token, expiración, si ya fue usado/consumido) — mismo
+    criterio ya aplicado a otras entidades nuevas de este backlog (Tratamiento/Nota médica,
+    HU-21; Documento adjunto, HU-33): no se asume el esquema concreto en esta historia.
+  - **Fuera de alcance de esta historia (explícito, para que no se asuma):**
+    - Cuentas dadas de alta únicamente por Google (`usuario.password_hash IS NULL`, `google_id`
+      poblado — ver `ck_usuario_password_o_google`, HU-35) no tienen contraseña que restablecer.
+      No generan un token real, sin delatar esa diferencia en la respuesta (ver el criterio de no
+      revelar existencia de cuenta, arriba).
+    - No incluye cambiar la contraseña estando ya logueado (caso distinto, ya wireframeado como
+      "Cambiar contraseña" dentro de "Seguridad de la cuenta", `04-diseno/mapa-pantallas.md`
+      §5.13 — listado en la tabla de trazabilidad §7 como "Adición de UX/UI, pendiente de HU"
+      desde antes de esta historia; sigue sin HU propia, no se resuelve acá).
+    - No incluye invalidar otras sesiones (JWT) ya emitidas al restablecer la contraseña —
+      `src/auth.ts` no tiene hoy ningún mecanismo de revocación/versión de JWT; un JWT emitido
+      antes del reset sigue siendo válido hasta su propia expiración (2h). Queda registrado como
+      hallazgo a evaluar por Security, no como bloqueante de esta historia.
 
 ---
 

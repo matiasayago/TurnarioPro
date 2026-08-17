@@ -37,3 +37,30 @@ export const registroLimiter = rateLimit({
   legacyHeaders: false,
   message: { error: 'Demasiadas solicitudes de registro desde esta IP — probá de nuevo más tarde.' },
 });
+
+/**
+ * Límite para los 2 endpoints nuevos de recuperación de contraseña (HU-37, backlog.md, extiende
+ * E4): `POST /auth/recuperar-password` y `POST /auth/reset-password` — mismo patrón que
+ * `loginLimiter`/`registroLimiter` de arriba (recomendación de DBA, ver
+ * database/migrations/001_init.sql, bloque "Recuperación de contraseña"), pero ninguno de los
+ * dos limiters existentes encaja tal cual, así que este es uno nuevo, reusado (misma instancia)
+ * en ambos endpoints:
+ * - `loginLimiter` no serviría para `/recuperar-password`: cuenta solo intentos FALLIDOS
+ *   (`skipSuccessfulRequests`), pero ese endpoint SIEMPRE responde 200 con el mismo mensaje
+ *   genérico (criterio de no-enumeración de HU-37) — con `skipSuccessfulRequests` ningún
+ *   request contaría nunca, dejando el endpoint sin protección real contra spam de emails.
+ * - Por eso cuenta TODOS los intentos (como `registroLimiter`), incluidos los canjes exitosos
+ *   de `/reset-password` — un usuario legítimo normalmente solo necesita canjear un token una
+ *   vez, así que el costo de UX es mínimo frente a limitar de forma pareja la fuerza bruta del
+ *   token en el endpoint que DBA marcó como el más sensible de los dos ("en especial el de
+ *   canje").
+ */
+export const recuperacionPasswordLimiter = rateLimit({
+  windowMs: minutosAMs(Number(process.env.RATE_LIMIT_RECUPERACION_WINDOW_MIN ?? 15)),
+  limit: Number(process.env.RATE_LIMIT_RECUPERACION_MAX ?? 10),
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    error: 'Demasiadas solicitudes de recuperación de contraseña desde esta IP — probá de nuevo más tarde.',
+  },
+});
