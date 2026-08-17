@@ -166,8 +166,13 @@ export interface ResultadoChequeoLimite {
  *
  * Pensado para llamarse INMEDIATAMENTE ANTES de cualquier sentencia que deje un turno en estado
  * 'confirmado' — no en el momento en que se decide/planea crear el turno. Ver
- * `exigirLimiteTurnosConfirmadosDelMes` (más abajo) para los call sites reales de hoy y el que
- * falta.
+ * `exigirLimiteTurnosConfirmadosDelMes` (más abajo, la variante que LANZA) para los call sites de
+ * `POST /turnos` y `POST /profesionales/:id/turnos` (turnos.ts/profesionales.ts — el turno nace
+ * DIRECTO en 'confirmado', sin seña de por medio). Esta misma función (la que DEVUELVE un
+ * resultado, no la que lanza) es la que usa, en cambio, `POST /webhooks/mercadopago`
+ * (src/routes/webhooks.ts, 2026-08-17) al confirmar un pago con seña — ver el comentario ahí para
+ * el porqué de esa variante en ese call site puntual (en resumen: ahí el pago ya está cobrado por
+ * Mercado Pago antes de correr este chequeo, y no hay ningún ROLLBACK que pueda deshacer eso).
  */
 export async function verificarLimiteTurnosConfirmadosDelMes(
   client: PoolClient,

@@ -816,15 +816,19 @@ negociosRouter.get(
 // { plan, periodo, vencimiento, estado } | 400 datos inválidos | 403 rol distinto de
 // administrador, o negocio ajeno.
 //
-// ACTIVACIÓN SIMULADA (MOCK) — mismo criterio que `MockPagoProvider`
-// (src/integraciones/pagos.ts): la plataforma real de cobro (Google Play Billing, solo Android en
-// v1 — ver 08-despliegue/google-play-billing.md) todavía no está integrada — la cuenta de Google
-// Play Developer ya existe, pero la verificación real de compra (validar un `purchaseToken` contra
-// la Android Publisher API, ver ese documento §6-7) es un ciclo futuro. Este endpoint activa el
-// plan DIRECTO, sin ningún cobro ni verificación real — cualquier administrador autenticado de su
-// propio negocio puede "comprar" Turnario Pro gratis mientras esto siga siendo el único camino.
-// Aceptable para este ciclo (mismo trade-off ya aceptado para Mercado Pago vía `MockPagoProvider`
-// desde Fase 4) porque no hay dinero real involucrado todavía en ningún punto del sistema.
+// ACTIVACIÓN SIMULADA (MOCK) — mismo criterio que usaba `MockPagoProvider`
+// (src/integraciones/pagos.ts) hasta que Integraciones lo reemplazó por un cliente real de
+// Mercado Pago (2026-08-17, ver ese archivo): la plataforma real de cobro (Google Play Billing,
+// solo Android en v1 — ver 08-despliegue/google-play-billing.md) todavía no está integrada — la
+// cuenta de Google Play Developer ya existe, pero la verificación real de compra (validar un
+// `purchaseToken` contra la Android Publisher API, ver ese documento §6-7) es un ciclo futuro.
+// Este endpoint activa el plan DIRECTO, sin ningún cobro ni verificación real — cualquier
+// administrador autenticado de su propio negocio puede "comprar" Turnario Pro gratis mientras
+// esto siga siendo el único camino.
+// Aceptable para este ciclo (mismo trade-off que se aceptó para Mercado Pago entre Fase 4 y
+// 2026-08-17, mientras `pagoProvider` todavía era `MockPagoProvider`) porque no hay dinero real
+// involucrado en ningún punto de ESTE endpoint puntual (a diferencia de la seña de turnos, que
+// desde ese cierre ya cobra de verdad vía Mercado Pago).
 //
 // EL DÍA QUE EXISTA LA VERIFICACIÓN REAL: este endpoint se REEMPLAZA (no se extiende) por uno que
 // reciba y valide un `purchaseToken` real contra la Android Publisher API — DBA decidió
