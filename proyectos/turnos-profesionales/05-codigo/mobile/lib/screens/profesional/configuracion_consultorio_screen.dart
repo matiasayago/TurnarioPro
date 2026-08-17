@@ -9,11 +9,25 @@ import '../../theme/app_typography.dart';
 import '../../widgets/widgets.dart';
 
 /// Datos del Negocio / Configuración de Consultorio — HU-31. Contrato: `GET /negocios/:id`
-/// (público, sin auth) -> `{ id, nombre, rubro, ubicacion, es_rubro_salud }`; `PATCH /negocios/:id`
-/// (`requireAuth('administrador')`), body `{ nombre, rubro, ubicacion }` -> mismo shape. Son los
-/// ÚNICOS 3 campos editables hoy — `es_rubro_salud` queda deliberadamente fuera del PATCH del lado
-/// del backend (ver el comentario junto a ese endpoint en `negocios.ts`), se sigue mostrando de
-/// solo lectura en los dos modos de abajo.
+/// (público, sin auth) -> `{ id, nombre, rubro, ubicacion, es_rubro_salud, horario_atencion,
+/// direccion, telefono, logo_url }`; `PATCH /negocios/:id` (`requireAuth('administrador')`), body
+/// `{ nombre, rubro, ubicacion, horario_atencion, direccion, telefono, logo_url }` -> mismo shape.
+/// `nombre` es requerido; el resto viajan como `string | null` — SIEMPRE los 7 juntos (no es un
+/// patch parcial: no hay ningún `SET` condicional del lado del backend) y hay que mandar `null`
+/// explícito para vaciar un campo ya cargado, nunca omitirlo (ver `_vacioANull`, reusado tal cual
+/// para los 4 campos nuevos). Son los ÚNICOS 7 campos editables hoy — `es_rubro_salud` queda
+/// deliberadamente fuera del PATCH del lado del backend (ver el comentario junto a ese endpoint en
+/// `negocios.ts`), se sigue mostrando de solo lectura en los dos modos de abajo.
+///
+/// `direccion` (2026-08-17) es un campo NUEVO y DISTINTO de `ubicacion` (que no cambió):
+/// `ubicacion` es una referencia corta de zona/ciudad (la que ya arma el subtítulo de cada card en
+/// "Buscar Negocios", HU-00b); `direccion` es el domicilio completo (calle, altura, piso), pensado
+/// para quien ya eligió este negocio puntual — ver el razonamiento completo de DBA en
+/// `03-arquitectura/modelo-datos.md` §2undecies. `logo_url` es la URL de una imagen YA alojada en
+/// otro lado (este backend no tiene upload de archivo real) — el servidor valida que sea una URL
+/// con formato válido (400 si no), pero nunca que apunte efectivamente a una imagen; por eso la
+/// vista previa de abajo (`_logoPreview`) usa `Image.network` con `errorBuilder` de fallback en
+/// vez de asumir que siempre va a cargar.
 ///
 /// Misma pantalla para dos roles — mismo criterio que `FichaPacienteScreen` ("ver"/"editar" son el
 /// mismo `State`, no dos rutas separadas): acá el modo lo decide el ROL de la sesión activa, no un
@@ -39,9 +53,19 @@ class _ConfiguracionConsultorioScreenState extends State<ConfiguracionConsultori
   late Future<void> _futureCarga;
 
   final _nombreCtrl = TextEditingController();
-  final _rubroCtrl = TextEditingController();
   final _ubicacionCtrl = TextEditingController();
+  final _direccionCtrl = TextEditingController();
+  final _telefonoCtrl = TextEditingController();
+  final _horarioAtencionCtrl = TextEditingController();
+  final _logoUrlCtrl = TextEditingController();
   bool _esRubroSalud = false;
+
+  // A diferencia del resto de los campos de esta pantalla, "Rubro" ya no es un `TextField` de
+  // texto libre en `_vistaEditar` (ver [CampoRubro], `widgets/campo_rubro.dart`) — el valor final
+  // a mandar al backend lo entrega directo su `onChanged`, con el mismo criterio "vacío es null"
+  // que [_vacioANull] aplica al resto de los campos opcionales de acá. Se sigue usando también en
+  // `_vistaVer` (solo lectura), que no cambia.
+  String? _rubro;
 
   bool _guardando = false;
   String? _mensaje;
@@ -64,26 +88,55 @@ class _ConfiguracionConsultorioScreenState extends State<ConfiguracionConsultori
 
   void _aplicarDatos(Map<String, dynamic> data) {
     _nombreCtrl.text = data['nombre'] as String;
-    _rubroCtrl.text = (data['rubro'] as String?) ?? '';
+    _rubro = data['rubro'] as String?;
     _ubicacionCtrl.text = (data['ubicacion'] as String?) ?? '';
+    _direccionCtrl.text = (data['direccion'] as String?) ?? '';
+    _telefonoCtrl.text = (data['telefono'] as String?) ?? '';
+    _horarioAtencionCtrl.text = (data['horario_atencion'] as String?) ?? '';
+    _logoUrlCtrl.text = (data['logo_url'] as String?) ?? '';
     _esRubroSalud = data['es_rubro_salud'] == true;
   }
 
   @override
   void dispose() {
     _nombreCtrl.dispose();
-    _rubroCtrl.dispose();
     _ubicacionCtrl.dispose();
+    _direccionCtrl.dispose();
+    _telefonoCtrl.dispose();
+    _horarioAtencionCtrl.dispose();
+    _logoUrlCtrl.dispose();
     super.dispose();
   }
 
   String? _vacioANull(String texto) => texto.trim().isEmpty ? null : texto.trim();
+
+  /// Feedback client-side antes de "Guardar" — el backend YA valida formato de URL server-side
+  /// (`z.string().url()`, ver el comentario de `actualizarNegocioSchema` en `negocios.ts`) y
+  /// devuelve 400 si no es válida, pero repetir el chequeo acá evita el viaje de ida y vuelta
+  /// completo solo para enterarse de un typo. Campo opcional — vacío es válido (se manda `null`,
+  /// ver `_vacioANull`). No valida que la URL sea efectivamente una imagen (el backend tampoco lo
+  /// hace, ver doc comment de la clase) — solo la forma.
+  String? _errorLogoUrl() {
+    final valor = _logoUrlCtrl.text.trim();
+    if (valor.isEmpty) return null;
+    final uri = Uri.tryParse(valor);
+    final esUrlValida = uri != null && uri.isAbsolute && (uri.scheme == 'http' || uri.scheme == 'https');
+    return esUrlValida ? null : 'La URL del logo no es válida. Usá una dirección completa (ej. https://...).';
+  }
 
   Future<void> _guardar() async {
     final nombre = _nombreCtrl.text.trim();
     if (nombre.isEmpty) {
       setState(() {
         _mensaje = 'El nombre no puede estar vacío.';
+        _mensajeEsError = true;
+      });
+      return;
+    }
+    final errorLogoUrl = _errorLogoUrl();
+    if (errorLogoUrl != null) {
+      setState(() {
+        _mensaje = errorLogoUrl;
         _mensajeEsError = true;
       });
       return;
@@ -96,8 +149,12 @@ class _ConfiguracionConsultorioScreenState extends State<ConfiguracionConsultori
     try {
       final data = await sesion.api.patch('/negocios/${sesion.negocioId}', {
         'nombre': nombre,
-        'rubro': _vacioANull(_rubroCtrl.text),
+        'rubro': _rubro,
         'ubicacion': _vacioANull(_ubicacionCtrl.text),
+        'horario_atencion': _vacioANull(_horarioAtencionCtrl.text),
+        'direccion': _vacioANull(_direccionCtrl.text),
+        'telefono': _vacioANull(_telefonoCtrl.text),
+        'logo_url': _vacioANull(_logoUrlCtrl.text),
       });
       if (!mounted) return;
       setState(() {
@@ -156,6 +213,8 @@ class _ConfiguracionConsultorioScreenState extends State<ConfiguracionConsultori
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        Center(child: _logoPreview(context, _logoUrlCtrl.text)),
+        const SizedBox(height: AppSpacing.lg),
         _sectionCard(
           context,
           title: 'Datos del consultorio',
@@ -163,8 +222,16 @@ class _ConfiguracionConsultorioScreenState extends State<ConfiguracionConsultori
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               _infoRow(context, 'Nombre', _nombreCtrl.text),
-              _infoRow(context, 'Rubro', _rubroCtrl.text.isEmpty ? 'Sin especificar' : _rubroCtrl.text),
+              _infoRow(context, 'Rubro', (_rubro == null || _rubro!.isEmpty) ? 'Sin especificar' : _rubro!),
               _infoRow(context, 'Ubicación', _ubicacionCtrl.text.isEmpty ? 'Sin especificar' : _ubicacionCtrl.text),
+              _infoRow(context, 'Dirección', _direccionCtrl.text.isEmpty ? 'Sin especificar' : _direccionCtrl.text),
+              _infoRow(context, 'Teléfono', _telefonoCtrl.text.isEmpty ? 'Sin especificar' : _telefonoCtrl.text),
+              _infoRow(
+                context,
+                'Horario de atención',
+                _horarioAtencionCtrl.text.isEmpty ? 'Sin especificar' : _horarioAtencionCtrl.text,
+              ),
+              _infoRow(context, 'Logo (URL)', _logoUrlCtrl.text.isEmpty ? 'Sin especificar' : _logoUrlCtrl.text),
               _infoRow(context, 'Rubro de salud', _esRubroSalud ? 'Sí' : 'No', esUltimo: true),
             ],
           ),
@@ -202,15 +269,76 @@ class _ConfiguracionConsultorioScreenState extends State<ConfiguracionConsultori
       children: [
         _sectionCard(
           context,
+          title: 'Logo del negocio',
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // Vista previa reactiva: `AnimatedBuilder` escucha `_logoUrlCtrl` directo
+              // (`TextEditingController` ya es un `Listenable`/`ValueNotifier`, no hace falta
+              // envolverlo en un `ValueListenableBuilder` aparte) para actualizarse mientras el
+              // administrador tipea, sin esperar a "Guardar".
+              Center(
+                child: AnimatedBuilder(
+                  animation: _logoUrlCtrl,
+                  builder: (context, _) => _logoPreview(context, _logoUrlCtrl.text),
+                ),
+              ),
+              const SizedBox(height: AppSpacing.md),
+              TextField(
+                controller: _logoUrlCtrl,
+                keyboardType: TextInputType.url,
+                decoration: const InputDecoration(labelText: 'URL del logo', hintText: 'https://...'),
+              ),
+              const SizedBox(height: AppSpacing.xs),
+              Text(
+                'Pegá la URL de una imagen ya publicada en otro sitio (ej. Google Drive, Imgur) — '
+                'todavía no se puede subir un archivo directo desde la app.',
+                style: AppTypography.caption(context),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: AppSpacing.lg),
+        _sectionCard(
+          context,
           title: 'Datos del negocio',
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               TextField(controller: _nombreCtrl, decoration: const InputDecoration(labelText: 'Nombre *')),
               const SizedBox(height: AppSpacing.md),
-              TextField(controller: _rubroCtrl, decoration: const InputDecoration(labelText: 'Rubro')),
+              CampoRubro(valorInicial: _rubro, onChanged: (valor) => _rubro = valor),
               const SizedBox(height: AppSpacing.md),
               TextField(controller: _ubicacionCtrl, decoration: const InputDecoration(labelText: 'Ubicación')),
+              const SizedBox(height: AppSpacing.md),
+              TextField(controller: _direccionCtrl, decoration: const InputDecoration(labelText: 'Dirección')),
+              const SizedBox(height: AppSpacing.xs),
+              Text(
+                'La ubicación es una referencia corta (zona o ciudad) que ven los clientes al buscar '
+                'negocios; la dirección es el domicilio completo para quien ya eligió el tuyo.',
+                style: AppTypography.caption(context),
+              ),
+              const SizedBox(height: AppSpacing.md),
+              TextField(
+                controller: _telefonoCtrl,
+                keyboardType: TextInputType.phone,
+                decoration: const InputDecoration(labelText: 'Teléfono'),
+              ),
+              const SizedBox(height: AppSpacing.md),
+              // Texto libre potencialmente largo (ej. "Lunes a Viernes 9 a 18hs, Sábados 9 a
+              // 13hs") — multilínea en vez de un TextField de una sola línea, a diferencia del
+              // resto de los campos de esta card.
+              TextField(
+                controller: _horarioAtencionCtrl,
+                minLines: 2,
+                maxLines: 4,
+                textInputAction: TextInputAction.newline,
+                decoration: const InputDecoration(
+                  labelText: 'Horario de atención',
+                  hintText: 'Ej.: Lunes a Viernes 9 a 18hs, Sábados 9 a 13hs',
+                  alignLabelWithHint: true,
+                ),
+              ),
               const SizedBox(height: AppSpacing.md),
               _campoSoloLectura(context, 'Rubro de salud', _esRubroSalud ? 'Sí' : 'No'),
               const SizedBox(height: AppSpacing.xs),
@@ -227,6 +355,46 @@ class _ConfiguracionConsultorioScreenState extends State<ConfiguracionConsultori
         ],
         const SizedBox(height: AppSpacing.xxl),
       ],
+    );
+  }
+
+  /// Vista previa del logo — recuadro cuadrado con radio de card, misma "forma de contenedor" que
+  /// el resto de esta app (`_sectionCard`/`StatCard`, `radius.card` + `AppRadius.cardShadow` no
+  /// aplica acá para no competir visualmente con la imagen). Sin URL cargada todavía: ícono
+  /// placeholder neutral. Con URL: `Image.network` — el backend solo valida FORMATO de URL, no que
+  /// sea efectivamente una imagen (ver doc comment de la clase), así que `errorBuilder` es
+  /// necesario, no defensivo de más, para no romper el layout con la imagen "rota" nativa del
+  /// navegador/framework ante una URL que no carga o no es una imagen real.
+  Widget _logoPreview(BuildContext context, String url) {
+    final colors = AppColors.of(context);
+    final valor = url.trim();
+    return Container(
+      width: 72,
+      height: 72,
+      clipBehavior: Clip.antiAlias,
+      decoration: BoxDecoration(
+        color: colors.neutral.background,
+        borderRadius: BorderRadius.circular(AppRadius.card),
+        border: Border.all(color: colors.border),
+      ),
+      child: valor.isEmpty
+          ? Icon(Icons.storefront_outlined, color: colors.neutral.base, size: 32)
+          : Image.network(
+              valor,
+              fit: BoxFit.cover,
+              errorBuilder: (context, error, stackTrace) =>
+                  Icon(Icons.broken_image_outlined, color: colors.neutral.base, size: 32),
+              loadingBuilder: (context, child, progress) {
+                if (progress == null) return child;
+                return Center(
+                  child: SizedBox(
+                    width: 22,
+                    height: 22,
+                    child: CircularProgressIndicator(strokeWidth: 2, color: colors.neutral.base),
+                  ),
+                );
+              },
+            ),
     );
   }
 
