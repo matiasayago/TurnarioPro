@@ -68,6 +68,9 @@ prueba de concurrencia desde la UI, sin instalar Flutter.
   sección dedicada más abajo): `GET/PATCH /usuario/perfil`, `GET/PATCH /usuario/privacidad`,
   `GET/PATCH /negocios/:id`, `GET /profesionales/:id/servicios`,
   `PATCH /profesionales/:id/servicios/:servicioId`, `GET /profesionales/:id/reportes`.
+- **E15 fast-follow — pausar/reactivar profesional y eliminar servicio** (ver sección dedicada más
+  abajo): `PATCH /negocios/:id/profesionales/:profesionalId`,
+  `DELETE /negocios/:id/servicios/:servicioId`.
 
 ## Row Level Security (Postgres)
 
@@ -500,10 +503,12 @@ cero (ver el detalle de cada uno).
 - **Configuración de Consultorio** — `PATCH /negocios/:id` (nuevo) + `GET /negocios/:id` (nuevo,
   público — no existía un detalle de negocio puntual, solo el listado `GET /negocios`; se agregó
   para que Mobile pueda prefillear el formulario sin traer la lista completa). Edita
-  `nombre`/`rubro`/`ubicacion` (ya existentes en `negocio`). Solo `administrador`, y solo sobre su
-  propio negocio (`req.auth.negocio_id`, mismo patrón RN9 que el resto de `negocios.ts`).
-  `es_rubro_salud` queda explícitamente fuera de este PATCH (no estaba en el alcance del ciclo, y
-  cambiarlo tiene implicancias de producto que exceden un campo más de un formulario descriptivo).
+  `nombre`/`rubro`/`ubicacion` (ya existentes en `negocio`) y, desde 2026-08-17 (HU-31, ver sección
+  dedicada más abajo), también `horario_atencion`/`direccion`/`telefono`/`logo_url`. Solo
+  `administrador`, y solo sobre su propio negocio (`req.auth.negocio_id`, mismo patrón RN9 que el
+  resto de `negocios.ts`). `es_rubro_salud` queda explícitamente fuera de este PATCH (no estaba en
+  el alcance del ciclo, y cambiarlo tiene implicancias de producto que exceden un campo más de un
+  formulario descriptivo).
 - **Configuración de Pagos (Precios y Señas)** — `GET /profesionales/:id/servicios` (nuevo — no
   existía un listado de "mis servicios asociados con su seña actual") +
   `PATCH /profesionales/:id/servicios/:servicioId` (nuevo). El alta de la primera asociación
@@ -541,3 +546,147 @@ antes de dar por buena la integración end-to-end.
 **Actualización (Director General IA, 2026-08-12):** verificado end-to-end contra Render — las 5
 pantallas recorridas en el navegador con la app Flutter real (cuenta demo), reflejando
 exactamente los datos cargados antes por API en cada una (perfil, privacidad, seña, reportes).
+
+## E15 fast-follow — pausar/reactivar un profesional y eliminar (soft-delete) un servicio
+
+Completa el gap que dejaba documentado explícitamente el backlog (`../02-backlog/backlog.md`, E15
+"Fuera de alcance de v1-Administrador": *"Baja/pausa de un profesional del negocio, o remoción de
+un servicio. Ninguno de los dos tiene endpoint (negocios.ts solo tiene alta para ambos
+recursos)"*). **Sin migración nueva** — el modelo de datos ya soportaba ambas operaciones desde
+Fase 3 (`negocio_profesional.activo` / `servicio.eliminado_en`, ver
+`../database/migrations/001_init.sql`), solo faltaban los endpoints.
+
+- **`PATCH /negocios/:id/profesionales/:profesionalId`**, body `{ activo: boolean }` -> 200
+  `{ id, activo }` | 400 | 402 (solo reactivando, ver HU-29 abajo) | 403 | 404 (sin membresía en
+  este negocio). Actualiza ÚNICAMENTE la membresía (`negocio_profesional.activo`), nunca la
+  identidad (`profesional`/`usuario`, que puede seguir activa en otros negocios — N:M).
+  Investigado contra el código real (no asumido) qué implica pausar para el resto del sistema —
+  detalle completo en el comentario del propio handler, `src/routes/negocios.ts`:
+  - **Ya bloqueado de punta a punta, sin tocar nada más**: HU-08
+    (`GET /:id/servicios/:servicioId/profesionales`) ya filtraba `activo = true`; `POST /turnos` y
+    `POST /profesionales/:id/turnos` ya exigían membresía activa antes de aceptar un turno nuevo
+    (doble barrera oferta+reserva preexistente).
+  - **El roster del administrador (`GET /:id/profesionales`) ya estaba pensado para esto**: sigue
+    listando al profesional pausado, marcado `activo:false` — nunca desaparece de la lista.
+  - **Login**: la cuenta/password no se tocan — el profesional pausado sigue pudiendo loguearse,
+    pero deja de ver este negocio entre los suyos (o pierde `negocio_id` directo del token si era
+    su único negocio) y no puede volver a seleccionarlo como vista activa
+    (`POST /auth/entrar-a-negocio` ya revalida `activo=true` contra la tabla real).
+  - **HU-29 (Turnario Pro)**: reactivar (`activo:true`) pasa por el MISMO chequeo del límite "1
+    profesional activo" del plan gratis que ya exigía `POST /negocios/:id/profesionales` en su
+    propia rama de reactivación — sin este chequeo, el PATCH nuevo habría sido una segunda vía
+    para saltearse ese límite. Se evalúa solo en la transición real inactivo→activo (no bloquea
+    reconfirmar `activo:true` sobre una membresía que ya lo estaba).
+  - **Turnos ya existentes (pasados o futuros) con este profesional**: sin cambios — el endpoint
+    nunca toca `turno`. Cancelarlos en cadena queda fuera de este alcance a propósito (decisión de
+    producto de notificar/reembolsar que no corresponde asumir acá).
+  - **2 hallazgos documentados en el propio código, confirmados EN VIVO por el script de
+    verificación, y NO corregidos en este ciclo** (ninguno habilita reservar, que era el riesgo
+    real a evitar): `GET /profesionales/:id/slots` no filtra por `negocio_profesional.activo`
+    (sigue devolviendo horarios "disponibles" para un profesional pausado); un JWT ya emitido
+    antes de pausar sigue siendo válido hasta que expira (2h) para lo que ya autorizaba (esta API
+    no tiene revocación de sesión).
+- **`DELETE /negocios/:id/servicios/:servicioId`** -> 200 `{ id, eliminado: true }` | 400 | 403 |
+  404 (no existe, ya eliminado, o de otro negocio). Soft-delete
+  (`servicio.eliminado_en = now()`), nunca `DELETE` físico — la FK `turno.servicio_id` es `NOT
+  NULL`, no se puede romper el historial.
+  - Revisada, una por una, cada query de `servicio` de todo `src/` (pedido explícito de la
+    consigna) — detalle completo en el comentario del handler, `src/routes/negocios.ts`:
+    - Ya filtraban `eliminado_en IS NULL` (sin cambios): el catálogo público
+      (`GET /negocios/:id/servicios`) y "mis servicios" del profesional
+      (`GET /profesionales/:id/servicios`).
+    - **Bug real encontrado y corregido en este mismo cambio** (no solo documentado): `POST
+      /turnos` (turnos.ts) y `POST /profesionales/:id/turnos` (profesionales.ts) NO filtraban
+      `eliminado_en` en su lookup de `servicio` — un servicio dado de baja seguía siendo
+      RESERVABLE si se conocía su id. Se agregó `AND eliminado_en IS NULL` a ambos `SELECT` (cae
+      al mismo 404 "no encontrado" que ya existía para "no existe" — ningún contrato nuevo).
+    - 3 lecturas que NO filtran y quedan sin tocar, documentadas como hallazgo (ninguna permite
+      reservar por sí sola, así que no eran el riesgo real): `GET /:id/servicios/:servicioId/
+      profesionales` (HU-08), `POST /profesionales/:id/servicios` (auto-asociación del
+      profesional) y `GET /profesionales/:id/slots` (mismo motivo que el hallazgo análogo de
+      arriba — comparten `calcularSlotsDisponibles`, que tampoco filtra). `PATCH /turnos/:id/
+      reprogramar` A PROPÓSITO tampoco filtra: un turno vigente para un servicio ya discontinuado
+      se tiene que poder seguir reprogramando/cancelando.
+    - Reportes (`GET /negocios/:id/reportes`, `GET /profesionales/:id/reportes`) e historial
+      (`GET /clientes/:id/historial`) A PROPÓSITO nunca filtran por `eliminado_en` — tienen que
+      seguir mostrando turnos históricos de servicios ya eliminados (facturación pasada real).
+
+Contrato completo de ambos endpoints documentado en los comentarios de `src/routes/negocios.ts`,
+junto a cada handler.
+
+**Verificado end-to-end contra Render real** con un script nuevo,
+`scripts/test-baja-profesional-y-eliminacion-servicio.mjs`: pausar/reactivar (incluido el límite
+de plan gratis aplicado a la reactivación, HU-29), eliminar un servicio (con un turno reservado
+ANTES de eliminarlo confirmado como legible después — "mis turnos" del cliente, historial del
+profesional y reportes de ambos lados, todos sin romperse), los 4 casos negativos de autorización
+(401 sin token / 403 rol equivocado / 403 negocio ajeno / 404 cross-negocio y 404 inexistente)
+para cada endpoint, y los 2 hallazgos documentados arriba confirmados EN VIVO (no solo leídos en
+el código: se pidieron slots reales para un profesional pausado y para un servicio eliminado, y
+ambos efectivamente los devolvieron). Se re-corrió además, contra el mismo servidor, una batería
+de 8 scripts preexistentes sin relación directa con este cambio (`test-validaciones-campos`,
+`test-multinegocio`, `test-autorizacion-cruzada`, `test-critical1-aislamiento-admin`,
+`test-rn1-disponibilidad-y-solapamiento`, `test-rn4-servicio-no-asociado`,
+`test-duracion-configurable`, `test-turno-sin-sena`) para confirmar que el fix de `eliminado_en`
+en `POST /turnos`/`POST /profesionales/:id/turnos` no rompió ningún camino existente de reserva —
+los 8 en verde. `smoke-test.mjs` falló, por un motivo confirmado NO relacionado con este cambio:
+usa el email fijo `admin@garcia.test`, ya registrado en esta base de Render desde una ronda
+anterior (2026-08-10, confirmado consultando la fila directo) — ese script está pensado para una
+base efímera/recién migrada, no para esta base compartida persistente que reusan las rondas de
+verificación de este proyecto.
+
+## HU-31 — Datos operativos del negocio (horario, dirección, teléfono, logo)
+
+Cierra la mitad de Backend del gap que dejó documentado explícitamente DBA
+(`../03-arquitectura/modelo-datos.md` §2undecies, 2026-08-17): HU-31 pide "horario general de
+atención, dirección detallada, teléfono/contacto, logo o imagen" además de nombre/rubro/ubicación,
+pero la ronda "Modo Administrador v1" (E15) había conectado `PATCH /negocios/:id` únicamente a los
+3 campos que ya tenían columna. DBA agregó 4 columnas nuevas `TEXT` nullable en `negocio`
+(`horario_atencion`, `direccion`, `telefono`, `logo_url` — ver esa misma sección para el porqué de
+cada una, en particular por qué `direccion` es una columna nueva y no una ampliación de
+`ubicacion`); este cambio extiende el endpoint para aceptarlas y persistirlas.
+
+- **`actualizarNegocioSchema`** (`src/routes/negocios.ts`) suma los 4 campos, mismo patrón EXACTO
+  que `rubro`/`ubicacion`: `z.string().nullable()`, nunca `.optional()` — hay que poder mandar
+  `null` explícito para vaciar un campo ya cargado, no alcanza con omitirlo del body (el body sigue
+  siendo el formulario COMPLETO, no un patch parcial). `logo_url` suma `.url(...)` — recomendación
+  explícita de DBA, `negocio` no tiene ningún `CHECK` de formato de URL a nivel de base.
+- **`PATCH /negocios/:id`** — contrato actualizado: body `{ nombre, rubro, ubicacion,
+  horario_atencion, direccion, telefono, logo_url }` (los 3 últimos y `rubro`/`ubicacion` aceptan
+  `null`) -> 200 con las 9 columnas de `negocio` (incluye `id`/`es_rubro_salud`) | 400 datos
+  inválidos (incluye `logo_url` con formato de URL inválido, o cualquiera de los 7 campos ausente
+  del body) | 403 rol distinto de administrador o negocio ajeno | 404 negocio inexistente/
+  eliminado. El `UPDATE`/`RETURNING` sigue siendo un `SET` fijo (no dinámico) — mismo estilo que ya
+  tenía el endpoint, solo con 4 columnas más en la misma lista de placeholders.
+- **`GET /negocios/:id`** suma las 4 columnas nuevas al `SELECT` — es el endpoint de "perfil
+  completo de un negocio ya elegido" que pide la propia HU-31. **`GET /negocios` (listado) NO las
+  suma, a propósito** — decisión de diseño de Backend (DBA la dejó explícitamente abierta): estos
+  4 campos son datos de perfil completo, no de descubrimiento; `buscar_negocios_screen.dart`
+  (Mobile, HU-00b) arma el subtítulo de cada card con `rubro`/`ubicacion` únicamente. Razonamiento
+  completo en el comentario junto a `GET /` en `negocios.ts`.
+- **Confirmado contra el código real (no asumido)** que no hace falta tocar `POST
+  /auth/registro-negocio` (`src/routes/auth.ts`) ni `POST /dev/seed` (`src/routes/dev.ts`): ambos
+  siguen insertando `negocio` con únicamente `(id, nombre, rubro, ubicacion, creado_en)` — HU-31
+  define estos 4 campos como datos que se completan "más allá del alta inicial", no en el registro.
+
+**Verificado de punta a punta contra un Postgres local propio, NUNCA contra Render** (la migración
+incremental `009_negocio_datos_operativos.sql` de DBA todavía no está aplicada ahí — ver
+`../database/migrations/001_init.sql` y ese archivo — y esta ronda tenía instrucción explícita de
+no tocar ningún ambiente compartido). Se levantó un cluster de Postgres 18 efímero, aislado, en un
+directorio temporal fuera del repo (nunca el servicio nativo de Postgres del sistema ni el volumen
+de `docker-compose.yml`, ninguno de los dos disponibles/tocados en esta ronda) y se arrancó el
+backend contra él en un puerto propio; al ser una base migrada desde cero, `runMigrations()`
+aplicó `migrations/001_init.sql` completo — que ya incluye las 4 columnas nuevas — sin necesitar
+correr `009_negocio_datos_operativos.sql` por separado (ese delta incremental solo hace falta
+contra una base YA migrada antes de este ciclo, como Render). Script dedicado,
+`scripts/test-datos-operativos-negocio.mjs`: carga de los 4 campos nuevos, vaciado con `null`
+explícito (releído con un `GET /:id` aparte, no solo confiando en la respuesta del propio PATCH),
+`logo_url` con formato inválido -> 400 (y confirmado que NO modifica el valor ya cargado), omitir
+un campo nuevo del body -> 400 (confirma que no son `.optional()`), un admin de otro negocio no
+puede tocar estos campos -> 403 (chequeo de ownership ya existente, sin cambios), y `GET /negocios`
+(listado) confirmado que NO trae las 4 columnas nuevas — **todas verificadas, 100% en verde**. Se
+re-corrieron además, contra ese mismo Postgres local (créditos de red-teaming propio: 5 scripts
+preexistentes que ejercitan `negocios.ts` con volumen — `smoke-test`, `test-multinegocio`,
+`test-validaciones-campos`, `test-critical1-aislamiento-admin`, `test-autorizacion-cruzada` —
+retargeteados **temporalmente** a ese puerto local y revertidos con `git checkout` apenas
+terminaron, sin dejar ningún cambio permanente) para confirmar que este cambio no rompió ningún
+flujo existente — los 5 en verde. `npx tsc --noEmit` limpio.

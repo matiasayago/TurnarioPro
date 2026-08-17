@@ -1692,3 +1692,468 @@ Dos hallazgos propios en el cierre de esta historia, ninguno de los dos "solo re
   punta contra Render real, mergeada y desplegada — pendiente solo el proveedor de email real
   (bloqueante de que el flujo sirva de verdad a un usuario final, no de que el código funcione) y
   la revisión de Security ya señalada como pendiente explícito.
+
+## Datos operativos del negocio — horario, dirección, teléfono, logo (HU-31) — DBA (2026-08-17)
+
+Cierra la mitad de DBA del gap que la ronda "Modo Administrador v1" (E15, 2026-08-15) había dejado
+documentado explícitamente: HU-31 (`02-backlog/backlog.md`, épica E13) pide "horario general de
+atención, dirección detallada, teléfono/contacto, logo o imagen" además de nombre/rubro/ubicación,
+pero esa ronda conectó `PATCH /negocios/:id` a una pantalla real acotada a los 3 campos que ya
+tenían columna, dejando el resto anotado como "requiere DBA + Backend antes de poder construirse".
+Verificado el esquema actual de `negocio` antes de modelar (no asumido): confirmado que hoy solo
+tiene `id, nombre, rubro, es_rubro_salud, ubicacion, creado_en, creado_por, modificado_en,
+modificado_por, eliminado_en`. Detalle completo, columna por columna, en
+`03-arquitectura/modelo-datos.md` §2undecies. Resumen para reutilizar:
+
+- **4 columnas nuevas en `negocio`, todas `TEXT` nullable, sin `DEFAULT`:** `horario_atencion`,
+  `direccion`, `telefono`, `logo_url`. Sin backfill posible ni con sentido (a diferencia de
+  `suscripcion_negocio` en HU-29, que sí backfillea un plan por defecto) — son datos que solo cada
+  administrador conoce de su propio negocio; un negocio existente queda sin ninguna cargada hasta
+  que las complete desde Configuración de Consultorio.
+- **`horario_atencion`** — texto libre, deliberadamente NO estructurado por día. Puramente
+  informativo para el perfil del negocio; NO participa en el cálculo de disponibilidad real, que
+  sigue resuelto enteramente por `disponibilidad`/`excepcion_disponibilidad` (por profesional, ya
+  mucho más granular) — modelarlo estructurado hubiera duplicado esa lógica y arriesgado que ambas
+  fuentes queden inconsistentes entre sí.
+- **`direccion` — columna NUEVA, distinta de `ubicacion` (que no se toca).** Decisión tomada tras
+  investigar el uso real de `ubicacion` en el código (no asumida): hoy es pública en
+  `GET /negocios`/`GET /negocios/:id` y Mobile la muestra como referencia CORTA de zona/ciudad,
+  concatenada con `rubro` en el subtítulo de cada card del listado de "Buscar Negocios" (HU-00b,
+  `buscar_negocios_screen.dart`). HU-31 pide algo con propósito distinto y posterior en el embudo
+  — la dirección postal completa (calle, altura, piso) para alguien que ya decidió ir a ESE
+  negocio puntual —, algo que no tiene sentido amontonado en una lista de descubrimiento y que,
+  además, redefiniría en silencio el significado de datos ya cargados por negocios existentes si
+  se reusara `ubicacion` para ambos propósitos. `ubicacion` sigue exactamente igual; `direccion` es
+  un campo nuevo que coexiste con ella.
+- **`telefono`** — texto simple sin `CHECK` de formato, mismo criterio ya aplicado a
+  `usuario.telefono`/`paciente.contacto_emergencia_telefono` (ninguna columna de teléfono de este
+  esquema valida formato a nivel de base de datos).
+- **`logo_url`** — URL de una imagen YA alojada en otro lado, NO un upload de archivo real: este
+  esquema no tiene (ni este ciclo agrega) ningún servicio de almacenamiento de objetos, y un
+  agente de IA no puede aprovisionar por su cuenta credenciales nuevas para uno — mismo criterio ya
+  aplicado en esta Factory para no depender de infraestructura de storage nueva. Sin `CHECK` de
+  formato de URL a nivel de base de datos (mismo criterio que `usuario.email`, tampoco validado en
+  el DDL) — recomendado a Backend `z.string().url()` en `actualizarNegocioSchema` y a Mobile la
+  misma validación client-side antes de "Guardar"; no se recomienda validar que la URL sea
+  efectivamente una imagen (solo se confirma cargándola — `Image.network` con `errorBuilder` de
+  fallback del lado de Mobile).
+- **Sin cambios de Row Level Security ni índices nuevos.** `negocio` sigue sin tener RLS habilitada
+  en ningún punto del esquema (confirmado contra el código real, incluido el propio comentario de
+  `PATCH /negocios/:id` en `negocios.ts`). Ninguna consulta filtra por las 4 columnas nuevas — son
+  campos de despliegue, cubiertos por el índice implícito de la PK.
+- **Migraciones:** `05-codigo/database/migrations/001_init.sql` y
+  `05-codigo/backend/migrations/001_init.sql` actualizados con las 4 columnas dentro del
+  `CREATE TABLE negocio` existente y verificados byte-idénticos (`diff` sin salida). Delta
+  incremental nuevo `05-codigo/database/migrations/009_negocio_datos_operativos.sql` (puramente
+  aditivo, `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` × 4, sin backfill, reversible — bloque
+  ROLLBACK comentado al final). Mismo patrón que `008`: este archivo 009 NO se duplica en
+  `05-codigo/backend/migrations/` — confirmado contra `backend/src/db.ts` que `runMigrations()`
+  lee únicamente el nombre de archivo hardcodeado `"001_init.sql"` (nunca hace glob del
+  directorio), y que ninguno de los 7 incrementales anteriores (002–008) tiene copia ahí tampoco.
+- **No implementado en este ciclo, fuera de alcance de DBA:** `PATCH /negocios/:id` sigue
+  aceptando únicamente `nombre`/`rubro`/`ubicacion` — recomendación completa de archivo y línea
+  aproximada para extenderlo (`actualizarNegocioSchema`, el `UPDATE`/`RETURNING`, y los 2 `SELECT`
+  públicos, todos en `src/routes/negocios.ts`) en `modelo-datos.md` §2undecies. Tampoco se tocó
+  Mobile (`configuracion_consultorio_screen.dart` sigue con los 3 `TextEditingController` de
+  siempre). No aplicado contra Render — pendiente de revisión del Director General IA y aprobación
+  del CEO, mismo flujo que las migraciones anteriores.
+
+## E15 fast-follow — pausar/reactivar un profesional y eliminar un servicio (HU-02/HU-03) — Backend (2026-08-17)
+
+Cierra la OTRA mitad del mismo gap de E15 que dejó documentado el backlog (`02-backlog/backlog.md`,
+"Fuera de alcance de v1-Administrador": *"Baja/pausa de un profesional del negocio, o remoción de
+un servicio. Ninguno de los dos tiene endpoint (negocios.ts solo tiene alta para ambos
+recursos)"*) — complementa, sin relación de dependencia, la entrada de DBA de arriba (esa es sobre
+datos operativos de `negocio`; esta es sobre `negocio_profesional`/`servicio`, ya modelados desde
+Fase 3). Detalle completo del contrato y del razonamiento en los comentarios de
+`05-codigo/backend/src/routes/negocios.ts` (junto a cada handler) y en
+`05-codigo/backend/README.md` (sección "E15 fast-follow..."). Resumen para reutilizar:
+
+- **Sin migración nueva, confirmado antes de escribir código (no asumido):** `negocio_profesional`
+  ya tenía `activo BOOLEAN NOT NULL DEFAULT true` y `servicio` ya tenía `eliminado_en
+  TIMESTAMPTZ`, ambas desde Fase 3 — el gap era 100% de endpoint, no de modelo. Las 2 RLS policies
+  de `UPDATE` que hacían falta también ya existían (`negocio_profesional_update_admin_del_negocio`
+  / `servicio_update_admin_del_negocio`, `database/migrations/001_init.sql`) — DBA ya las había
+  dejado listas "para activar/desactivar (ej. licencia o baja)" sin que nada las usara todavía.
+- **`PATCH /negocios/:id/profesionales/:profesionalId`**, body `{ activo: boolean }`. Antes de
+  escribir el endpoint se investigó contra el código real (pedido explícito de la consigna) qué
+  implica pausar un profesional para el resto del sistema, en vez de asumir:
+  - La reserva de turnos nuevos YA estaba bloqueada de punta a punta sin tocar nada más (HU-08 ya
+    filtraba `activo=true`; `POST /turnos` y `POST /profesionales/:id/turnos` ya exigían membresía
+    activa).
+  - El roster del administrador (`GET /:id/profesionales`) ya estaba diseñado para este caso
+    exacto — sigue mostrando al profesional pausado, marcado `activo:false`, en vez de
+    desaparecer (confirmado leyendo su propio comentario, escrito en una ronda anterior).
+  - Login/"vista activa" ya revalidaban `activo=true` contra la tabla real (no contra el JWT) en 2
+    puntos (`emitirLoginParaUsuario`, `POST /auth/entrar-a-negocio`) — un profesional pausado sigue
+    pudiendo loguearse (su cuenta no se toca) pero pierde el acceso a operar bajo ESE negocio.
+  - **Hallazgo propio, evaluado y corregido dentro del mismo endpoint (no solo documentado):**
+    reactivar (`activo:true`) una membresía pausada por esta vía NO pasaba por el chequeo del
+    límite "1 profesional activo" del plan gratis (HU-29) que sí exige `POST
+    /negocios/:id/profesionales` en su propia rama de reactivación — sin corregirlo, el PATCH
+    nuevo habría sido una segunda vía para saltear ese límite. Se agregó el mismo chequeo
+    (`verificarLimiteProfesionalesActivos`), aplicado solo en la transición real inactivo→activo.
+  - **Hallazgo NO corregido, documentado en el código:** `GET /profesionales/:id/slots` no filtra
+    por `negocio_profesional.activo` (no habilita reservar por sí solo, así que no era el riesgo
+    real) — señalado para una ronda futura de Backend, no se tocó `calcularSlotsDisponibles` sin
+    confirmar alcance primero.
+- **`DELETE /negocios/:id/servicios/:servicioId`** — soft-delete (`eliminado_en = now()`), nunca
+  `DELETE` físico. Se revisó, query por query, cada lectura de `servicio` en `src/` (pedido
+  explícito de la consigna):
+  - **Bug real encontrado y corregido en el mismo cambio** (no solo un hallazgo documentado):
+    `POST /turnos` (turnos.ts) y `POST /profesionales/:id/turnos` (profesionales.ts) NO filtraban
+    `servicio.eliminado_en` — un servicio dado de baja por el administrador seguía siendo
+    RESERVABLE si se conocía su id, exactamente el riesgo que anticipó la consigna. Corregido
+    agregando `AND eliminado_en IS NULL` a los 2 `SELECT` (mismo 404 que ya existía para "no
+    existe" — no es un contrato nuevo).
+  - 3 lecturas que NO filtran y se dejaron sin tocar, documentadas como hallazgo porque ninguna
+    habilita reservar por sí sola: `GET /:id/servicios/:servicioId/profesionales` (HU-08),
+    `POST /profesionales/:id/servicios` (auto-asociación del profesional) y
+    `GET /profesionales/:id/slots` (mismo `calcularSlotsDisponibles` del hallazgo de arriba, ahora
+    confirmado que tampoco filtra `eliminado_en`, no solo `activo`). `PATCH /turnos/:id/
+    reprogramar` a propósito tampoco filtra — un turno vigente para un servicio ya discontinuado
+    tiene que poder seguir reprogramándose/cancelándose.
+  - Reportes e historial (`GET /negocios/:id/reportes`, `GET /profesionales/:id/reportes`,
+    `GET /clientes/:id/historial`) confirmados SIN cambios, a propósito — turnos ya existentes de
+    un servicio eliminado se tienen que poder seguir leyendo (facturación pasada real).
+- **Verificado de punta a punta contra Render real** (mismo `DATABASE_URL` de `.env` de rondas
+  anteriores; esta vez la conexión SÍ fue alcanzable desde este entorno con `DATABASE_SSL=true`,
+  sin el `ECONNRESET` que bloqueó una ronda anterior) con un script nuevo,
+  `scripts/test-baja-profesional-y-eliminacion-servicio.mjs`: los 2 endpoints, sus 4 tipos de caso
+  negativo (401/403 rol/403 negocio ajeno/404 cross-negocio/404 inexistente/400 body inválido), el
+  límite de HU-29 aplicado a la reactivación, y los 2 hallazgos de arriba confirmados EN VIVO (se
+  pidieron slots reales para un profesional pausado y para un servicio eliminado, y ambos
+  efectivamente los devolvieron) — **40/40 verificaciones (`ok()`) en verde**, más las 15
+precondiciones de setup (`assert()`) también satisfechas. Se re-corrió además, contra
+  el mismo servidor, una batería de 8 scripts preexistentes sin relación directa con este cambio
+  (`test-validaciones-campos`, `test-multinegocio`, `test-autorizacion-cruzada`,
+  `test-critical1-aislamiento-admin`, `test-rn1-disponibilidad-y-solapamiento`,
+  `test-rn4-servicio-no-asociado`, `test-duracion-configurable`, `test-turno-sin-sena`) para
+  confirmar que el fix de `eliminado_en` en las 2 rutas de alta de turno no rompió ningún camino de
+  reserva ya existente — los 8 en verde. `smoke-test.mjs` falló, investigado y confirmado NO
+  relacionado con este cambio: usa el email fijo `admin@garcia.test`, ya registrado en esta base de
+  Render desde una ronda anterior (2026-08-10 — confirmado consultando la fila directo con una
+  query aislada antes de descartarlo como causa) — ese script asume una base efímera/recién
+  migrada, no la base compartida persistente que reusan las rondas de verificación de este
+  proyecto; no se tocó (no es un defecto de este cambio).
+- **Hallazgo de proceso propio, no de código:** este servidor de prueba se levantó con
+  `node --env-file=.env dist/src/index.js` (Node 26, `--env-file` nativo) en vez de `dotenv`
+  (no es dependencia de este backend) — `--env-file` no pisa variables ya seteadas en el proceso
+  que lo invoca, así que `DATABASE_SSL=true`/`ENABLE_DEV_ROUTES=true`/límites de rate limiting
+  elevados se pasaron como variables de entorno del propio comando, combinadas sin conflicto con
+  `DATABASE_URL`/`JWT_SECRET` que sí vienen de `.env`. Reutilizable para la próxima ronda que
+  necesite un servidor local contra Render sin querer editar `.env`.
+- Se confirmó además (verificado, no asumido) que un cambio concurrente de DBA en este mismo commit
+  de trabajo (ver la entrada inmediatamente anterior, columnas nuevas de `negocio`) no afecta nada
+  de lo implementado acá: las 2 tablas involucradas (`servicio`/`negocio_profesional`) y sus 2
+  policies de `UPDATE` quedaron byte-idénticas antes y después de ese cambio (solo se desplazaron
+  de línea) en ambas copias de `001_init.sql`, que siguen siendo idénticas entre sí.
+- No se tocó Mobile (fuera del alcance de este ciclo — el CEO no pidió pantallas nuevas, solo
+  cerrar el gap de Backend) ni ningún entregable ya aprobado de otro rol.
+
+## HU-31 — extender PATCH /negocios/:id con datos operativos del negocio — Backend (2026-08-17)
+
+Cierra la mitad de Backend del gap que dejó documentado DBA en la entrada inmediatamente anterior
+de este mismo archivo (columnas nuevas de `negocio`) y en `03-arquitectura/modelo-datos.md`
+§2undecies, que ya dejaba una recomendación de archivo/línea para este mismo PATCH. Detalle
+completo del contrato en los comentarios de `src/routes/negocios.ts` (junto a cada handler) y en
+`05-codigo/backend/README.md` (sección "HU-31 — Datos operativos del negocio"). Resumen para
+reutilizar:
+
+- **`src/routes/negocios.ts`** — 3 puntos tocados, todos siguiendo el patrón EXACTO que ya tenían
+  `nombre`/`rubro`/`ubicacion` (el endpoint no arma el `UPDATE` de forma dinámica, así que sumar
+  columnas fue directo, sin necesidad de rediseñar nada):
+  1. `actualizarNegocioSchema` suma `horario_atencion`/`direccion`/`telefono` como
+     `z.string().nullable()` (NO `.optional()` — hace falta poder mandar `null` explícito para
+     vaciar un campo ya cargado) y `logo_url` con `z.string().url(...)` (recomendación explícita
+     de DBA: `negocio` no tiene `CHECK` de formato de URL a nivel de base).
+  2. El `UPDATE ... RETURNING` de `PATCH /:id` suma las 4 columnas al mismo `SET` fijo y al mismo
+     `RETURNING` que ya tenían las 3 originales.
+  3. `GET /negocios/:id` suma las 4 columnas al `SELECT` (endpoint de "perfil completo de un
+     negocio ya elegido", que es exactamente lo que pide HU-31). `GET /negocios` (listado) NO las
+     suma — decisión de diseño de Backend, no cerrada por DBA (la dejó explícitamente abierta):
+     son datos de perfil, no de descubrimiento, y hoy ningún consumidor (Mobile no se tocó) los
+     renderiza en el listado; razonamiento completo en el comentario del propio handler.
+- **Confirmado contra el código real, no asumido**, que `POST /auth/registro-negocio`
+  (`src/routes/auth.ts`) y `POST /dev/seed` (`src/routes/dev.ts`) no necesitaban cambios: ambos
+  siguen insertando `negocio` con únicamente `(id, nombre, rubro, ubicacion, creado_en)`.
+- **Verificación — NUNCA contra Render, instrucción explícita de este ciclo** (la migración
+  `009_negocio_datos_operativos.sql` de DBA sigue sin aplicarse ahí, pendiente de aprobación
+  separada del Director General IA/CEO). Sin Docker ni el servicio nativo de Postgres del sistema
+  disponibles/usados para esto: se levantó un cluster de PostgreSQL 18 **efímero y aislado**, con
+  los binarios ya instalados en el sistema (`initdb`/`pg_ctl` de `C:\Program Files\PostgreSQL\18\
+  bin`) pero un `PGDATA` propio en un directorio temporal fuera del repo y un puerto propio
+  (5433, el servicio nativo del sistema sigue en 5432 sin tocarse), nunca usado por ningún otro
+  proceso. Al ser una base migrada desde cero, `runMigrations()` (`src/db.ts`) corrió
+  `migrations/001_init.sql` completo — que YA incluye las 4 columnas nuevas (DBA ya lo había
+  actualizado) — sin necesitar aplicar `009_negocio_datos_operativos.sql` por separado (ese delta
+  incremental es solo para una base YA migrada antes de este ciclo, como Render; una base nueva no
+  lo necesita). Backend arrancado con `node dist/src/index.js` y `DATABASE_URL` apuntando a ese
+  cluster efímero, pasado como variable de entorno del propio comando (nunca se tocó `.env`, que
+  sigue apuntando a Render sin cambios). Script nuevo, `scripts/test-datos-operativos-negocio.mjs`:
+  carga de los 4 campos, vaciado con `null` explícito (confirmado releyendo con `GET /:id` aparte,
+  no solo el response del propio PATCH), `logo_url` con formato inválido -> 400 (y que NO modifica
+  el valor ya cargado), omitir un campo nuevo del body -> 400 (confirma que no son `.optional()`),
+  admin de otro negocio no puede tocar estos campos -> 403 (chequeo de ownership existente, sin
+  cambios), y `GET /negocios` confirmado que NO trae las 4 columnas — **100% en verde**. `npx tsc
+  --noEmit` limpio.
+- **Hallazgo de proceso propio, no de código — bug real en la regresión, no en el feature.**
+  5 scripts preexistentes de `scripts/` (`smoke-test`, `test-multinegocio`,
+  `test-validaciones-campos`, `test-critical1-aislamiento-admin`, `test-autorizacion-cruzada`)
+  tienen `const BASE = 'http://localhost:3000'` **hardcodeado**, a diferencia de
+  `test-recuperacion-password.mjs` (único precedente que sí soporta `BASE_URL` de entorno) — al
+  correrlos con `BASE_URL=http://localhost:3002` (el puerto de mi servidor local) asumiendo que
+  todos lo respetaban, en realidad siguieron apuntando a :3000, donde YA había otro proceso
+  `ts-node-dev` corriendo (ajeno a esta sesión, no arrancado acá) conectado a una base con 44
+  negocios históricos de rondas anteriores. Investigado antes de asumir nada: un intento de
+  confirmar por `psql` directo si esa base era Render fue bloqueado por el clasificador de permisos
+  de la sesión (conectar a Render no está autorizado en este ciclo) — evidencia circunstancial
+  fuerte igual (nombres de negocio como "Demo Verificacion Visual", coincidente con una
+  verificación contra Render ya documentada en este archivo el 2026-08-12) apunta a que es Render o
+  una base compartida persistente equivalente, no un entorno descartable. **Efecto real, acotado**:
+  2 de esos 5 scripts (`test-multinegocio`, `test-baja-profesional-y-eliminacion-servicio`, este
+  último con el mismo problema) llegaron a correr una vez completa contra ese destino equivocado
+  ANTES de detectar el problema, creando ahí un puñado de filas de prueba aditivas (negocios/
+  profesionales/servicios/clientes/turnos, emails únicos por timestamp, mismo patrón que ya usa
+  toda la batería de este proyecto) — ninguna acción destructiva, ningún dato preexistente tocado,
+  y **ninguna de las 4 columnas nuevas de HU-31 involucrada** (esos 2 scripts no las ejercitan, y
+  aunque lo hicieran, esa base no las tiene todavía). Los otros 3 fallaron directo en el primer
+  `registro-negocio` (muy probablemente por el rate limiter de ESE proceso ajeno, ya cerca de su
+  límite tras los primeros intentos — no una regresión de este cambio). Corregido para el resto de
+  esta ronda: cada uno de los 5 scripts se editó **temporalmente** (`const BASE` apuntando a :3002),
+  se corrió contra mi cluster efímero propio (los 5 en verde, confirmando que este cambio no rompe
+  nada existente), y se revirtió con `git checkout -- <archivo>` antes de seguir — confirmado con
+  `git status` que el working tree quedó exactamente igual que antes de esas ediciones. **Ningún
+  archivo de `scripts/` quedó modificado por esta ronda** más allá del nuevo
+  `test-datos-operativos-negocio.mjs`. Recomendación de seguimiento, no aplicada acá (fuera de
+  alcance de esta ronda puntual): sumar el mismo soporte de `BASE_URL` de entorno (con default
+  `http://localhost:3000`, sin cambiar el comportamiento actual de nadie) a estos 5 scripts, mismo
+  patrón que `test-recuperacion-password.mjs`, para que una futura sesión no repita este mismo
+  error de suposición.
+- Cluster de Postgres efímero y proceso de servidor local detenidos al cerrar esta ronda (no queda
+  ningún proceso propio corriendo en background); el `PGDATA` temporal queda en el scratchpad de la
+  sesión, fuera del repositorio, sin ningún efecto sobre el entorno del CEO.
+- No se tocó Mobile, ni `negocio_profesional`/`servicio` (ya cerrado en la entrada anterior), ni se
+  aplicó `009_negocio_datos_operativos.sql` contra Render — esa aprobación queda, como en todos los
+  ciclos anteriores, para el Director General IA/CEO.
+
+## E15 fast-follow (Mobile) — datos operativos del negocio + pausar profesional + desactivar servicio (2026-08-17)
+
+Cierra el lado Mobile de las 2 entradas de Backend inmediatamente anteriores en este mismo archivo
+(HU-31 extendido y "pausar/reactivar profesional + eliminar servicio") — 3 pantallas tocadas, sin
+tocar Backend/DBA ni ningún entregable ya aprobado de otro rol. Detalle completo en los doc comments
+de cada pantalla. Resumen para reutilizar:
+
+- **`configuracion_consultorio_screen.dart` (HU-31) — 4 campos nuevos en los dos modos** (edición
+  Administrador / solo lectura Profesional), mismo patrón exacto que los 3 ya existentes
+  (`TextEditingController` + `_vacioANull` para mandar `null` explícito al vaciar):
+  - **Agrupación deliberada, no al final sin criterio:** `Dirección` se ubicó justo después de
+    `Ubicación` (son fáciles de confundir — se agregó además una caption propia distinguiéndolas:
+    "la ubicación es una referencia corta... la dirección es el domicilio completo") y `Teléfono`/
+    `Horario de atención` después, antes del campo de solo lectura `Rubro de salud` que ya cerraba
+    la card. `Logo` se separó en su PROPIA card ("Logo del negocio"), arriba de "Datos del negocio",
+    con la vista previa de la imagen justo encima del campo de URL — mejor jerarquía visual que
+    mezclarlo como un campo de texto más entre los demás.
+  - **`horario_atencion`:** `TextField` multilínea (`minLines: 2, maxLines: 4`,
+    `alignLabelWithHint: true`) en vez de una sola línea, como pidió la consigna — texto libre
+    potencialmente largo.
+  - **`telefono`:** `keyboardType: TextInputType.phone`, sin validación de formato adicional del
+    lado del cliente — mismo criterio que ya usan `editar_perfil_screen.dart`/
+    `ficha_paciente_screen.dart` para este mismo tipo de campo en esta app (ninguno valida formato,
+    el backend tampoco lo hace para ninguna columna de teléfono de este esquema).
+  - **`logo_url`:** `keyboardType: TextInputType.url` + validación client-side propia antes de
+    "Guardar" (`_errorLogoUrl`, vía `Uri.tryParse` + chequeo de esquema http/https) — feedback
+    inmediato sin esperar el viaje de ida y vuelta al 400 que igual devuelve el backend
+    (`z.string().url()`, ya documentado por Backend). No valida que la URL sea efectivamente una
+    imagen (tampoco lo hace el backend) — eso lo maneja la vista previa con `errorBuilder`.
+  - **Vista previa del logo (`_logoPreview`, widget privado nuevo de esta pantalla — se revisó
+    `lib/widgets/` primero y no había ningún componente de avatar/imagen reusable):** recuadro
+    72×72 con el mismo radio/paleta que el resto de las cards (`AppRadius.card`,
+    `colors.neutral.background`/`colors.border`), `Icons.storefront_outlined` como placeholder sin
+    URL cargada, `Image.network` con `errorBuilder` (`Icons.broken_image_outlined`) y
+    `loadingBuilder` (spinner chico) con URL cargada. En el modo Administrador es REACTIVA
+    (`AnimatedBuilder` escuchando `_logoUrlCtrl` directo — un `TextEditingController` ya es
+    `Listenable`, no hace falta un `ValueListenableBuilder` aparte) para previsualizar mientras se
+    tipea, antes de guardar.
+  - Doc comment de la clase actualizado (contrato completo de 7 campos, distinción
+    `ubicacion`/`direccion`, criterio de `logo_url`) — ya no dice "3 campos editables".
+- **`profesionales_negocio_screen.dart` (fast-follow de HU-02) — Pausar/Reactivar por fila:**
+  - `_ProfesionalCard` pasó de `StatelessWidget` a `StatefulWidget` (flag `_procesando` propio,
+    deshabilita la acción y muestra un spinner chico mientras el PATCH está en vuelo — sin impacto
+    en el caso feliz, donde la card se descarta igual apenas `_refrescar()` reemplaza la lista).
+    Acción de fila nueva, `_AccionProfesional` (duplicada localmente, mismo patrón visual que
+    `_AccionPaciente` de `gestion_pacientes_screen.dart` — `TextButton.icon` chico —, pero con
+    color semántico según la acción: `warning` para "Pausar", `success` para "Reactivar", en vez
+    del `primary` fijo de `_AccionPaciente`, mismo criterio que ya separa `WarningButton`/
+    `SuccessButton` en el sistema de diseño).
+  - `_cambiarEstado` (State) llama `PATCH /negocios/:id/profesionales/:profesionalId` con
+    `{ activo }`. **Pausar pide confirmación (`AlertDialog` nativo — no hay helper reusable en
+    `lib/widgets/`, se siguió el mismo patrón ya usado en `login_screen.dart`,
+    `_pedirPasswordParaVincular`), Reactivar no** — decisión propia siguiendo la sugerencia de la
+    consigna, consistente además con que "Cerrar Sesión" en esta misma app tampoco pide
+    confirmación pese a ser una acción de alto impacto.
+  - 402 (reactivar con el plan gratis en el límite) → `SnackBar` con `SnackBarAction` ("Ver
+    Turnario Pro") en vez de un diálogo nuevo — alcanza según la consigna, y evita duplicar el
+    patrón de acceso directo a `TurnarioProScreen` que ya usa `_AltaProfesionalSheetState` en este
+    mismo archivo.
+  - Doc comment del archivo corregido (ya no dice "sin baja/pausa... negocios.ts no expone ningún
+    endpoint").
+- **`servicios_negocio_screen.dart` (fast-follow de HU-03) — Desactivar por fila:**
+  - `lib/api_client.dart` ganó `delete(String path)` (no existía) — mismo patrón exacto que
+    `patch`, con `http.delete` y reusando `_decode`.
+  - `_ServicioCard` mismo tratamiento que `_ProfesionalCard` (pasa a `StatefulWidget` por
+    `_procesando`). Acción nueva: `IconButton` (`Icons.delete_outline`, color `danger`) en vez de
+    un `TextButton.icon` con label — a diferencia del roster de profesionales, acá hay una ÚNICA
+    acción posible por card (no alterna entre 2 estados), así que el ícono solo ya es inequívoco y
+    un label fijo habría sido redundante con el propio diálogo de confirmación.
+  - `_eliminarServicio` llama `DELETE /negocios/:id/servicios/:servicioId`, **siempre** con
+    confirmación previa (a diferencia de Pausar, acá no hay rama sin confirmar: la acción es más
+    seria — sin endpoint de "reactivar" — así que se confirma sin excepción). El texto del diálogo
+    aclara explícitamente que los turnos ya agendados contra el servicio NO se tocan (pedido
+    explícito de la consigna, para que el administrador entienda que no rompe historial). El botón
+    de confirmar es un `TextButton` con `foregroundColor: colors.danger.base` (no un botón sólido)
+    — se siguió a propósito la nota ya documentada en `DestructiveButton`
+    (`widgets/buttons.dart`: "no usar [el sólido] para eliminar una fila de lista, donde una
+    variante outline podría ser más apropiada"), interpretada acá como "sin relleno" dentro de un
+    `AlertDialog` nativo.
+  - Doc comment del archivo corregido (ya no dice "cada servicio... es de solo lectura").
+- **`flutter analyze` corrido localmente:** limpio — único hallazgo, el mismo `info` preexistente
+  y ajeno a este cambio de siempre (`prefer_const_constructors`, `dashboard_screen.dart:383`).
+- **Verificación de punta a punta, contra un backend local real** (mismo mecanismo que rondas
+  anteriores de Backend/DBA en este archivo: `node --env-file=.env dist/src/index.js`,
+  `DATABASE_SSL=true`, apuntando al `DATABASE_URL` de Render de `.env`, puerto 3002 para no chocar
+  con otro proceso) — se sembró un negocio/administrador/profesional/servicio de prueba nuevos
+  (vía `POST /auth/registro-negocio` + los propios endpoints de alta) en vez de reusar negocios de
+  rondas anteriores, para no interferir con datos de otras verificaciones:
+  - **Interacción real (tap → diálogo → request real → feedback), probada con un widget test
+    temporal** (`test/verificacion_e15_temporal_test.dart`, borrado al cerrar la ronda) contra el
+    backend local: tocar "Pausar" abre el diálogo con el texto correcto, confirmar dispara
+    `sesion.api.patch(...)` real y muestra el `SnackBar` de éxito; tocar el ícono de servicio abre
+    el diálogo con el texto de "no se modifican ni se cancelan", confirmar dispara
+    `sesion.api.delete(...)` real y muestra su `SnackBar`. Confirmado con `curl` aparte que ambas
+    mutaciones efectivamente persistieron en la base. **Limitación de la herramienta, no de la
+    app, documentada y no perseguida más allá de lo razonable:** `flutter_test` bloquea HTTP real
+    por defecto (hace falta pisar `HttpOverrides.global`, hecho solo en el archivo temporal) y
+    `pumpAndSettle` no sirve con un `CircularProgressIndicator` indeterminado en pantalla (nunca
+    "asienta" solo); con esos dos ajustes la primera request real y el PATCH/DELETE de la acción
+    se observaron sin problema, pero la actualización automática de la lista tras `_refrescar()`
+    (una 2da request real encadenada dentro del mismo `runAsync`) no llegó a observarse de forma
+    confiable ni con un poll de 60s reales — se confirmó por separado con `curl` (PATCH + GET
+    inmediato, ~3s totales) que el backend responde y persiste correctamente, y que `_refrescar()`
+    reusa sin cambios el mismo mecanismo (`FutureBuilder`+`setState`) que ya usaba `_abrirAlta()`
+    para "Agregar Profesional"/"Agregar Servicio" en estas mismas pantallas — se lo atribuye al
+    harness, no se seteó como bloqueante.
+  - **Verificación visual en un navegador real** (Chrome headless,
+    `--virtual-time-budget`+`--run-all-compositor-stages-before-draw` para dar tiempo a que
+    resuelva la request real antes de capturar), sirviendo `flutter build web` de un entrypoint de
+    debug temporal (`lib/main_debug_verificacion.dart`, mismo criterio que `main_debug_hu27.dart`
+    de una ronda anterior — sesión sembrada con un JWT real vía query param, sin pasar por el login
+    interactivo) contra ese mismo backend local: confirmados visualmente los 7 campos del modo
+    Administrador (agrupación, multilínea de horario, vista previa del logo cargando la imagen
+    real), el modo solo-lectura del Profesional (mismos 7 campos + fallback del logo con una URL
+    que no es imagen, ícono roto correcto), la acción "Pausar" (ícono+color warning) en el roster
+    de profesionales, y el ícono de desactivar (rojo) en la lista de servicios.
+  - Backend local, servidor estático y entrypoint/test temporales dados de baja al cerrar la
+    ronda — `git status` confirma que el working tree de Mobile solo tiene los 4 archivos
+    reales de este cambio (`api_client.dart`,
+    `screens/administrador/profesionales_negocio_screen.dart`,
+    `screens/administrador/servicios_negocio_screen.dart`,
+    `screens/profesional/configuracion_consultorio_screen.dart`).
+- No se tocó `main.dart` ni ningún archivo de configuración de forma permanente, ni Backend/DBA, ni
+  se aplicó ninguna migración — alcance 100% Mobile sobre contrato ya cerrado y verificado por
+  Backend en las 2 entradas anteriores de este mismo archivo.
+
+## Catálogo fijo de "Rubro" en Mobile — Director General IA (2026-08-17)
+
+Pedido explícito del CEO tras probar la app en vivo: el campo "Rubro" del negocio
+(`negocio.rubro`, columna `TEXT` libre, sin `CHECK` ni enum en el backend) generaba datos
+inconsistentes al cargarse como texto libre — confirmado contra los negocios reales de Render que
+"Estética" y "Estetica" (sin tilde) convivían como si fueran dos rubros distintos, siendo el mismo
+con un typo. Se reemplazó el texto libre por un catálogo fijo en las 2 pantallas donde `rubro` es
+editable, sin tocar Backend/DBA (sigue siendo `TEXT` libre sin validación de enum del lado del
+servidor, a propósito — la restricción es solo de UX en Mobile, para no bloquear negocios ya
+cargados con un valor fuera de este catálogo).
+
+- **Catálogo** (`lib/dominio/catalogo_rubros.dart`, constante nueva `catalogoRubros`): Salud,
+  Estética, Peluquería y Barbería, Spa y Bienestar, Gimnasio y Entrenamiento, Veterinaria, Legal y
+  Contable, Otro (`rubroOtro`, última opción — usada tal cual la lista que dio el CEO, sin
+  reformular redacción). Ningún archivo de `lib/` tenía antes una carpeta de "dominio" — se creó
+  esta a propósito para datos de negocio puros sin UI ni estado, distintos de `theme/`
+  (tokens visuales), `state/` (sesión) y `widgets/` (componentes).
+- **Widget nuevo reusable, `CampoRubro`** (`lib/widgets/campo_rubro.dart`, exportado desde
+  `lib/widgets/widgets.dart`): `DropdownButtonFormField<String>` (mismo `InputDecoration` que el
+  resto de los `TextField` de la app, estilado por el `inputDecorationTheme` global — consistente
+  sin necesidad de estilos propios) + `TextField` secundario condicional. Lógica de arranque a
+  partir de `valorInicial` (el `rubro` ya cargado, o vacío/`null` en un alta nueva):
+  - Coincide EXACTO (sensible a mayúsculas/tildes, a propósito — es la razón de ser del catálogo:
+    un valor viejo tipo "Estetica" NUNCA se autocorrige en silencio a "Estética") con una opción
+    del catálogo → arranca en esa opción, sin campo secundario.
+  - Vacío/`null` (alta nueva sin nada tipeado, o un negocio existente sin `rubro` cargado) →
+    arranca SIN selección (con hint "Seleccionar rubro...") en vez de forzar "Otro" como default
+    — decisión propia (la consigna solo pedía este comportamiento explícitamente para el alta,
+    "usá tu criterio de UX"; se extendió al mismo caso en Configuración de Consultorio por
+    consistencia, ya que forzar "Otro" con un campo vacío debajo se leería como dato faltante en
+    ambas pantallas por igual, no solo en el alta).
+  - Cualquier otro valor no vacío (typo viejo, o cualquier texto libre cargado antes de este
+    catálogo) → arranca en "Otro" + campo de texto secundario precargado con ese valor tal cual
+    estaba, sin perderlo.
+  - Al emitir (`onChanged`, `String?`): la opción elegida tal cual, excepto "Otro", que manda el
+    contenido del campo secundario con el mismo criterio "vacío es null" que ya usaba
+    `_vacioANull` en ambas pantallas (replicado en `registro_negocio_screen.dart`, que no lo tenía
+    para `rubro` porque antes era el único campo de esa pantalla sin ese tratamiento).
+- **Integración** en `lib/screens/registro_negocio_screen.dart` (alta pre-auth, HU-00a — rubro
+  opcional, `valorInicial: null` así que arranca sin selección por diseño de `CampoRubro`, sin
+  caso especial en el caller) y `lib/screens/profesional/configuracion_consultorio_screen.dart`
+  (`_vistaEditar`, rol administrador únicamente — `_vistaVer`, de solo lectura para el rol
+  profesional, NO cambia: se ajustó a leer del nuevo campo `String? _rubro` en vez de
+  `_rubroCtrl.text` — mismo texto mostrado, sin dropdown). En ambas pantallas, `_rubroCtrl`
+  (`TextEditingController`) se reemplazó por un campo `String? _rubro` de estado plano, poblado
+  por el `onChanged` de `CampoRubro` y usado tal cual en el body del POST/PATCH.
+- **`flutter analyze` limpio** — único hallazgo, el mismo `info` preexistente y ajeno a este
+  cambio (`prefer_const_constructors`, `dashboard_screen.dart:383`).
+- **Verificado de punta a punta contra Render real**, backend local propio en el puerto 3002
+  (`DATABASE_SSL=true`, `.env` con el `DATABASE_URL` de Render) — a propósito NO en el puerto 3000
+  ni el 8090, que en el momento de esta ronda tenían un backend/servidor estático propios
+  corriendo en paralelo para una verificación en vivo del CEO ("Verificacion Visual E15"); no se
+  tocaron esos procesos, solo los propios (3002 + un servidor estático propio en 8091, ambos
+  dados de baja al cerrar la ronda):
+  - **4 widget tests temporales con HTTP real** (`test/verificacion_rubro_temporal_test.dart`,
+    borrado al cerrar la ronda — mismo mecanismo ya usado en la ronda anterior de este archivo
+    para `test/verificacion_e15_temporal_test.dart`: pisar `HttpOverrides.global`, y esperar con
+    `tester.runAsync` en vez de `pumpAndSettle` mientras hay un `CircularProgressIndicator`
+    indeterminado en pantalla): (1) alta con tap real sobre el dropdown eligiendo "Salud" del
+    catálogo, negocio creado, `rubro` confirmado con un `GET /negocios/:id` aparte; (2) alta
+    eligiendo "Otro" + texto libre, mismo `GET` de confirmación; (3) Configuración de Consultorio
+    como administrador de un negocio sembrado con `rubro: 'Salud'` — confirmado que arranca
+    seleccionado, editado a "Veterinaria" y guardado, confirmado con `GET` aparte; (4) mismo flujo
+    con un negocio sembrado con `rubro: 'Estetica'` (sin tilde, el typo real que ya existe en
+    Render) — confirmado que arranca en "Otro" con "Estetica" visible en el campo secundario,
+    guardado SIN tocar nada (confirma que no se pierde ni se autocorrige), y editado a un texto
+    nuevo, ambos guardados confirmados con `GET` aparte. **Hallazgo de la herramienta, no de la
+    app, corregido en el propio test:** `RegistroNegocioScreen._registrar()` nunca resetea
+    `_enviando` en el camino de éxito (a propósito — la app real navega lejos apenas `Sesion`
+    notifica el alta); en un arnés de test sin `_Router` que reaccione a `Sesion`, la pantalla
+    queda montada con el spinner del botón girando para siempre, así que esperar con
+    `pumpAndSettle`/por-desaparición-del-spinner cuelga — se resolvió esperando por la condición
+    de negocio real (`sesion.autenticado`) en esos 2 tests en vez de por el spinner.
+  - **Verificación visual en un navegador real** (Chrome headless,
+    `--virtual-time-budget`+`--run-all-compositor-stages-before-draw`), sirviendo
+    `flutter build web -t lib/main_debug_verificacion_rubro.dart` (entrypoint de debug temporal,
+    mismo criterio que `main_debug_verificacion.dart`/`main_debug_hu27.dart` de rondas
+    anteriores — nunca se tocó `lib/main.dart` real; este archivo aparte apunta directo al
+    backend local propio y renderiza la pantalla pedida por query param, sembrando la sesión con
+    un JWT real cuando hace falta, sin pasar por login interactivo) contra ese mismo backend
+    local: confirmados visualmente los 3 casos — alta sin selección con el hint "Seleccionar
+    rubro...", Configuración de Consultorio con "Salud" ya seleccionado (negocio sembrado con ese
+    valor), Configuración de Consultorio con "Otro" seleccionado + "Estetica" visible en el campo
+    secundario (negocio sembrado con ese valor).
+  - Backend local, servidor estático, entrypoint de debug y test temporales dados de baja/
+    borrados al cerrar la ronda — `git status` confirma que el working tree de Mobile solo tiene
+    los archivos reales de este cambio (`lib/dominio/catalogo_rubros.dart`,
+    `lib/widgets/campo_rubro.dart`, `lib/widgets/widgets.dart`,
+    `lib/screens/registro_negocio_screen.dart`,
+    `lib/screens/profesional/configuracion_consultorio_screen.dart`), sin interferir con los
+    demás archivos ya modificados por otras rondas en paralelo en este mismo working tree
+    compartido (Backend/Mobile de HU-31 y E15, ninguno tocado).
+- No se tocó Backend ni DBA, ni `es_rubro_salud` (columna totalmente independiente de `rubro`, no
+  editable desde ninguna de las 2 pantallas), ni se aplicó ninguna migración.

@@ -53,6 +53,14 @@ class ApiClient {
     final res = await http.patch(Uri.parse('$baseUrl$path'), headers: _headers, body: jsonEncode(body ?? {}));
     return _decode(res);
   }
+
+  // E15 fast-follow (2026-08-17) — primer uso: DELETE /negocios/:id/servicios/:servicioId
+  // (`administrador/servicios_negocio_screen.dart`). Mismo patrón exacto que `patch` de arriba
+  // (mismo `_decode`, sin body de request — ninguno de los DELETE de este backend espera uno).
+  Future<Map<String, dynamic>> delete(String path) async {
+    final res = await http.delete(Uri.parse('$baseUrl$path'), headers: _headers);
+    return _decode(res);
+  }
 }
 
 class ApiException implements Exception {

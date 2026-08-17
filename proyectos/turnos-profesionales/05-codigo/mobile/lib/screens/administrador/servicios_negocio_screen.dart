@@ -14,11 +14,21 @@ import '../../widgets/widgets.dart';
 /// (`requireAuth('administrador')`), body `{ nombre, duracion_min, precio_referencia? }` -> 201
 /// `{ id }`; listado `GET /negocios/:id/servicios` (público — mismo endpoint que ya consume
 /// `screens/cliente/detalle_negocio_screen.dart` en el flujo de reserva de HU-07) -> array de
-/// `{ id, nombre, duracion_min, precio_referencia }`.
+/// `{ id, nombre, duracion_min, precio_referencia }`; baja `DELETE
+/// /negocios/:id/servicios/:servicioId` (E15 fast-follow, 2026-08-17 — ver `_eliminarServicio`/
+/// `_ServicioCard` más abajo) -> 200 `{ id, eliminado: true }` | 403 rol distinto de administrador
+/// o negocio ajeno | 404 no existe, ya estaba eliminado, o es de otro negocio.
 ///
-/// Sin edición ni baja: `negocios.ts` solo expone alta para este recurso (ver "Fuera de alcance"
-/// de esta épica en el backlog: "remoción de un servicio... sin endpoint") — cada servicio, una
-/// vez cargado, es de solo lectura en esta pantalla.
+/// La baja es SOFT-DELETE (`servicio.eliminado_en`), nunca `DELETE` físico — el backend nunca borra
+/// la fila para no romper la FK `turno.servicio_id` (NOT NULL) de turnos ya existentes; esos
+/// turnos, pasados o futuros, quedan intactos. El administrador confirma explícitamente antes de
+/// desactivar (`_confirmarEliminacion`) — a diferencia de pausar un profesional
+/// (`profesionales_negocio_screen.dart`), este endpoint no tiene contraparte de "reactivar", así
+/// que el diálogo lo aclara junto con que el historial no se rompe.
+///
+/// Sin edición: `negocios.ts` sigue sin exponer un `PATCH` para este recurso — el nombre/duración/
+/// precio de un servicio ya cargado siguen sin poder modificarse desde esta pantalla, solo darse
+/// de baja (y, si hace falta un reemplazo con otros datos, cargar uno nuevo).
 class ServiciosNegocioScreen extends StatefulWidget {
   const ServiciosNegocioScreen({super.key});
 
@@ -56,6 +66,66 @@ class _ServiciosNegocioScreenState extends State<ServiciosNegocioScreen> {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Servicio agregado.')));
       await _refrescar();
     }
+  }
+
+  /// Da de baja (soft-delete) [servicio] — `DELETE /negocios/:id/servicios/:servicioId`. Siempre
+  /// pide confirmación primero (`_confirmarEliminacion`, a diferencia de reactivar un profesional
+  /// en la pantalla hermana, acá no hay ninguna rama "sin confirmar": esta acción es más seria que
+  /// pausar — no tiene contraparte de "reactivar" — así que se confirma siempre, sin excepción).
+  ///
+  /// `context` es el de la card que disparó la acción (mismo criterio que
+  /// `ProfesionalesNegocioScreen._cambiarEstado` — ver el doc comment de ese método para el porqué
+  /// de usar `context.mounted` en vez del `mounted` del State en los guards post-`await`).
+  Future<void> _eliminarServicio(BuildContext context, _Servicio servicio) async {
+    final confirmado = await _confirmarEliminacion(context, servicio.nombre);
+    if (confirmado != true || !context.mounted) return;
+
+    final sesion = context.read<Sesion>();
+    try {
+      await sesion.api.delete('/negocios/${sesion.negocioId}/servicios/${servicio.id}');
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('"${servicio.nombre}" fue desactivado.')));
+      await _refrescar();
+    } on ApiException catch (e) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
+    } catch (e) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('No se pudo desactivar: $e')));
+    }
+  }
+
+  /// Diálogo nativo (`showDialog`+`AlertDialog`), mismo patrón ya usado en esta app (ver
+  /// `login_screen.dart`, `_pedirPasswordParaVincular`, y `ProfesionalesNegocioScreen.
+  /// _confirmarPausa`) — no hay un helper de confirmación reusable en `lib/widgets/` todavía. El
+  /// botón de confirmar usa el mismo criterio que documenta `DestructiveButton`
+  /// (`widgets/buttons.dart`: "no usar [el sólido rojo de ancho completo] para eliminar una fila de
+  /// lista, donde una variante outline podría ser más apropiada") — acá, dentro de un `AlertDialog`
+  /// nativo, eso se traduce en un `TextButton` (mismo tratamiento "sin relleno" que "Cancelar") con
+  /// el texto en `danger` en vez de un botón sólido, para no competir en peso visual con las
+  /// acciones de confirmación no-destructivas del resto de la app (ej. "Pausar", `FilledButton`
+  /// neutro en `ProfesionalesNegocioScreen`).
+  Future<bool?> _confirmarEliminacion(BuildContext context, String nombreServicio) {
+    final colors = AppColors.of(context);
+    return showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Desactivar servicio'),
+        content: Text(
+          '"$nombreServicio" va a dejar de estar disponible para reservar turnos nuevos. Los turnos '
+          'que ya existen contra este servicio no se modifican ni se cancelan — tu historial y tus '
+          'reportes quedan intactos.',
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(dialogContext).pop(false), child: const Text('Cancelar')),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            style: TextButton.styleFrom(foregroundColor: colors.danger.base),
+            child: const Text('Desactivar'),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
@@ -109,7 +179,10 @@ class _ServiciosNegocioScreenState extends State<ServiciosNegocioScreen> {
                   )
                 else
                   for (final servicio in servicios) ...[
-                    _ServicioCard(servicio: servicio),
+                    _ServicioCard(
+                      servicio: servicio,
+                      onEliminar: (context) => _eliminarServicio(context, servicio),
+                    ),
                     const SizedBox(height: AppSpacing.md),
                   ],
                 const SizedBox(height: AppSpacing.base),
@@ -154,14 +227,38 @@ class _Servicio {
       );
 }
 
-class _ServicioCard extends StatelessWidget {
-  const _ServicioCard({required this.servicio});
+/// A diferencia de la versión previa (`StatelessWidget` puramente informativa), esta card ahora
+/// dispara una escritura (`onEliminar`) — pasa a `StatefulWidget` únicamente para llevar
+/// `_procesando` (deshabilita la acción y muestra un spinner chico mientras el DELETE está en
+/// vuelo), mismo criterio exacto que `_ProfesionalCard`/`_ProfesionalCardState` en
+/// `profesionales_negocio_screen.dart` — ver el doc comment de esa clase para el razonamiento
+/// completo (aplica palabra por palabra acá: en el camino feliz la card se descarta apenas
+/// `_refrescar()` reemplaza la lista, `_procesando` solo importa en error/cancelación).
+class _ServicioCard extends StatefulWidget {
+  const _ServicioCard({required this.servicio, required this.onEliminar});
 
   final _Servicio servicio;
+
+  /// `BuildContext` de ESTA card — mismo criterio que `_ProfesionalCard.onCambiarEstado`.
+  final Future<void> Function(BuildContext context) onEliminar;
+
+  @override
+  State<_ServicioCard> createState() => _ServicioCardState();
+}
+
+class _ServicioCardState extends State<_ServicioCard> {
+  bool _procesando = false;
+
+  Future<void> _tocar() async {
+    setState(() => _procesando = true);
+    await widget.onEliminar(context);
+    if (mounted) setState(() => _procesando = false);
+  }
 
   @override
   Widget build(BuildContext context) {
     final colors = AppColors.of(context);
+    final servicio = widget.servicio;
     final precio =
         servicio.precioReferencia != null ? '\$${_formatMonto(servicio.precioReferencia!)}' : 'sin precio de referencia';
     return Container(
@@ -172,15 +269,41 @@ class _ServicioCard extends StatelessWidget {
         borderRadius: BorderRadius.circular(AppRadius.card),
         boxShadow: AppRadius.cardShadow,
       ),
-      child: Column(
+      child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            servicio.nombre,
-            style: AppTypography.subtitle(context).copyWith(color: colors.textPrimary, fontWeight: FontWeight.bold),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  servicio.nombre,
+                  style:
+                      AppTypography.subtitle(context).copyWith(color: colors.textPrimary, fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(height: AppSpacing.xs),
+                Text('${servicio.duracionMin} min · $precio', style: AppTypography.caption(context)),
+              ],
+            ),
           ),
-          const SizedBox(height: AppSpacing.xs),
-          Text('${servicio.duracionMin} min · $precio', style: AppTypography.caption(context)),
+          const SizedBox(width: AppSpacing.sm),
+          // Ícono de acción en fila (tacho de basura) — mismo criterio de "botón de texto chico"
+          // que `_AccionPaciente`/`_AccionProfesional` en las pantallas hermanas, pero acá solo un
+          // `IconButton` sin label: una única acción posible por card (a diferencia de Pausar/
+          // Reactivar, que alternan según `activo`), así que el ícono solo ya es inequívoco —
+          // agregar un label fijo ("Desactivar") habría sido redundante con el diálogo de
+          // confirmación que se abre al tocarlo.
+          IconButton(
+            tooltip: 'Desactivar servicio',
+            onPressed: _procesando ? null : _tocar,
+            icon: _procesando
+                ? SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2, color: colors.danger.base),
+                  )
+                : Icon(Icons.delete_outline, color: colors.danger.base),
+          ),
         ],
       ),
     );

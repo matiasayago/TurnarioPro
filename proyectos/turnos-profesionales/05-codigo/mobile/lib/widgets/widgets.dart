@@ -7,6 +7,7 @@ export 'app_bottom_navigation_bar.dart';
 export 'app_header.dart';
 export 'app_modal_sheet.dart';
 export 'buttons.dart';
+export 'campo_rubro.dart';
 export 'month_calendar_picker.dart';
 export 'numeric_stepper_field.dart';
 export 'proximamente_screen.dart';
