@@ -7,6 +7,7 @@ import { asyncHandler } from '../middleware/asyncHandler';
 import { calcularSlotsDisponibles, inicioDelDiaLocal } from '../dominio/disponibilidad';
 import { uuidSchema, fechaIsoSchema, respuestaValidacionFallida } from '../dominio/validacion';
 import { LimitePlanGratisError, cuerpoLimitePlanAlcanzado, exigirLimiteTurnosConfirmadosDelMes } from '../dominio/suscripciones';
+import { pagoProvider, IntencionDePago } from '../integraciones/pagos';
 
 export const turnosRouter = Router();
 
@@ -173,9 +174,12 @@ turnosRouter.post(
           // correr ACÁ, antes del INSERT — es el único momento en que se puede bloquear antes de
           // que "cuente". El otro camino de este mismo endpoint (servicio CON seña, más abajo,
           // `estadoInicial = 'pendiente_de_pago'`) difiere el chequeo al momento en que el pago
-          // se confirme — ver dominio/suscripciones.ts e integraciones/pagos.ts para el resto de
-          // los caminos documentados (incluido uno que, verificado contra este código, todavía no
-          // existe). Se salta completo si el negocio tiene Turnario Pro activo.
+          // se confirme — ver dominio/suscripciones.ts. Ese momento (2026-08-17) es
+          // `POST /webhooks/mercadopago` (src/routes/webhooks.ts): usa la variante que DEVUELVE
+          // resultado (`verificarLimiteTurnosConfirmadosDelMes`), no esta que lanza — ver el
+          // comentario ahí para el porqué (el pago ya está cobrado en ese punto, no hay ningún
+          // ROLLBACK posible que lo deshaga). Se salta completo si el negocio tiene Turnario Pro
+          // activo.
           //
           // Corre con `app.usuario_id` = CLIENTE (el cambio de identidad a la del profesional
           // pasa recién más abajo, para el alta de `paciente`) — `obtenerEstadoSuscripcion`
@@ -294,6 +298,109 @@ turnosRouter.post(
       requiere_pago: requiereSena,
       monto_sena: relacion?.monto_sena ?? null,
     });
+  })
+);
+
+// HU-29/RN10 (2026-08-17) — cierre del gap documentado en integraciones/pagos.ts (HALLAZGO
+// 2026-08-14): `pagoProvider.crearIntencion` no tenía, hasta este endpoint, ningún caller en todo
+// el backend. Este es el punto de entrada para que el CLIENTE dueño de un turno
+// 'pendiente_de_pago' (nacido así por RN10 — ver POST / arriba y POST /profesionales/:id/turnos)
+// obtenga la URL de checkout de Mercado Pago y pague la seña. La confirmación real del pago
+// (webhook de Mercado Pago — `UPDATE pago SET estado = 'acreditado'` + eventual
+// `UPDATE turno SET estado = 'confirmado'`) vive en `POST /webhooks/mercadopago`
+// (src/routes/webhooks.ts), no acá: este endpoint solo abre la intención de pago, no la confirma.
+//
+// Shape de la respuesta (200 `{ url_checkout }`) sin contrato previo de Mobile (ver
+// confirmar_turno_screen.dart, todavía un TODO) — se elige el mínimo que Mobile necesita para
+// redirigir al checkout; `monto`/`turno_id` no se repiten acá porque Mobile ya los tiene desde la
+// respuesta de creación del turno (`monto_sena`, ver arriba).
+turnosRouter.post(
+  '/:id/pago',
+  requireAuth('cliente'),
+  asyncHandler(async (req: AuthedRequest, res: Response) => {
+    const paramsParsed = turnoIdParamsSchema.safeParse(req.params);
+    if (!paramsParsed.success) return respuestaValidacionFallida(res, paramsParsed.error);
+
+    const resultado = await withTransaction(
+      async (client) => {
+        // JOIN directo a `pago` (sin RLS, ver integraciones/pagos.ts y el comentario de
+        // db.ts/ContextoRls) apoyado en la policy pública `turno_select_publico` (todavía activa
+        // como red de seguridad transitoria, ver migrations/001_init.sql) — mismo criterio que ya
+        // usa `GET /mios` en este archivo (SELECT directo sobre `turno`, sin pasar por la función
+        // SECURITY DEFINER `turno_propio_para_gestion`, que no expone columnas de `pago` y acá no
+        // aportaría nada: la distinción 403 vs 404 se resuelve igual, a mano, más abajo). LEFT
+        // JOIN (no INNER): distingue "turno inexistente" (sin fila) de "turno sin pago asociado"
+        // (fila con pago_id NULL) — 2 causas de rechazo distintas.
+        const result = await client.query(
+          `SELECT t.id, t.cliente_id, t.estado, p.id AS pago_id, p.monto AS pago_monto
+           FROM turno t
+           LEFT JOIN pago p ON p.turno_id = t.id
+           WHERE t.id = $1`,
+          [req.params.id]
+        );
+        const fila = result.rows[0] as
+          | { id: string; cliente_id: string; estado: string; pago_id: string | null; pago_monto: number | null }
+          | undefined;
+        if (!fila) return { tipo: 'no_encontrado' as const };
+        if (fila.cliente_id !== req.auth!.sub) return { tipo: 'prohibido' as const };
+        // No se re-chequea acá `pago.estado` (ej. ya 'acreditado' pero turno todavía
+        // 'pendiente_de_pago' por el límite de HU-29, ver webhooks.ts): `turno.estado` ya alcanza
+        // como gate — mientras siga en 'pendiente_de_pago' hay, en los hechos, algo pendiente de
+        // cobrar/confirmar, y el webhook es idempotente de todos modos ante un segundo intento.
+        if (fila.estado !== 'pendiente_de_pago') {
+          return { tipo: 'estado_invalido' as const, estado: fila.estado };
+        }
+        if (!fila.pago_id) return { tipo: 'sin_pago' as const };
+
+        return { tipo: 'ok' as const, turnoId: fila.id, pagoId: fila.pago_id, monto: fila.pago_monto! };
+      },
+      { usuarioId: req.auth!.sub, negocioId: req.auth!.negocio_id }
+    );
+
+    switch (resultado.tipo) {
+      case 'no_encontrado':
+        return res.status(404).json({ error: 'Turno no encontrado' });
+      case 'prohibido':
+        return res.status(403).json({ error: 'No podés pagar un turno que no es tuyo' });
+      case 'estado_invalido':
+        return res.status(409).json({
+          error: `Este turno no tiene un pago pendiente para cobrar (estado actual: '${resultado.estado}')`,
+        });
+      case 'sin_pago':
+        // No debería poder pasar — todo turno 'pendiente_de_pago' nace con su fila `pago` en la
+        // misma transacción (ver POST / arriba y POST /profesionales/:id/turnos) — cubierto igual,
+        // nunca asumido.
+        return res.status(404).json({ error: 'No se encontró un pago pendiente asociado a este turno' });
+      case 'ok': {
+        let intencion: IntencionDePago;
+        try {
+          intencion = await pagoProvider.crearIntencion(resultado.turnoId, resultado.monto);
+        } catch (err) {
+          // Mismo criterio que GOOGLE_CLIENT_ID ausente en auth.ts (ver verificarIdTokenGoogle):
+          // sin MP_ACCESS_TOKEN configurado, `pagoProvider` tira recién al invocarse (nunca al
+          // importar el módulo, ver integraciones/pagos.ts) — se atrapa acá y se responde 503 con
+          // un mensaje claro, en vez de dejar que el error handler genérico de app.ts lo convierta
+          // en un 500 opaco sin contexto para quien llama.
+          //
+          // [INFORMATIVO-1, revisión de Security 2026-08-17] Este catch cubre tanto "falta
+          // MP_ACCESS_TOKEN" (esperable) como una falla real de red/API de Mercado Pago
+          // (accionable) — se loguea server-side para no dejar la segunda invisible.
+          // eslint-disable-next-line no-console
+          console.error('[turnos] Error creando la intención de pago en Mercado Pago:', resultado.turnoId, err);
+          return res.status(503).json({
+            error: 'Pagos con Mercado Pago no están disponibles todavía en este entorno',
+          });
+        }
+
+        await pool.query('UPDATE pago SET referencia_externa = $1, modificado_en = $2 WHERE id = $3', [
+          intencion.id,
+          nowIso(),
+          resultado.pagoId,
+        ]);
+
+        return res.json({ url_checkout: intencion.urlCheckout });
+      }
+    }
   })
 );
 

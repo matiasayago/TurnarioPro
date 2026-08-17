@@ -1,9 +1,11 @@
 /**
  * Integración de email — recuperación de contraseña (HU-37, 02-backlog/backlog.md, extiende E4).
  *
- * Mismo patrón que ../integraciones/pagos.ts (`PagoProvider`/`MockPagoProvider`): una interfaz
- * propia y una implementación "Mock" para desarrollo, en vez de acoplar el router directo a un
- * proveedor real. NO se crea ninguna cuenta ni se cargan credenciales reales acá (fuera del
+ * Mismo patrón que tenía ../integraciones/pagos.ts (`PagoProvider`/`MockPagoProvider`) hasta el
+ * 2026-08-17, cuando Integraciones lo reemplazó por un cliente real de Mercado Pago
+ * (`MercadoPagoProvider`, ver ese archivo): una interfaz propia y una implementación "Mock" para
+ * desarrollo, en vez de acoplar el router directo a un proveedor real. NO se crea ninguna cuenta
+ * ni se cargan credenciales reales acá (fuera del
  * alcance permitido de un agente de IA) — el rol Integraciones debe reemplazar
  * `MockEmailProvider` por un cliente real (SendGrid/Resend/AWS SES, a definir) una vez que el
  * CEO provea las credenciales de una cuenta de un proveedor de email real como variable(s) de

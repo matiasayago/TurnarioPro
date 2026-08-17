@@ -546,8 +546,10 @@ profesionalesRouter.post(
           // cambie de estado, así que este es el ÚNICO momento en que se puede bloquear antes de
           // que "cuente". (El otro camino de este mismo endpoint, `cobrar_sena=true`, nace
           // 'pendiente_de_pago' y el chequeo se difiere — ver dominio/suscripciones.ts y
-          // turnos.ts/POST / para el resto de los caminos documentados, incluido uno que todavía
-          // no existe en este código.) Se salta completo si el negocio tiene Turnario Pro activo.
+          // turnos.ts/POST / para el resto de los caminos documentados. Ese camino que faltaba
+          // (2026-08-17) es `POST /webhooks/mercadopago` (src/routes/webhooks.ts) — usa la
+          // variante que DEVUELVE resultado, no la que lanza; ver el comentario ahí para el
+          // porqué.) Se salta completo si el negocio tiene Turnario Pro activo.
           if (estadoInicial === 'confirmado') {
             await exigirLimiteTurnosConfirmadosDelMes(client, servicio.negocio_id, inicioDate);
           }
