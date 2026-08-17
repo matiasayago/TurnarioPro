@@ -69,6 +69,7 @@ Siguiendo el estándar de la empresa (`docs/06-modelo-datos.md` §3):
 | **UsuarioPreferencias** (HU-32, nueva 2026-08-11) | Preferencias de privacidad de la cuenta — tabla satélite 1:1 con Usuario (visibilidad de perfil, mostrar estado en línea, compartir datos de uso con la plataforma), transversal a ambos roles. NO gateada por negocio/profesional — ver §2septies. | 1:1 Usuario |
 | **UsuarioPreferenciasNotificacion** (HU-26, nueva 2026-08-12) | Preferencias de notificación de un Usuario — 3 canales (push/email/whatsapp), 2 tipos de aviso (citas y recordatorios / promociones) y 2 de sonido/vibración, los 7 booleanos planos. Compartida Cliente/Profesional. Tabla propia, NO columnas en `UsuarioPreferencias` (HU-32, ciclo paralelo) — ver §2octies para el porqué. | 1:1 Usuario |
 | **SuscripcionNegocio** (HU-29/E11, nueva 2026-08-14) | Plan/suscripción de un Negocio — freemium por límite de uso (columnas `plan` 'gratis'/'turnario_pro', `periodo` 'mensual'/'anual' nullable si es gratis, `vencimiento`, `estado` 'activa'/'vencida'/'cancelada'). Soporte de datos para la activación SIMULADA de "Turnario Pro" (mismo criterio que `MockPagoProvider`) — sin columnas todavía para la verificación real de Google Play (deliberado, ver §2novies). | 1:1 Negocio |
+| **TokenRecuperacionPassword** (nueva 2026-08-16, pedido del CEO, prioridad alta) | Token de un solo uso para el flujo "olvidé mi contraseña" — siempre hasheado (`token_hash`, nunca en texto plano, mismo criterio que `usuario.password_hash`), con expiración corta (`expira_en`) e invalidación tras el primer uso o al pedirse uno nuevo (`usado_en`, ver §2decies). Deliberadamente SIN Row Level Security (§5octies) — es un artefacto pre-autenticación, el patrón de RLS de este esquema no aplica. | N:1 Usuario |
 
 *(Historial de visitas sigue sin ser una entidad propia: es una consulta de `Turno` filtrada por
 `cliente_id` + `profesional_id` con estado "atendido" — término conceptual, no un valor real del
@@ -977,6 +978,150 @@ fila de un negocio nuevo (agregar el INSERT a la transacción de `POST /auth/reg
 resolverlo de forma perezosa como `UsuarioPreferencias`/`Paciente`) e índice nuevo sobre `Turno`
 para el límite de 60 turnos/mes — ambos detallados en el propio `001_init.sql` y en §6.
 
+## 2decies. Recuperación de contraseña — token de un solo uso (2026-08-16)
+
+**Origen.** Pedido del CEO, prioridad alta. Verificado por grep antes de modelar (no asumido):
+hoy no existe nada de este mecanismo ni en el esquema ni en el código — `usuario` solo tiene
+`password_hash`/`google_id` para el login normal (HU-35, ver §2sexies), sin ningún mecanismo de
+reset. Alcance de esta ronda ya decidido por el Director General IA (no se reabre acá — es la
+base sobre la que Backend construye en un ciclo posterior, no implementado en este ciclo): Backend
+genera un token de un solo uso, aleatorio y criptográficamente seguro (DISTINTO del JWT normal de
+sesión, `src/auth.ts`), lo guarda SIEMPRE hasheado (nunca en texto plano — mismo criterio que
+`usuario.password_hash`), con expiración corta, invalidable tras un solo uso o al expirar.
+
+### ¿Tabla nueva o columnas en `usuario`?
+
+Tabla nueva — a diferencia de la decisión equivalente para `UsuarioPreferencias`/
+`SuscripcionNegocio` (§2septies/§2novies), acá la cardinalidad SÍ fuerza la respuesta, no es una
+decisión de estilo: un usuario puede tener 0, 1 o varios tokens a lo largo del tiempo (ver "varias
+recuperaciones seguidas" más abajo) — no es 1:1 con `Usuario`, columnas en `usuario` no podrían
+representarlo sin perder el historial de tokens previos que la propia lógica de invalidación
+necesita poder distinguir.
+
+### Nombre
+
+`token_recuperacion_password`, no `password_reset_token`: consistencia con el resto del esquema en
+español ("password" se mantiene como préstamo ya establecido en este mismo esquema — ver
+`usuario.password_hash`/`ck_usuario_password_o_google` — en vez de traducir a "contraseña", que no
+aparece en ningún otro lado del DDL). Se evaluó explícitamente el prefijo `usuario_` (mirando la
+ronda de Privacidad/Notificaciones como referencia de estilo reciente, `UsuarioPreferencias`/
+`UsuarioPreferenciasNotificacion`, §2septies/§2octies) y se descarta: ese prefijo identifica
+específicamente a la familia de tablas de PREFERENCIAS/configuración 1:1 con `Usuario` — "el
+límite explícito" que traza §2octies ("`usuario_preferencias*` sirve para preferencias PLANAS...
+sin sub-estructura ni historial propio"). Esta tabla no es una preferencia (es 1:N, no 1:1, y
+tiene un ciclo de vida con estado propio) — es un artefacto de autenticación efímero, más cerca en
+espíritu de `Turno`/`Pago`/`Notificacion` (sustantivo propio, sin anteponer el nombre de ninguna
+tabla que referencia por FK) que de esa familia.
+
+### Columnas
+
+- **`usuario_id`** (UUID, NOT NULL, FK a `usuario`) — a quién pertenece el token. Resuelto por
+  Backend ANTES del INSERT (`SELECT id FROM usuario WHERE email = ?`, lectura ya sin RLS — ver
+  §5octies), nunca provisto crudo por quien pide la recuperación.
+- **`token_hash`** (TEXT, NOT NULL, UNIQUE) — el hash del token, NUNCA el token en texto plano
+  (mismo criterio que `password_hash`). A diferencia de `password_hash` (bcrypt, pensado para una
+  contraseña de BAJA entropía elegida por una persona, donde el costo adaptativo de bcrypt es
+  precisamente lo que dificulta la fuerza bruta), se **recomienda a Backend** (no implementado
+  acá, ni impuesto por ningún CHECK — el algoritmo de hash es implementación, no esquema) un hash
+  rápido no adaptativo (ej. SHA-256) en vez de bcrypt: el token en sí ya es de ALTA entropía
+  (aleatorio, generado por el servidor, no elegido por una persona), no necesita costo
+  computacional extra para resistir fuerza bruta, y usar bcrypt igual tendría 2 costos reales sin
+  ningún beneficio — (a) CPU innecesaria en cada validación (spamear el endpoint de canje con
+  hashes inválidos forzaría el costo adaptativo de bcrypt en cada intento, un vector de DoS barato
+  que un hash rápido no abre) y (b) el límite de 72 bytes de entrada de bcrypt (no crítico para un
+  token corto, pero una limitación real que un hash rápido no tiene). `UNIQUE` cubre además, por sí
+  sola, el pedido explícito de este ciclo ("índice para que Backend pueda buscar eficientemente por
+  el hash del token al validar") — mismo patrón que `usuario.email`/`usuario.google_id` (UNIQUE
+  inline = constraint + índice a la vez, sin objeto nombrado aparte).
+- **`expira_en`** (TIMESTAMPTZ, NOT NULL, sin DEFAULT) — Backend lo calcula y lo pasa siempre
+  explícito (`now() + <TTL>`), mismo criterio que `turno.fin`/`excepcion_disponibilidad.fin` (el
+  valor nace de una regla de aplicación, no de una constante de esquema). Duración recomendada (no
+  impuesta acá — decisión de producto/seguridad de Backend, mismo criterio de "resolver en la capa
+  de aplicación" ya aplicado sistemáticamente en este documento): 15–60 minutos.
+- **`usado_en`** (TIMESTAMPTZ, nullable) — `NULL` = el token sigue vigente; con valor = ya no
+  puede usarse, desde ese momento. A propósito UNA sola columna cubre DOS motivos de invalidación
+  sin distinguir cuál fue (uso real, o supersedido por un pedido más nuevo — ver debajo): ninguna
+  HU pide diferenciarlos; si hiciera falta a futuro, es aditivo. **Se evaluó explícitamente el
+  patrón de `Notificacion.leido`** (BOOLEAN + `modificado_en` genérico, §2octies) por ser el
+  precedente más cercano del esquema (una única columna mutable sobre una fila por lo demás de
+  solo-creación) y se descarta a favor de un timestamp dedicado: a diferencia de `Notificacion`
+  (que ya se anticipaba iba a seguir sumando campos mutables a futuro), esta fila tiene un ciclo de
+  vida deliberadamente binario y cerrado (vigente → ya no vigente, para siempre) — una columna
+  dedicada es más precisa que una genérica para un hecho de auditoría de seguridad, sin pagar el
+  costo de una segunda columna redundante que siempre valdría exactamente lo mismo.
+- **`creado_en`** (TIMESTAMPTZ, DEFAULT now()) — igual que el resto del esquema.
+
+**Sin `creado_por`/`modificado_por` — pero NO por la regla de "auditoría reducida" de §1.** La
+regla de §1 (`UsuarioPreferencias` y análogas) omite esas columnas porque son 100% redundantes con
+`usuario_id`, dado que RLS GARANTIZA que el actor autenticado es el propio dueño de la fila. Acá no
+aplica esa garantía porque no hay ningún actor autenticado en NINGUNA escritura de esta tabla —
+crear el token es un pedido anónimo por email (antes de cualquier sesión) y canjearlo tampoco pasa
+por un `usuario_id` de sesión (el token en sí ES la credencial, todavía sin JWT). `creado_por`
+sería NULL el 100% de las veces, no por convención sino porque la naturaleza pre-autenticación de
+este flujo nunca provee ese dato — mismo principio que ya reconoce este esquema para
+`POST /auth/registro-cliente` sobre `usuario`. Sin `eliminado_en` (soft delete): nada referencia
+`token_recuperacion_password.id`, y el ciclo de vida ya lo captura `usado_en`.
+
+**CHECK `expira_en > creado_en`** — mismo patrón de invariante temporal que `turno.fin >
+turno.inicio`/`disponibilidad.hora_fin > hora_inicio` (2 timestamps fijados juntos en el mismo
+INSERT, deben quedar ordenados): guarda contra un bug de Backend que calculara mal el TTL y
+emitiera un token ya vencido desde su creación.
+
+### "Varias recuperaciones seguidas" — invalidar los tokens anteriores, no dejarlos expirar solos
+
+Pregunta explícita de esta ronda ("un usuario puede pedir varias recuperaciones seguidas si no le
+llegó el primer email — ¿invalidar los tokens anteriores del mismo usuario, o dejarlos expirar
+solos?"). **Decisión de DBA: invalidar los anteriores**, por 2 motivos:
+
+1. **Seguridad.** Con expiración corta pero varios pedidos seguidos dentro de esa ventana (el caso
+   concreto que motiva la pregunta: "no me llegó el mail, pido de nuevo" 2-3 veces en pocos
+   minutos), dejarlos expirar solos deja VARIOS tokens simultáneamente válidos para la misma
+   cuenta durante el resto de la ventana — más secretos vivos a la vez de los necesarios, sin
+   ningún beneficio para el caso de reenvío (que solo necesita que el ÚLTIMO link funcione).
+   Invalidar los anteriores no perjudica en nada ese reenvío legítimo: el usuario simplemente usa
+   el link más reciente que le llegó.
+2. **Se puede garantizar a nivel de base de datos, no solo como convención que Backend tiene que
+   recordar** (mismo valor que ya justifica `ck_usuario_password_o_google`/`uq_turno_slot_activo`
+   en este esquema): el índice único parcial `uq_token_recuperacion_password_usuario_pendiente`
+   sobre `(usuario_id) WHERE usado_en IS NULL` hace IMPOSIBLE que exista más de 1 fila pendiente
+   para el mismo `usuario_id`. Backend queda estructuralmente obligado a invalidar
+   (`UPDATE ... SET usado_en = now() WHERE usuario_id = ? AND usado_en IS NULL`) cualquier token
+   pendiente existente ANTES de insertar uno nuevo, en la misma transacción — si lo hace en el
+   orden equivocado, el INSERT nuevo falla por violación de unicidad (23505), mismo patrón de
+   "conflicto detectado por el motor, no solo por la aplicación" que `uq_turno_slot_activo`. Este
+   mismo índice cubre, como efecto secundario, la propia consulta de invalidación.
+
+### Recomendación para Backend (no implementada acá, fuera de alcance de DBA)
+
+- **`POST /auth/recuperar-password`** (o el nombre que se defina): 1) `SELECT id FROM usuario
+  WHERE email = $1` (sin RLS, igual que `/registro-cliente`); 2) si existe, EN LA MISMA
+  transacción, invalidar cualquier token pendiente (`UPDATE ... SET usado_en = now() WHERE
+  usuario_id = $1 AND usado_en IS NULL`) seguido del `INSERT` del token nuevo — en ese orden, por
+  el índice único parcial; 3) responder SIEMPRE el mismo mensaje genérico exista o no la cuenta
+  ("si el email existe, vas a recibir instrucciones..."), para no filtrar por timing/contenido de
+  la respuesta qué emails están registrados (user enumeration). El envío del email en sí es tarea
+  de Integraciones, no de este modelado.
+- **`POST /auth/reset-password`** (o el nombre que se defina): recibe el token en TEXTO PLANO
+  (nunca `usuario_id` — el token ES la prueba de identidad), lo hashea, y busca
+  `WHERE token_hash = $1 AND usado_en IS NULL AND expira_en > now()`. Sin fila → 400 genérico
+  ("token inválido o vencido", sin distinguir cuál de las 2 razones). Con fila: EN LA MISMA
+  transacción, `UPDATE usuario SET password_hash = ...` + `UPDATE token_recuperacion_password SET
+  usado_en = now() WHERE id = ? AND usado_en IS NULL` — el `AND usado_en IS NULL` extra en este 2do
+  UPDATE cierra la carrera de un doble submit concurrente con el mismo token (mismo espíritu que el
+  manejo de 23505 ya existente para `uq_turno_slot_activo`): si `rowCount === 0`, alguien más ya
+  canjeó este token en el medio, abortar sin aplicar el cambio de contraseña.
+- **Rate limiting** — mismo patrón que `registroLimiter`/`loginLimiter` (`src/middleware/
+  rateLimit.ts`), recomendado para ambos endpoints nuevos, en especial el de canje.
+- **Job de limpieza** (no implementado, no bloqueante): un job periódico que borre filas viejas ya
+  usadas/invalidadas o vencidas (mismo espíritu que `expirarPagosPendientes.ts`) es una mejora de
+  housekeeping razonable para un ciclo futuro, no urgente — el volumen de esta tabla es bajo por
+  diseño (a lo sumo 1 fila pendiente por usuario a la vez, por el índice único parcial).
+
+Detalle línea por línea en `05-codigo/database/migrations/001_init.sql` (bloque "Recuperación de
+contraseña — token de un solo uso") y en `008_recuperacion_password.sql` (mismo contenido, delta
+para aplicar a mano contra Render — ver §4). RLS (o, en este caso, la decisión de no habilitarla)
+en **§5octies**.
+
 ## 3. Diagrama conceptual
 
 Actualizado (2026-08-06) para reflejar la generalización N:M de §2ter: `Profesional` ya no
@@ -991,6 +1136,10 @@ acá por no existir todavía en esta rama, ver §2octies).
 
 Actualizado de nuevo (2026-08-14, §2novies) — se agrega `SuscripcionNegocio` 1:1 con `Negocio`
 (HU-29/E11).
+
+Actualizado de nuevo (2026-08-16, §2decies) — se agrega `TokenRecuperacionPassword` N:1 con
+`Usuario` (un usuario puede tener 0..N tokens a lo largo del tiempo, a diferencia de las relaciones
+1:1 de `UsuarioPreferencias`/`SuscripcionNegocio`).
 
 ```
 Usuario ──< NegocioAdministrador >── Negocio
@@ -1008,6 +1157,8 @@ Negocio ── Turno ── Usuario (cliente)
 Negocio ── SuscripcionNegocio (1:1, HU-29 — ver §2novies)
 
 Usuario ── UsuarioPreferenciasNotificacion (1:1)
+
+Usuario ──< TokenRecuperacionPassword (N:1, ver §2decies — sin RLS, ver §5octies)
 ```
 
 (`──< X >──` denota una relación N:M resuelta por la tabla de asociación `X`, con PK compuesta
@@ -1105,6 +1256,22 @@ para que Backend/DevOps lo apliquen al levantar el entorno de desarrollo.
 > cada fila. **No aplicado todavía contra Render** (mismo patrón que `005`/`006`) — pendiente de
 > que el Director General IA lo revise y lo corra, con aprobación del CEO, igual que los ciclos
 > anteriores.
+>
+> **Nota operativa (2026-08-16, DBA) — `008_recuperacion_password.sql` (recuperación de
+> contraseña, pedido del CEO, prioridad alta — ver §2decies/§5octies).** Mismo mecanismo que las
+> notas de arriba: `001_init.sql` se actualizó con la tabla `token_recuperacion_password` nueva
+> (correcto para cualquier ambiente que migre desde cero; **ambas copias sincronizadas y
+> verificadas byte-idénticas**, mismo estándar que `007`), pero no alcanza para Render — el delta
+> vive en
+> [`05-codigo/database/migrations/008_recuperacion_password.sql`](../05-codigo/database/migrations/008_recuperacion_password.sql).
+> Puramente aditivo, sin backfill (tabla nueva que nace vacía). **Diferencia respecto de los 7
+> archivos anteriores: este NO se duplica en `05-codigo/backend/migrations/`** — verificado contra
+> `backend/src/db.ts` que `runMigrations()` lee únicamente el nombre de archivo hardcodeado
+> "001_init.sql" (nunca hace glob del directorio) y confirmado que ninguno de los incrementales
+> 002–007 tiene copia ahí tampoco (ese directorio solo contiene `001_init.sql`) — es el patrón ya
+> establecido en los 5 ciclos anteriores, no una omisión de este ciclo. **No aplicado todavía
+> contra Render** (mismo patrón que `005`/`006`/`007`) — pendiente de que el Director General IA lo
+> revise y lo corra, con aprobación del CEO.
 
 ## 5. Row Level Security (Postgres, producción)
 
@@ -1628,6 +1795,88 @@ contexto RLS del administrador para que esta policy tenga un consumidor real; Mo
 pantalla correspondiente en `AdministradorShell`. Ninguno de los dos implementado en este ciclo
 (instrucción explícita: solo DBA en esta ronda, sin tocar Backend ni Mobile).
 
+## 5octies. `TokenRecuperacionPassword` — decisión de NO habilitar Row Level Security (DBA, 2026-08-16)
+
+**A diferencia de TODAS las tablas nuevas de los últimos 5 ciclos** (`paciente`/`tratamiento`/
+`nota_medica` §5ter, `usuario_preferencias` §5quater, `usuario_preferencias_notificacion`
+§5quinquies, `suscripcion_negocio` §5sexies — todas con `FORCE ROW LEVEL SECURITY` desde el primer
+commit, lección de §5bis), `TokenRecuperacionPassword` **deliberadamente no la lleva**. No es un
+olvido — es la misma conclusión, y por el mismo tipo de motivo, que ya dejó este documento para
+`Usuario` en sí (§2septies, "Conclusión sobre RLS de `usuario`"), llevada un paso más allá: acá el
+motivo no es solo "no se ha priorizado todavía" (como en `Usuario`, donde en principio SÍ podría
+tener sentido a futuro) sino que el patrón mismo de RLS de este esquema es **estructuralmente
+incompatible** con el 100% de los accesos de esta tabla.
+
+### Por qué el patrón `app.usuario_id` no aplica acá
+
+Verificado contra el código real antes de decidir (no asumido) — `current_setting('app.usuario_id',
+true)`, el mecanismo detrás de toda policy de este esquema, lo setea `withTransaction(fn, {
+usuarioId })` (`05-codigo/backend/src/db.ts`) a partir de un **actor ya autenticado**: el claim
+`sub` de un JWT, o -en un puñado de endpoints de registro que todavía no tienen JWT emitido- el
+UUID recién generado para la fila que se está por crear (`POST /auth/registro-negocio`,
+`POST /auth/registro-cliente`; ver el comentario de `ContextoRls` en `db.ts` y el de
+`POST /registro-cliente` en `src/routes/auth.ts`: "`usuario` no tiene RLS... no hace falta pasar
+por una transacción con contexto"). En TODAS las tablas con RLS de este esquema, `app.usuario_id`
+queda fijado ANTES de la primera query relevante de la transacción autenticada.
+
+`TokenRecuperacionPassword` no tiene ningún punto de su ciclo de vida donde eso sea posible:
+
+1. **Crear el token** (`POST /auth/recuperar-password`) es un pedido ANÓNIMO por email — no hay
+   sesión, no hay JWT, y el `usuario_id` involucrado ni siquiera pertenece al actor (cualquiera
+   puede escribir el email de cualquier otra persona en este formulario; la prueba de identidad
+   real la aporta después el propio email, no este paso). Mismo tipo de operación, sin contexto
+   RLS, que ya corre hoy sobre `usuario` en `POST /auth/registro-cliente`.
+2. **Canjear el token** (`POST /auth/reset-password`) tiene un problema más profundo que "no hay
+   sesión todavía": es **estructuralmente imposible** setear `app.usuario_id` antes de la lectura
+   que lo necesitaría. La consulta que resuelve a qué usuario pertenece el token es justamente
+   `SELECT ... WHERE token_hash = ?` — recién ESA consulta devuelve el `usuario_id`. Una policy
+   `usuario_id = app.usuario_id` exigiría conocer, de antemano, exactamente el valor que la propia
+   consulta todavía tiene que descubrir — una dependencia circular, no un simple "todavía no
+   conectado" como el caso de `Usuario`.
+
+### Dónde vive la protección real, si no es RLS
+
+La autorización de esta tabla no es "¿de quién es esta fila?" (el terreno que cubre RLS en el
+resto de este esquema) sino "¿quién conoce el token en texto plano?" — un hecho que la base de
+datos no puede verificar por sí sola: la comparación ocurre en la capa de aplicación (hash del
+valor recibido contra `token_hash`), estructuralmente análoga a cómo `usuario.password_hash`
+tampoco depende de RLS para protegerse en el login (`bcrypt.compareSync`, sin ninguna policy de
+por medio, ver `POST /auth/login`). La protección real de esta tabla es la combinación de: alta
+entropía del token (aleatorio, generado por el servidor) + hash irreversible + expiración corta +
+invalidación tras un solo uso + el índice único parcial
+`uq_token_recuperacion_password_usuario_pendiente` (a lo sumo 1 token vivo por usuario, ver
+§2decies) — ninguna de estas 5 capas depende de RLS.
+
+### Alternativa considerada y descartada: policy permisiva transitoria
+
+Se evaluó explícitamente replicar el patrón de `turno_select_publico` (§5bis: una policy
+`USING (true)` explícitamente transitoria, para destrabar un caso de uso que hoy no tiene otra
+vía) — y se descarta, a diferencia de aquel caso: ahí la policy permisiva convive con OTRAS
+policies más estrictas sobre la misma tabla (`turno_acceso_negocio_o_cliente`) que sí importan y
+que en algún momento la van a reemplazar. Acá NO hay ninguna policy más estricta posible que
+`TokenRecuperacionPassword` pueda aspirar a tener — el problema no es de alcance/permisos (ej.
+"quién más allá del dueño puede ver esto"), es que el mecanismo entero de RLS de este esquema
+presupone conocer al actor de antemano, y esta tabla, por diseño, existe precisamente para los
+momentos en que **todavía no se sabe quién es el actor**. Agregar `ENABLE ROW LEVEL SECURITY` con
+una policy `USING (true)` no sumaría ninguna protección real (equivalente, para el SELECT que más
+importa, a no tener RLS) y sí el riesgo de transmitir una falsa sensación de "esta tabla ya está
+defendida por RLS" a quien lea el esquema — se prefiere la honestidad de dejarlo explícitamente
+afuera y documentado, mismo criterio ya aplicado a `Usuario`.
+
+### Cuándo reabrir esta decisión
+
+Si en un ciclo futuro se agrega un endpoint AUTENTICADO que lea esta tabla (ej. "ver mis
+solicitudes de recuperación recientes" en Configuración/Seguridad — ninguna HU lo pide hoy), ese
+caso SÍ tendría `app.usuario_id` disponible en ese punto puntual y podría sumar una policy de solo
+lectura (`usuario_id = app.usuario_id`), aditiva, sin afectar el resto de este diseño ni las 2
+rutas pre-autenticación de arriba (que seguirían sin contexto RLS, igual que hoy). No es una
+decisión que quede "mal encaminada" por diseñarse así ahora — es exactamente el mismo tipo de
+extensión aditiva que ya usó este documento varias veces (ej. §5septies sobre `paciente`).
+
+Detalle línea por línea en `05-codigo/database/migrations/001_init.sql` (bloque "Recuperación de
+contraseña — token de un solo uso", sección "Row Level Security — DELIBERADAMENTE NO SE HABILITA
+en esta tabla") y en `008_recuperacion_password.sql`.
+
 ## 6. Índices críticos
 
 - `uq_turno_slot_activo` sobre `(profesional_id, inicio)` filtrado por estado activo —
@@ -1692,3 +1941,15 @@ pantalla correspondiente en `AdministradorShell`. Ninguno de los dos implementad
   - Sin índice nuevo para el otro límite de HU-29 ("1 profesional por negocio"): ya cubierto por
     la PK compuesta `(negocio_id, profesional_id)` de `negocio_profesional` (`negocio_id` es la
     columna líder), documentada más arriba en esta misma sección (actualización 2026-08-06).
+- **Nuevo 2026-08-16 (recuperación de contraseña, ver §2decies):**
+  - `UNIQUE` inline sobre `token_hash` en `token_recuperacion_password` — cubre, por igualdad
+    exacta, la consulta dominante de validación (`WHERE token_hash = ?`, resolver a qué token
+    corresponde el valor que llega en el link de reset) — el índice que pedía explícitamente esta
+    ronda ("para que Backend pueda buscar eficientemente por el hash del token al validar"), sin
+    objeto nombrado aparte (mismo patrón que `usuario.email`/`usuario.google_id`).
+  - `uq_token_recuperacion_password_usuario_pendiente` — parcial (`WHERE usado_en IS NULL`) y
+    UNIQUE sobre `usuario_id`, mismo patrón de índice parcial filtrado por estado activo que
+    `uq_turno_slot_activo`/`idx_notificacion_destinatario_no_leida`. Cubre "¿tiene este usuario un
+    token pendiente?" (la consulta de invalidación al pedir uno nuevo) Y, por ser UNIQUE, es en sí
+    mismo la garantía a nivel de base de datos de "a lo sumo 1 token pendiente por usuario" — ver
+    §2decies.
