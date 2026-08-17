@@ -271,31 +271,36 @@ class _LoginScreenState extends State<LoginScreen> {
             ),
             const SizedBox(height: AppSpacing.xl),
             TextField(controller: _emailCtrl, decoration: const InputDecoration(labelText: 'Email')),
-            const SizedBox(height: 12),
+            const SizedBox(height: AppSpacing.md),
             TextField(
               controller: _passCtrl,
               decoration: const InputDecoration(labelText: 'Contraseña'),
               obscureText: true,
             ),
-            const SizedBox(height: 24),
-            if (_error != null) Text(_error!, style: const TextStyle(color: Colors.red)),
+            const SizedBox(height: AppSpacing.xs),
+            // HU-37: reubicado para que coincida con el wireframe de referencia de esta pantalla
+            // (`04-diseno/mapa-pantallas.md` §5.17) — entre el campo de contraseña y el botón
+            // "Ingresar", alineado a la derecha, no debajo del botón. Deshabilitado durante un
+            // login en curso, mismo criterio que el resto de los controles de esta pantalla.
+            Align(
+              alignment: Alignment.centerRight,
+              child: TextButton(
+                onPressed: (_cargando || _googleCargando)
+                    ? null
+                    : () => Navigator.push(context, MaterialPageRoute(builder: (_) => const RecuperarPasswordScreen())),
+                child: const Text('¿Olvidaste tu contraseña?'),
+              ),
+            ),
+            const SizedBox(height: AppSpacing.sm),
+            if (_error != null) ...[
+              Text(_error!, style: const TextStyle(color: Colors.red)),
+              const SizedBox(height: AppSpacing.sm),
+            ],
             FilledButton(
               onPressed: (_cargando || _googleCargando) ? null : _login,
               child: _cargando ? const CircularProgressIndicator() : const Text('Ingresar'),
             ),
-            const SizedBox(height: 12),
-            // HU-37: link a la recuperación de contraseña (paso 1 de 2, `RecuperarPasswordScreen`)
-            // — cerca del botón "Ingresar" porque resuelve el mismo caso de uso (no poder entrar
-            // con la contraseña actual), antes del login con Google (flujo distinto, sin relación
-            // con "olvidé mi contraseña"). Deshabilitado durante un login en curso, mismo criterio
-            // que el resto de los controles de esta pantalla.
-            TextButton(
-              onPressed: (_cargando || _googleCargando)
-                  ? null
-                  : () => Navigator.push(context, MaterialPageRoute(builder: (_) => const RecuperarPasswordScreen())),
-              child: const Text('¿Olvidaste tu contraseña?'),
-            ),
-            const SizedBox(height: 12),
+            const SizedBox(height: AppSpacing.md),
             // HU-35 (mapa-pantallas.md §5.17): outline, con el logo de Google, debajo del botón
             // principal — mismo criterio de radio moderado (no píldora) que sistema-diseno.md
             // §7.1bis ya documenta para los botones de esta pantalla.
@@ -304,7 +309,7 @@ class _LoginScreenState extends State<LoginScreen> {
               onError: _mostrarAviso,
               onUnavailable: () => _mostrarAviso('Login con Google no está disponible en este momento'),
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: AppSpacing.xl),
             // HU-00a: único punto de entrada Mobile a `RegistroNegocioScreen` — esa pantalla vive
             // fuera de cualquier shell, pre-autenticación, igual que este login (ver su
             // doc-comment). Deshabilitado mientras hay un login en curso, mismo criterio que ya
