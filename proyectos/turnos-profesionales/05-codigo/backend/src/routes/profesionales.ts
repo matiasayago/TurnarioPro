@@ -469,9 +469,13 @@ profesionalesRouter.post(
     // servicio existe, el profesional pertenece al negocio de ese servicio (N:M,
     // modelo-datos.md §2ter) y el profesional asoció explícitamente ese servicio (RN4) — de paso
     // trae `requiere_sena`/`monto_sena`, el default que `cobrar_sena` puede overridear (RN10).
-    const servicioResult = await pool.query('SELECT negocio_id, duracion_min FROM servicio WHERE id = $1', [
-      servicio_id,
-    ]);
+    // `AND eliminado_en IS NULL` — mismo fix y mismo motivo que `POST /turnos` (turnos.ts, ver ese
+    // comentario): un servicio dado de baja (fast-follow E15, negocios.ts DELETE /:id/servicios/
+    // :servicioId) no debe poder cargarse en un turno nuevo, ni siquiera por esta vía manual.
+    const servicioResult = await pool.query(
+      'SELECT negocio_id, duracion_min FROM servicio WHERE id = $1 AND eliminado_en IS NULL',
+      [servicio_id]
+    );
     const servicio = servicioResult.rows[0] as { negocio_id: string; duracion_min: number } | undefined;
     if (!servicio) {
       return res.status(404).json({ error: 'Servicio no encontrado' });

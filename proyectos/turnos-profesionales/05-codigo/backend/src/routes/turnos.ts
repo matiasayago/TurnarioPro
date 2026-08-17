@@ -78,9 +78,16 @@ turnosRouter.post(
       profesional_id,
     ]);
     const profesional = profesionalResult.rows[0] as { id: string; usuario_id: string } | undefined;
-    const servicioResult = await pool.query('SELECT negocio_id, duracion_min FROM servicio WHERE id = $1', [
-      servicio_id,
-    ]);
+    // `AND eliminado_en IS NULL` (fast-follow E15, ver negocios.ts DELETE /:id/servicios/
+    // :servicioId): antes este SELECT no filtraba soft-delete — un servicio dado de baja por el
+    // administrador seguía siendo reservable acá si se conocía su id (aunque ya hubiera
+    // desaparecido de GET /negocios/:id/servicios, que sí filtra). Mismo 404 de abajo que ya
+    // existía para "no existe" — comportamiento externo idéntico para quien llama, sin contrato
+    // nuevo.
+    const servicioResult = await pool.query(
+      'SELECT negocio_id, duracion_min FROM servicio WHERE id = $1 AND eliminado_en IS NULL',
+      [servicio_id]
+    );
     const servicio = servicioResult.rows[0] as { negocio_id: string; duracion_min: number } | undefined;
     if (!profesional || !servicio) {
       return res.status(404).json({ error: 'Profesional o servicio no encontrado' });
