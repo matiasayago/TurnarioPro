@@ -147,6 +147,27 @@ services:
       - key: GOOGLE_CLIENT_ID
         sync: false
 
+      # MP_ACCESS_TOKEN / MP_WEBHOOK_SECRET — cobro de señas con Mercado Pago (HU-29/RN10/D2,
+      # src/routes/turnos.ts POST /:id/pago y src/routes/webhooks.ts POST /mercadopago).
+      # Instructivo completo (paso a paso para el CEO en el dashboard de Mercado Pago) en
+      # ../../08-despliegue/mercadopago.md. Mismo mecanismo exacto que GOOGLE_CLIENT_ID arriba:
+      # "sync: false" porque Render no puede generar ni resolver ningún valor para estas claves
+      # (las emite Mercado Pago, no Render) — quedan declaradas acá sin valor, pendientes de
+      # cargarse A MANO desde el dashboard del servicio una vez que el CEO tenga las credenciales
+      # reales (de PRUEBA/sandbox primero — ver el documento citado, este ciclo no pide llegar a
+      # producción todavía). A diferencia de GOOGLE_CLIENT_ID, estas SÍ son secretas
+      # (MP_ACCESS_TOKEN habilita cobrar en nombre de la cuenta de Mercado Pago conectada) —
+      # mismo nivel de cuidado que JWT_SECRET al cargarlas, aunque el mecanismo de "sync: false"
+      # en este archivo sea el mismo que el de un valor no secreto como GOOGLE_CLIENT_ID (Render
+      # no distingue eso en el Blueprint; la diferencia es de manejo humano, no de este archivo).
+      # Mientras no estén cargadas, POST /turnos/:id/pago y POST /webhooks/mercadopago responden
+      # 503 (ver ../../08-despliegue/mercadopago.md) — el resto del servicio sigue funcionando con
+      # normalidad sin esto, igual que con GOOGLE_CLIENT_ID.
+      - key: MP_ACCESS_TOKEN
+        sync: false
+      - key: MP_WEBHOOK_SECRET
+        sync: false
+
       # No se listan acá EXPIRACION_PAGO_MIN / VENTANA_CANCELACION_MIN / RATE_LIMIT_* —
       # tienen defaults de aplicación ya pensados para producción (15 min, 120 min, 10
       # intentos/15 min, ver ../../08-despliegue/README.md §3). Agregarlas acá (o a mano en

@@ -37,10 +37,20 @@ export async function expirarPagosPendientesVencidos(): Promise<number> {
       const vencidos = vencidosResult.rows as { id: string }[];
 
       for (const { id } of vencidos) {
-        await client.query("UPDATE turno SET estado = 'cancelado', modificado_en = $1 WHERE id = $2", [
-          ts,
-          id,
-        ]);
+        // Re-chequeo de `estado` EN el UPDATE (no solo en el SELECT de arriba) — agregado
+        // 2026-08-17 junto con `POST /webhooks/mercadopago` (routes/webhooks.ts): ese webhook es
+        // el primer caso en que OTRA transacción puede confirmar este mismo turno
+        // (`pendiente_de_pago` -> `confirmado`) mientras esta corrida del job ya tiene su `id` en
+        // `vencidos` (leído un instante antes, sin `FOR UPDATE`). Sin este `AND estado = ...` acá,
+        // Postgres (READ COMMITTED) re-evalúa el WHERE recién al aplicar el UPDATE, pero
+        // `WHERE id = $2` solo (sin `estado`) sigue matcheando la fila ya CONFIRMADA — este UPDATE
+        // la pisaría de vuelta a 'cancelado', borrando una confirmación de pago real. El UPDATE de
+        // `pago` de abajo ya tenía esta misma defensa (`AND estado = 'pendiente'`) desde antes;
+        // acá faltaba la simétrica.
+        await client.query(
+          "UPDATE turno SET estado = 'cancelado', modificado_en = $1 WHERE id = $2 AND estado = 'pendiente_de_pago'",
+          [ts, id]
+        );
         await client.query(
           "UPDATE pago SET estado = 'expirado' WHERE turno_id = $1 AND estado = 'pendiente'",
           [id]
