@@ -1645,3 +1645,25 @@ Dos hallazgos propios en el cierre de esta historia, ninguno de los dos "solo re
   fragilidad de entorno de CI ya conocida para este script puntual. Se usó "Re-run failed jobs"
   desde la UI de GitHub (mismo mecanismo ya usado antes en esta sesión) en vez de pushear ningún
   cambio de código — no había nada que arreglar en el repo.
+- **Lección de proceso, propia:** un push de memoria (commit `60b6677`) hecho DESPUÉS de confirmar
+  "All checks have passed" volvió a disparar el evento `pull_request: synchronize` (el filtro de
+  paths de `push` no matchea `memory/`, pero `pull_request` re-evalúa el PR completo en cada sync,
+  sin importar qué toque el commit puntual — ver la entrada anterior sobre por qué `push` y
+  `pull_request` se comportan distinto acá) y `test-rn8` volvió a fallar, esta vez en un punto
+  DISTINTO ("turno cercano #2" en vez de "turno lejano #1") — la firma clásica de flakiness no
+  determinística, no de una regresión (un bug real fallaría siempre en el mismo lugar). Segundo
+  "Re-run failed jobs", verde. Para la próxima: evitar pushear commits triviales (memoria/docs)
+  después de que un PR ya quedó en verde y lo único que falta es aprobación de merge — cada push
+  reinicia la ventana de exposición a la flakiness del CI.
+- **PR #17 mergeado** (commit `2ce4bb1` a `main`, aprobación explícita del CEO) y **desplegado a
+  Render** (aprobación explícita separada): Render no tiene auto-deploy configurado en este
+  proyecto (confirmado — los últimos 12 deploys del servicio son todos `TRIGGER: Manual`), se
+  disparó "Deploy latest commit" a mano desde el dashboard. Verificado en producción real tras el
+  build (polling de `POST /auth/recuperar-password` hasta dejar de dar 404): la respuesta es
+  exactamente `{"ok":true,"mensaje":"..."}` **sin `token_dev`** (confirma `ENABLE_DEV_ROUTES=false`
+  en Render, tal como se esperaba — el secreto nunca se filtra en el ambiente real) y
+  `POST /auth/reset-password` con un token inválido responde `400 {"error":"Token inválido o
+  vencido"}` correctamente. HU-37 queda completa: diseñada, implementada, verificada de punta a
+  punta contra Render real, mergeada y desplegada — pendiente solo el proveedor de email real
+  (bloqueante de que el flujo sirva de verdad a un usuario final, no de que el código funcione) y
+  la revisión de Security ya señalada como pendiente explícito.
