@@ -9,6 +9,7 @@ import { turnosRouter } from './routes/turnos';
 import { clientesRouter } from './routes/clientes';
 import { notificacionesRouter } from './routes/notificaciones';
 import { usuarioRouter } from './routes/usuario';
+import { webhooksRouter } from './routes/webhooks';
 import { devRouter } from './routes/dev';
 
 export function createApp() {
@@ -64,6 +65,11 @@ export function createApp() {
   app.use('/clientes', clientesRouter);
   app.use('/notificaciones', notificacionesRouter);
   app.use('/usuario', usuarioRouter);
+  // Sin `requireAuth` — lo llama el servidor de Mercado Pago, no un usuario de la app (ver
+  // src/routes/webhooks.ts, HU-29/RN10, 2026-08-17: la autenticación acá es la validación de
+  // firma, no un JWT). Montado igual que el resto de los routers, sin ningún gateo de
+  // ENABLE_DEV_ROUTES — no es un endpoint de desarrollo.
+  app.use('/webhooks', webhooksRouter);
 
   // HIGH-4 (ver 07-seguridad/informe-seguridad.md): estas rutas NO tienen autenticación propia
   // (seed de datos + preview web del flujo, para poder probar el golden path sin instalar
