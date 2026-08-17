@@ -273,6 +273,14 @@ jobs:
           ENABLE_DEV_ROUTES: "true"
           RATE_LIMIT_LOGIN_MAX: "1000"
           RATE_LIMIT_REGISTRO_MAX: "1000"
+          # HU-37: scripts/test-recuperacion-password.mjs (corre en el paso siguiente, dentro de
+          # este mismo arranque de servidor) hace ~15 requests contra /auth/recuperar-password +
+          # /auth/reset-password, que COMPARTEN recuperacionPasswordLimiter (default de la app:
+          # 10/15min) — sin este override, esa sola bateria agota el limite a mitad de camino y el
+          # resto falla con 429 en cascada (reproducido: run 31965043406, 7 verificaciones caidas
+          # desde el request #11 en adelante). Mismo criterio que RATE_LIMIT_LOGIN_MAX/
+          # RATE_LIMIT_REGISTRO_MAX de arriba.
+          RATE_LIMIT_RECUPERACION_MAX: "1000"
         run: |
           # Invocar el binario de node_modules/.bin DIRECTO, no "npx ts-node" (ver el comentario
           # largo en el paso "detener servidor" de mas abajo para la causa raiz completa) - esto
@@ -353,6 +361,7 @@ jobs:
           ENABLE_DEV_ROUTES: "true"
           RATE_LIMIT_LOGIN_MAX: "1000"
           RATE_LIMIT_REGISTRO_MAX: "1000"
+          RATE_LIMIT_RECUPERACION_MAX: "1000"
         run: |
           # Mismo motivo que en "Fase 1/2 - arrancar servidor": binario directo, no "npx".
           node_modules/.bin/ts-node --transpile-only src/index.ts > server-fase2.log 2>&1 &

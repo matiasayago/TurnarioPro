@@ -6,6 +6,7 @@ import '../theme/app_radius.dart';
 import '../theme/app_spacing.dart';
 import '../widgets/google_sign_in_button.dart';
 import '../widgets/selector_negocio.dart';
+import 'recuperar_password_screen.dart';
 
 /// HU-01: login de cliente o profesional. El registro de negocio/administrador (HU-00a) y el
 /// registro de cliente (HU-01) se resuelven con pantallas propias no incluidas en este slice
@@ -15,6 +16,12 @@ import '../widgets/selector_negocio.dart';
 /// ofrece "Iniciar sesión con Google" (wireframe en `04-diseno/mapa-pantallas.md` §5.17) — ver
 /// [_iniciarConGoogle] y [_pedirPasswordParaVincular] para el flujo completo contra
 /// `POST /auth/google` / `POST /auth/login` (contrato real en `src/routes/auth.ts`).
+///
+/// HU-37 (`02-backlog/backlog.md`, extiende HU-01/HU-35): link "¿Olvidaste tu contraseña?" entre
+/// el botón "Ingresar" y el botón de Google (ver [build]) — empuja `RecuperarPasswordScreen`,
+/// paso 1 de 2 del flujo de recuperación; el paso 2 (`CanjearTokenPasswordScreen`) se alcanza
+/// desde ahí, nunca directo desde este login. Pantalla pre-autenticación, fuera de cualquier
+/// shell, empujada con `Navigator.push` (no reemplaza este login).
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
 
@@ -260,6 +267,18 @@ class _LoginScreenState extends State<LoginScreen> {
             FilledButton(
               onPressed: (_cargando || _googleCargando) ? null : _login,
               child: _cargando ? const CircularProgressIndicator() : const Text('Ingresar'),
+            ),
+            const SizedBox(height: 12),
+            // HU-37: link a la recuperación de contraseña (paso 1 de 2, `RecuperarPasswordScreen`)
+            // — cerca del botón "Ingresar" porque resuelve el mismo caso de uso (no poder entrar
+            // con la contraseña actual), antes del login con Google (flujo distinto, sin relación
+            // con "olvidé mi contraseña"). Deshabilitado durante un login en curso, mismo criterio
+            // que el resto de los controles de esta pantalla.
+            TextButton(
+              onPressed: (_cargando || _googleCargando)
+                  ? null
+                  : () => Navigator.push(context, MaterialPageRoute(builder: (_) => const RecuperarPasswordScreen())),
+              child: const Text('¿Olvidaste tu contraseña?'),
             ),
             const SizedBox(height: 12),
             // HU-35 (mapa-pantallas.md §5.17): outline, con el logo de Google, debajo del botón

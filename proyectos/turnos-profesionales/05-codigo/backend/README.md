@@ -48,7 +48,7 @@ prueba de concurrencia desde la UI, sin instalar Flutter.
 
 - Auth: registro de negocio+administrador, registro de cliente, login (JWT con
   `rol`/`negocio_id`/`profesional_id`), login/registro con Google (HU-35 — ver sección dedicada
-  más abajo).
+  más abajo), recuperación de contraseña (HU-37 — ver sección dedicada más abajo).
 - Negocios: alta, listado público, alta de servicios y profesionales (RN9 — scoping por
   `negocio_id` del JWT, nunca por parámetro).
 - Profesionales: asociar servicio con seña configurable (D2/RN10), disponibilidad,
@@ -341,6 +341,61 @@ que sigue funcionando exactamente igual, sin cambios, para quien no usa Google.
 No probado end-to-end: todavía no existe un `GOOGLE_CLIENT_ID` real (DevOps está resolviendo el
 alta de credenciales OAuth en Google Cloud Console, ver backlog.md HU-35). Verificado con
 `npx tsc --noEmit` (sin errores).
+
+## Recuperación de contraseña (HU-37)
+
+Ver `../../02-backlog/backlog.md` (HU-37, épica E4) para los criterios de aceptación completos
+aprobados por el CEO, y `../../03-arquitectura/modelo-datos.md` §2decies/§5octies (DBA) para el
+modelado de `token_recuperacion_password` y por qué esa tabla deliberadamente NO tiene Row Level
+Security. Flujo funcional en 2 pasos, sin deep-linking (no hay deep-linking configurado en el
+proyecto): el usuario pide la recuperación por email, recibe un token, y lo copia/pega junto con
+la nueva contraseña en una segunda pantalla — el token es la ÚNICA prueba de identidad de ese
+segundo paso.
+
+- **`POST /auth/recuperar-password`** — body `{ "email": string }`. Genera un token de un solo
+  uso, aleatorio (`crypto.randomBytes(32)`) y de un solo uso, lo guarda hasheado (SHA-256, no
+  bcrypt — el token ya es de alta entropía, no necesita costo adaptativo) con expiración de 30
+  minutos (`RECUPERACION_PASSWORD_TTL_MIN`, configurable solo para pruebas). Invalida cualquier
+  token pendiente anterior del mismo usuario antes de insertar el nuevo (a lo sumo 1 token
+  pendiente por usuario, garantizado por un índice único parcial). "Envía" el email vía
+  `EmailProvider` (`src/integraciones/email.ts` — interfaz + `MockEmailProvider`, mismo patrón que
+  `pagos.ts`; el envío real queda pendiente de que el CEO provea una cuenta de un proveedor real,
+  SendGrid/Resend/AWS SES).
+  - **Respuesta siempre `200` con el mismo mensaje genérico** (`{ "ok": true, "mensaje": "Si el
+    email está registrado, vas a recibir instrucciones para recuperar tu contraseña." }`), exista
+    o no la cuenta, y también si la cuenta existe pero fue dada de alta 100% por Google
+    (`password_hash IS NULL`, HU-35 — no tiene contraseña que restablecer). Mitigación de
+    enumeración de usuarios — pendiente de validación de Security (criterio explícito de HU-37).
+  - **Solo con `ENABLE_DEV_ROUTES=true`** (mismo gate que `src/routes/dev.ts`), y solo cuando sí
+    se generó un token, la respuesta suma `token_dev` (el token en texto plano) — no hay
+    proveedor de email real todavía; es la forma de poder probar el flujo de punta a punta en
+    desarrollo, además del log que emite `MockEmailProvider` bajo el mismo gate. Nunca presente en
+    producción (`ENABLE_DEV_ROUTES` queda en `false` en Render, ver `render.yaml`).
+  - `400` si falta `email`.
+- **`POST /auth/reset-password`** — body `{ "token": string, "password": string }` (nunca
+  `usuario_id` ni `email` — el token es la única prueba de identidad). `password` se valida con la
+  misma política mínima del resto del proyecto (`passwordSchema`, 8 caracteres). Busca el hash del
+  token recibido, exige que exista, no esté usado y no haya expirado; si no, `400 { "error":
+  "Token inválido o vencido" }` (mismo mensaje para "nunca existió"/"vencido"/"ya usado", sin
+  distinguir cuál). Si es válido, actualiza `usuario.password_hash` (bcrypt, igual que
+  login/registro) y marca el token usado en la misma transacción — si una carrera de doble-submit
+  hace que otro request ya lo haya canjeado en el medio, aborta sin aplicar el cambio de
+  contraseña y responde el mismo `400`.
+- Ambos endpoints comparten un rate limiter dedicado (`recuperacionPasswordLimiter`,
+  `src/middleware/rateLimit.ts`, configurable vía `RATE_LIMIT_RECUPERACION_MAX`/
+  `RATE_LIMIT_RECUPERACION_WINDOW_MIN`) — no reusa `loginLimiter` (que solo cuenta intentos
+  fallidos y por eso no protegería `/recuperar-password`, que siempre responde `200`).
+
+Verificado de punta a punta contra un Postgres real (instancia local efímera, ver
+`memory/proyectos/turnos-profesionales/decisiones.md`): `npx tsc --noEmit` limpio y
+`scripts/test-recuperacion-password.mjs` corrido en verde (caso feliz, token de un solo uso,
+no-enumeración para email inexistente y cuenta 100%-Google, invalidación de tokens anteriores,
+password inválida, token vencido, token con formato inválido, campos faltantes), más la batería
+de regresión existente (`smoke-test.mjs`, `test-validaciones-campos.mjs`,
+`test-autorizacion-cruzada.mjs`) sin fallos. **Pendiente:** proveedor de email real (bloqueante de
+lanzamiento, no de desarrollo — ver nota operativa en `02-backlog/backlog.md`), pantallas Mobile
+("Olvidé mi contraseña"/"Nueva contraseña", sin wireframe todavía) y aplicar
+`../database/migrations/008_recuperacion_password.sql` contra Render.
 
 ## Notificaciones — bandeja + configuración granular (HU-14b/HU-25/HU-26)
 
