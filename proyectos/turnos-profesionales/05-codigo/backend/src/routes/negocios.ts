@@ -124,6 +124,20 @@ const reportesNegocioQuerySchema = z.object({
   profesional_id: uuidSchema.optional(),
 });
 
+// HU-00b (fast-follow, 2026-08-18) — pedido explícito del CEO: el cliente busca negocios por el
+// NOMBRE DEL SERVICIO que ofrecen (ej. "Corte de pelo"), no solo navegando negocio por negocio.
+// Filtro opcional de GET / (más abajo) — confirmado que hoy no existe ningún filtro por servicio
+// en ningún endpoint de este archivo. `servicio` opcional (sin él, GET / se comporta IDÉNTICO al
+// contrato ya existente — Mobile lo sigue llamando sin params en varios lugares, ej.
+// buscar_negocios_screen.dart, configuracion_cliente_screen.dart, configuracion_screen.dart y
+// ficha_paciente_screen.dart, ninguno de los 4 se toca). `.trim()` normaliza espacios de borde;
+// junto con el `if (servicio)` del handler (string vacío es falsy en JS) hace que un valor vacío
+// o solo espacios se trate igual que "sin filtro" en vez de armar un `ILIKE '%  %'` contra la
+// base — mismo criterio pedido explícitamente para este cambio.
+const buscarNegociosQuerySchema = z.object({
+  servicio: z.string().trim().optional(),
+});
+
 // HU-00b: cliente descubre negocios (RN9 — no se filtra por negocio_id porque es cross-tenant
 // por diseño). Público — pool.query directo, sin transacción ni contexto RLS.
 //
@@ -140,12 +154,38 @@ const reportesNegocioQuerySchema = z.object({
 // de UX/Mobile decide mostrar el logo en las cards del listado, alcanza con sumar `logo_url`
 // puntualmente acá — no hace falta repetir este razonamiento para los otros 3, que siguen sin
 // encajar en una vista de lista.
+//
+// `?servicio=<texto>` (fast-follow, 2026-08-18, ver `buscarNegociosQuerySchema` más arriba) —
+// filtra a los negocios que tengan al menos un servicio ACTIVO (`servicio.eliminado_en IS
+// NULL`, mismo criterio que ya aplica GET /:id/servicios más abajo) cuyo `nombre` matchee por
+// substring case-insensitive (`ILIKE '%' || $1 || '%'` — sin precedente de `ILIKE` en el resto
+// del backend, así que este es el primer uso; queda como referencia de estilo para el próximo).
+// `DISTINCT` (no un `GROUP BY`/agregación) porque el único objetivo del JOIN es filtrar, no
+// traer ninguna columna de `servicio` — un negocio con 2+ servicios que matchean (ej. "Corte de
+// pelo" y "Corte de barba") debe aparecer UNA sola vez, mismo shape de fila que ya devuelve el
+// listado sin filtro. Sin `servicio` (u omitido, vacío, o solo espacios — ver `.trim()` del
+// schema): comportamiento IDÉNTICO al que ya existía, misma query de siempre, para no romper a
+// Mobile (varios lugares llaman este endpoint sin params, ver el comentario del schema).
 negociosRouter.get(
   '/',
-  asyncHandler(async (_req, res) => {
-    const result = await pool.query(
-      'SELECT id, nombre, rubro, ubicacion, es_rubro_salud FROM negocio WHERE eliminado_en IS NULL'
-    );
+  asyncHandler(async (req, res) => {
+    const queryParsed = buscarNegociosQuerySchema.safeParse(req.query);
+    if (!queryParsed.success) return respuestaValidacionFallida(res, queryParsed.error);
+    const { servicio } = queryParsed.data;
+
+    const result = servicio
+      ? await pool.query(
+          `SELECT DISTINCT n.id, n.nombre, n.rubro, n.ubicacion, n.es_rubro_salud
+           FROM negocio n
+           JOIN servicio s ON s.negocio_id = n.id
+           WHERE n.eliminado_en IS NULL
+             AND s.eliminado_en IS NULL
+             AND s.nombre ILIKE '%' || $1 || '%'`,
+          [servicio]
+        )
+      : await pool.query(
+          'SELECT id, nombre, rubro, ubicacion, es_rubro_salud FROM negocio WHERE eliminado_en IS NULL'
+        );
     res.json(result.rows);
   })
 );

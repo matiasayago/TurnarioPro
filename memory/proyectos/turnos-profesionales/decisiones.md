@@ -2235,3 +2235,105 @@ se tocó Backend ni DBA.
     `lib/screens/login_screen.dart` modificado).
 - No se tocó Backend ni DBA (el endpoint ya estaba completo y en producción) ni el resto de
   `login_screen.dart` más allá de agregar el link nuevo al final.
+
+## Notificaciones y Configuración del lado Cliente — Mobile (2026-08-18)
+
+Cerraba los 2 últimos tabs de `ClienteShell` que seguían como `ProximamenteScreen` desde que se
+construyó ese shell: Notificaciones y Configuración. Ninguno de los dos necesitó cambios de
+Backend ni DBA — el backend de notificaciones (`routes/notificaciones.ts`) ya es genérico por rol
+(`requireAuth()` sin restricción, en los 5 endpoints) y `usuario.ts` documenta él mismo
+`/usuario/perfil`/`/usuario/privacidad` como "transversal a cualquier rol autenticado
+(cliente/profesional/administrador)".
+
+- **Notificaciones: reusa `NotificacionesScreen` (`screens/profesional/notificaciones_screen.dart`)
+  TAL CUAL**, import cross-carpeta — mismo criterio que ya usa esta app para
+  `ConfiguracionConsultorioScreen` (compartida entre Profesional y Administrador,
+  `administrador_shell.dart`). Confirmado leyendo el archivo completo: no tiene ninguna referencia
+  a rol adentro, solo consume los 3 endpoints genéricos de arriba — cero riesgo de mostrarle a un
+  cliente algo pensado para Profesional.
+- **`lib/screens/cliente/configuracion_cliente_screen.dart` (nuevo)** — mismo patrón visual exacto
+  que `ConfiguracionScreen` (Profesional): `_PerfilHeader`/`_MenuSection`/`_MenuTile`/
+  `_SelectorTema` duplicados en el archivo nuevo en vez de compartidos, mismo criterio que ya usa
+  el resto de la app para estas pantallas de menú (esos 2 widgets ya estaban triplicados entre
+  `profesional/configuracion_screen.dart` y `administrador/administrador_shell.dart` antes de esta
+  ronda). Diferencias intencionales contra la versión Profesional, todas documentadas en el
+  doc-comment de la clase:
+  - Sin los callbacks `onIrAHorarios`/`onIrAPacientes` (no hay pestañas equivalentes en
+    `ClienteShell`) ni las secciones "Panel Profesional" y "Pagos y Señas" (ningún cliente
+    gestiona un negocio propio).
+  - **Se sacó el ítem "Turnario Pro · Suscripción" por completo (ni siquiera como
+    `ProximamenteScreen`)** — a diferencia de "Idioma", que sí se mantuvo como placeholder por ser
+    un ajuste genérico de app que algún día va a aplicar a cualquier rol. Turnario Pro es,
+    estructuralmente, la suscripción de UN NEGOCIO (`GET/POST /negocios/:id/plan|suscripcion`,
+    `requireAuth('administrador', 'profesional')`, ver `administrador/turnario_pro_screen.dart`;
+    del lado Administrador vive en la sección "Mi negocio", no en "Cuenta") atada a `negocio_id` —
+    una sesión Cliente nunca tiene `negocio_id` (`Sesion.negocioId` solo se resuelve para
+    profesional/administrador). Mostrarlo igual como "Próximamente" hubiera prometido una función
+    que esta cuenta nunca va a poder usar.
+  - Header (`_PerfilHeader`) con "Cliente" fijo en vez de "Profesional", SIN el `FutureBuilder` de
+    rubro de negocio (`GET /negocios` + buscar el propio `negocioId`) — por eso alcanza con
+    `StatelessWidget`, a diferencia del `StatefulWidget` que sí necesita la versión Profesional.
+- **Hallazgo al confirmar `EditarPerfilScreen`/`PrivacidadScreen`/`AyudaSoporteScreen`/
+  `AcercaDeScreen` (pedido explícito de la consigna, no asumir sin revisar):** las primeras 2 son
+  100% genéricas (reusadas tal cual, `editar_perfil_screen.dart`/`privacidad_screen.dart`, mismo
+  import cross-carpeta) pero **`AyudaSoporteScreen` y `AcercaDeScreen` sí tenían contenido
+  hardcodeado específico de Profesional** pese a no tener ninguna rama de lógica por rol:
+  - `AyudaSoporteScreen`: 3 de sus 4 FAQ apuntaban a ítems que solo existen en el menú de
+    Profesional ("Configurar Disponibilidad", "Configuración de Pagos" con activación de seña,
+    "Reportes y Estadísticas... dentro de Panel Profesional") — nada de eso existe en el menú de
+    Cliente de arriba.
+  - `AcercaDeScreen`: la bajada fija decía "Gestioná turnos, **pacientes** y tu **agenda
+    profesional**..." — un cliente no gestiona pacientes ni una agenda propia, reserva turnos con
+    profesionales de terceros.
+  - **Resuelto creando copias propias** (`ayuda_soporte_cliente_screen.dart`/
+    `acerca_de_cliente_screen.dart`, mismo armado visual — `_sectionCard`/`_FaqItem` duplicados
+    igual que el resto de esta app) en vez de (a) reusar tal cual con contenido incorrecto para el
+    rol, o (b) meterle una rama de rol adentro de los archivos de Profesional ya aprobados: se
+    prefirió NO tocar ningún archivo de `profesional/` para este hallazgo, cero riesgo de
+    regresión sobre pantallas ya entregadas. Las 4 FAQ nuevas de Cliente se verificaron contra el
+    código real (`buscar_negocios_screen.dart`/`mis_turnos_screen.dart`) para no inventar
+    funcionalidad: reservar turno (tab Buscar), editar perfil, cancelar/reprogramar turno (botones
+    reales de "Mis Turnos"), ver estado de turnos. La bajada de "Acerca de" pasó a "Reservá turnos
+    con tus profesionales de confianza desde un solo lugar."; nombre de app/ícono/versión
+    (`0.1.0`, igual que `pubspec.yaml`) quedaron iguales.
+  - "Notificaciones" (ítem de Cuenta) SÍ apunta directo a `ConfiguracionNotificacionesScreen`
+    (`profesional/configuracion_notificaciones_screen.dart`) tal cual, sin copia — mismo motivo que
+    `NotificacionesScreen`: 100% genérica, sin contenido de rol adentro.
+- **`cliente_shell.dart`**: los 2 `ProximamenteScreen` se reemplazaron por `NotificacionesScreen()`/
+  `ConfiguracionClienteScreen()` en la lista `screens`, y se reescribió el doc-comment de la clase
+  (ya no era cierto que ambos tabs quedaban como placeholder).
+- **`flutter analyze` limpio** — único hallazgo, el mismo `info` preexistente y ajeno a este cambio
+  (`prefer_const_constructors`, `dashboard_screen.dart:383`).
+- **Verificado de punta a punta contra Render real**, backend local propio en el puerto 3002
+  (`DATABASE_SSL=true`, `ENABLE_DEV_ROUTES=true` para las cabeceras CORS que necesita un cliente
+  web servido desde otro origen, `DATABASE_URL`/`JWT_SECRET` del `.env` ya existente en
+  `05-codigo/backend/`), sin tocar ningún proceso ajeno (nada más estaba escuchando en 3002/8092 al
+  arrancar):
+  - Smoke test con `curl` contra `POST /auth/registro-cliente` (cliente nuevo) y contra
+    `GET /notificaciones`, `GET /usuario/perfil`, `GET /usuario/privacidad`,
+    `GET /notificaciones/configuracion` con el token resultante — los 4 devuelven 200 con el shape
+    esperado para rol `cliente` antes de tocar el navegador.
+  - **Verificación visual e interactiva en un navegador real** (Chrome headless vía Puppeteer,
+    instalado aparte en el directorio de scratchpad — no se agregó como dependencia del proyecto;
+    viewport 390x844), sirviendo `flutter build web` con un override temporal de
+    `ApiClient.baseUrl` en `main.dart` (revertido al terminar, `git diff` confirmado en cero)
+    contra ese backend local: login con el cliente recién registrado; tab Notificaciones carga
+    ("Todavía no tenés notificaciones.", sin error, para una cuenta nueva sin notificaciones); el
+    ícono ⚙ de esa pantalla Y el ítem "Notificaciones" del menú de Configuración abren la misma
+    `ConfiguracionNotificacionesScreen` con datos reales (Push/Email/WhatsApp, Citas y
+    recordatorios, Promociones, Sonido/Vibración); tab Configuración muestra el header "Cliente"
+    (sin rubro), las secciones "Cuenta"/"Aplicación" completas y SIN "Panel Profesional" ni "Pagos
+    y Señas" ni "Turnario Pro · Suscripción"; "Editar Perfil" (nombre/email de solo lectura/
+    teléfono reales), "Privacidad y Seguridad" (radio + 2 switches reales) y las 2 pantallas
+    nuevas "Ayuda y Soporte"/"Acerca de" (contenido adaptado a Cliente, confirmado en pantalla)
+    navegan sin errores; el selector de Tema cambia Claro/Oscuro al instante; "Cerrar Sesión"
+    vuelve al login limpio.
+  - Backend local, servidor estático y Chrome headless dados de baja, `build/web` borrado
+    (gitignorado igual) al cerrar la ronda — `git status` confirma que el working tree de Mobile
+    solo tiene los archivos reales de este cambio (`lib/screens/cliente/cliente_shell.dart`
+    modificado; `configuracion_cliente_screen.dart`, `ayuda_soporte_cliente_screen.dart`,
+    `acerca_de_cliente_screen.dart` nuevos).
+- No se tocó Backend ni DBA, ni ningún archivo de `screens/profesional/` (`configuracion_screen.dart`
+  incluido, instrucción explícita — pero tampoco `notificaciones_screen.dart`,
+  `editar_perfil_screen.dart`, `privacidad_screen.dart`, `configuracion_notificaciones_screen.dart`,
+  `ayuda_soporte_screen.dart` ni `acerca_de_screen.dart`).
