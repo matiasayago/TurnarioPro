@@ -8,14 +8,15 @@ import '../theme/app_typography.dart';
 import '../widgets/google_sign_in_button.dart';
 import '../widgets/selector_negocio.dart';
 import 'recuperar_password_screen.dart';
-import 'registro_cliente_screen.dart';
-import 'registro_negocio_screen.dart';
+import 'registro_selector_screen.dart';
 
-/// HU-01: login de cliente o profesional, con links al pie a las 2 pantallas de alta
-/// pre-autenticación (ver [build]): el registro de negocio/administrador (HU-00a,
-/// `registro_negocio_screen.dart`) y el registro de cliente (HU-01, `registro_cliente_screen.dart`
-/// — hasta esta ronda, un cliente nuevo solo podía entrar con el botón "Iniciar sesión con
-/// Google" de más abajo, sin ningún formulario de alta con email/contraseña propio).
+/// HU-01: login de cliente o profesional, con un único link al pie ("¿Todavía no tenés cuenta?
+/// Registrate", ver [build]) a `RegistroSelectorScreen` — paso intermedio donde el usuario elige
+/// entre el registro de negocio/administrador (HU-00a, `registro_negocio_screen.dart`) y el
+/// registro de cliente (HU-01, `registro_cliente_screen.dart`; hasta esa historia, un cliente
+/// nuevo solo podía entrar con el botón "Iniciar sesión con Google" de más abajo, sin ningún
+/// formulario de alta con email/contraseña propio). Antes de esta ronda había 2 links separados
+/// acá mismo, uno por formulario — unificados en 1 solo para simplificar esta pantalla.
 ///
 /// HU-35 (`02-backlog/backlog.md`): además del login por contraseña de abajo, esta pantalla
 /// ofrece "Iniciar sesión con Google" (wireframe en `04-diseno/mapa-pantallas.md` §5.17) — ver
@@ -230,7 +231,6 @@ class _LoginScreenState extends State<LoginScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Turnos Profesionales')),
       body: Padding(
         padding: const EdgeInsets.all(24),
         child: Column(
@@ -312,28 +312,17 @@ class _LoginScreenState extends State<LoginScreen> {
               onUnavailable: () => _mostrarAviso('Login con Google no está disponible en este momento'),
             ),
             const SizedBox(height: AppSpacing.xl),
-            // HU-00a: único punto de entrada Mobile a `RegistroNegocioScreen` — esa pantalla vive
-            // fuera de cualquier shell, pre-autenticación, igual que este login (ver su
-            // doc-comment). Deshabilitado mientras hay un login en curso, mismo criterio que ya
+            // HU-00a/HU-01: único punto de entrada Mobile al alta pre-autenticación — antes había
+            // 2 links acá (uno a `RegistroNegocioScreen`, otro a `RegistroClienteScreen`),
+            // unificados en 1 solo que deriva la elección a `RegistroSelectorScreen` (ver su
+            // doc-comment). Esa pantalla vive fuera de cualquier shell, pre-autenticación, igual
+            // que este login. Deshabilitado mientras hay un login en curso, mismo criterio que ya
             // usa el botón "Ingresar" de arriba.
             TextButton(
               onPressed: (_cargando || _googleCargando)
                   ? null
-                  : () => Navigator.push(context, MaterialPageRoute(builder: (_) => const RegistroNegocioScreen())),
-              child: const Text('¿Todavía no tenés tu negocio en la app? Registralo'),
-            ),
-            const SizedBox(height: AppSpacing.md),
-            // HU-01: único punto de entrada Mobile a `RegistroClienteScreen` — agregado DESPUÉS
-            // del link de negocio de arriba a propósito, sin reordenar ni tocar nada de lo que ya
-            // existía (el espaciado de esta pantalla está validado contra una imagen de referencia
-            // del CEO). Mismo criterio que ese link (pantalla fuera de cualquier shell,
-            // pre-autenticación, ver su doc-comment) — el texto distingue explícitamente "cliente"
-            // para que no se confunda con el link de arriba y termine en el alta de negocio.
-            TextButton(
-              onPressed: (_cargando || _googleCargando)
-                  ? null
-                  : () => Navigator.push(context, MaterialPageRoute(builder: (_) => const RegistroClienteScreen())),
-              child: const Text('¿Sos cliente y todavía no tenés cuenta? Registrate'),
+                  : () => Navigator.push(context, MaterialPageRoute(builder: (_) => const RegistroSelectorScreen())),
+              child: const Text('¿Todavía no tenés cuenta? Registrate'),
             ),
           ],
         ),
