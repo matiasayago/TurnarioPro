@@ -2157,3 +2157,81 @@ cargados con un valor fuera de este catálogo).
     compartido (Backend/Mobile de HU-31 y E15, ninguno tocado).
 - No se tocó Backend ni DBA, ni `es_rubro_salud` (columna totalmente independiente de `rubro`, no
   editable desde ninguna de las 2 pantallas), ni se aplicó ninguna migración.
+
+## HU-01 — Pantalla de registro de cliente (alta por email/contraseña) — Mobile (2026-08-17)
+
+Cerraba el gap más grande que quedaba del lado Cliente: hasta esta ronda, un cliente nuevo solo
+podía entrar con el botón "Iniciar sesión con Google" del login (HU-35) — no existía ningún
+formulario de alta con email/contraseña para clientes, a diferencia de los negocios (HU-00a,
+`registro_negocio_screen.dart`). El backend (`POST /auth/registro-cliente`,
+`../backend/src/routes/auth.ts`) ya estaba completo y en producción desde antes de esta ronda; no
+se tocó Backend ni DBA.
+
+- **`lib/screens/registro_cliente_screen.dart` (nuevo)** — mismo patrón exacto que
+  `RegistroNegocioScreen` (mismo `AppHeader`, mismo manejo del 409, misma validación client-side de
+  contraseña ≥8 caracteres antes del viaje de red con el mismo mensaje que el backend, mismo
+  `sesion.iniciarSesion(...)` + `Navigator.popUntil((route) => route.isFirst)` al terminar — la
+  respuesta de este endpoint tampoco trae nunca `negocios`, mismo motivo que la de negocio), mucho
+  más simple: un único formulario/sección ("Tus datos") con 3 campos — Nombre, Email, Contraseña —
+  en vez de las 2 secciones separadas de la pantalla de negocio. Header "Crear tu Cuenta" (emoji
+  📝, mismo que el de negocio, por ser también una pantalla de alta), botón de footer "Crear
+  Cuenta".
+- **`lib/screens/login_screen.dart`** — se agregó un segundo link al pie, DESPUÉS del ya existente
+  de negocio ("¿Todavía no tenés tu negocio en la app? Registralo"), separado de ese por
+  `AppSpacing.md` (12dp, mismo criterio de espaciado "chico entre elementos relacionados" que ya
+  usa el resto de la pantalla) sin tocar el `AppSpacing.xl` que separa el botón de Google del
+  primer link ni reordenar/modificar ningún otro elemento ya existente arriba (espaciado validado
+  en una ronda anterior contra una imagen de referencia del CEO). Texto final: **"¿Sos cliente y
+  todavía no tenés cuenta? Registrate"** — se sumó "todavía" al texto sugerido en la consigna para
+  que sonara a la misma voz que el link de negocio ("¿Todavía no tenés..."), manteniendo "cliente"
+  explícito en la primera palabra para que quede inconfundible con ese otro link (un cliente no
+  puede terminar por error en el alta de negocio). Se actualizó también el doc-comment de la clase,
+  que hasta ahora documentaba el registro de cliente como gap pendiente.
+- **`flutter analyze` limpio** — único hallazgo, el mismo `info` preexistente y ajeno a este cambio
+  (`prefer_const_constructors`, `dashboard_screen.dart:383`).
+- **Verificado de punta a punta contra Render real**, backend local propio en el puerto 3002
+  (`DATABASE_SSL=true`, `.env` con el `DATABASE_URL` de Render, `ENABLE_DEV_ROUTES=true` solo para
+  las cabeceras CORS que necesita un cliente web servido desde otro origen — ver `src/app.ts`),
+  sin tocar el proceso ajeno que ya estaba corriendo en el puerto 3000:
+  - Smoke test directo con `curl` contra `/auth/registro-cliente` (201 alta nueva, 409 email
+    duplicado, 400 contraseña corta con el mensaje exacto) antes de tocar Mobile, para confirmar
+    el contrato documentado en la consigna.
+  - **4 widget tests temporales con HTTP real** (`test/verificacion_registro_cliente_temporal_test.dart`,
+    borrado al cerrar la ronda — mismo mecanismo ya usado en rondas anteriores de este archivo:
+    pisar `HttpOverrides.global`): login muestra los 2 links y el nuevo navega a
+    `RegistroClienteScreen`; contraseña corta valida client-side sin request; alta exitosa termina
+    con `Sesion.autenticado`/`rol`/`email` reflejando el JWT real que devolvió Render; email ya
+    registrado responde 409 con el mensaje esperado. **2 hallazgos de la herramienta, no de la
+    app, documentados para reutilizar en próximas rondas:** (1) `HttpOverrides.global` hay que
+    asignarlo dentro de `setUp()` (antes de CADA test), no una sola vez arriba de todo —
+    `TestWidgetsFlutterBinding` instala su propio override recién cuando arranca a correr el
+    primer test, después de que termina de registrarse toda la suite, y pisa cualquier asignación
+    previa (mensaje real visto en la primera corrida: "all HTTP requests will return status code
+    400, and no network request will actually be made"); (2) un `tap()` que dispara una request
+    real hecho AFUERA de `tester.runAsync`, con una espera real recién DESPUÉS, no alcanza para
+    que esa request progrese (queda atada a la zona fake-async en la que nació, confirmado
+    reproduciendo el bloqueo y comparando contra la corrección) — hay que envolver el `tap()` y la
+    espera JUNTOS dentro del mismo `runAsync`. Por el mismo motivo de fondo se evitó pumpear hasta
+    `ClienteShell` dentro del test de alta exitosa (`BuscarNegociosScreen` dispara su propio fetch
+    real que queda con un timer pendiente para siempre y el binding rechaza cerrar el test con un
+    timer real pendiente) — esa confirmación puntual se hizo aparte, con el navegador real.
+  - **Verificación visual e interactiva en un navegador real** (Chrome headless vía Puppeteer,
+    instalado aparte en el directorio de scratchpad — no se agregó como dependencia del proyecto;
+    viewport 390x844, un tamaño de teléfono realista: el canvas por default de `flutter_test`,
+    800x600, no alcanza a mostrar todo el login sin overflow, artefacto del harness sin relación
+    con ningún problema real de la pantalla), sirviendo `flutter build web` con un override
+    temporal de `ApiClient.baseUrl` en `main.dart` (revertido al terminar, `git diff` confirmado en
+    cero) contra ese mismo backend local: el login se ve exactamente igual que antes arriba del
+    nuevo link (sin overflow, con margen de sobra debajo en un viewport realista), los 2 links
+    quedan uno debajo del otro con espaciado proporcionado; clic real sobre el link nuevo navega a
+    `RegistroClienteScreen`; formulario completado y enviado con clics y tipeo reales termina en
+    `ClienteShell` (pestaña "Buscar", listando negocios reales de la base de Render); reintentar
+    con un email ya registrado muestra el banner "Ya existe una cuenta registrada con ese email.
+    Si es tuya, iniciá sesión en vez de registrarte de nuevo."; contraseña corta muestra "La
+    contraseña debe tener al menos 8 caracteres" sin viaje de red.
+  - Backend local y servidor estático dados de baja, build web y test temporal borrados al cerrar
+    la ronda — `git status` confirma que el working tree de Mobile solo tiene los 2 archivos reales
+    de este cambio (`lib/screens/registro_cliente_screen.dart` nuevo,
+    `lib/screens/login_screen.dart` modificado).
+- No se tocó Backend ni DBA (el endpoint ya estaba completo y en producción) ni el resto de
+  `login_screen.dart` más allá de agregar el link nuevo al final.
