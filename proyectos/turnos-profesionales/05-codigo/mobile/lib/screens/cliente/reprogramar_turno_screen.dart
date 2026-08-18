@@ -3,6 +3,11 @@ import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 import '../../api_client.dart';
 import '../../state/sesion.dart';
+import '../../theme/app_colors.dart';
+import '../../theme/app_radius.dart';
+import '../../theme/app_spacing.dart';
+import '../../theme/app_typography.dart';
+import '../../widgets/widgets.dart';
 
 /// HU-13: elegir un nuevo horario para un turno propio (mismo profesional/servicio, CU5).
 /// Reutiliza /profesionales/{id}/slots para listar horarios y PATCH /turnos/{id}/reprogramar
@@ -61,15 +66,18 @@ class _ReprogramarTurnoScreenState extends State<ReprogramarTurnoScreen> {
   Widget build(BuildContext context) {
     final formato = DateFormat('EEE d MMM · HH:mm', 'es');
     return Scaffold(
-      appBar: AppBar(title: const Text('Elegir nuevo horario')),
+      appBar: const AppHeader(
+        variant: AppHeaderVariant.surface,
+        emoji: '🔁',
+        title: 'Elegir Nuevo Horario',
+        showBackButton: true,
+      ),
       body: Column(
         children: [
           if (_error != null)
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(12),
-              color: Theme.of(context).colorScheme.errorContainer,
-              child: Text(_error!),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(AppSpacing.base, AppSpacing.base, AppSpacing.base, 0),
+              child: _FeedbackBanner(mensaje: _error!, esError: true),
             ),
           if (_reprogramando) const LinearProgressIndicator(),
           Expanded(
@@ -78,14 +86,22 @@ class _ReprogramarTurnoScreenState extends State<ReprogramarTurnoScreen> {
               builder: (context, snapshot) {
                 if (!snapshot.hasData) return const Center(child: CircularProgressIndicator());
                 final slots = (snapshot.data!['slots'] as List).cast<String>();
-                if (slots.isEmpty) return const Center(child: Text('No hay otros horarios disponibles.'));
+                if (slots.isEmpty) {
+                  return const _EstadoVacio(
+                    icon: Icons.event_busy_outlined,
+                    texto: 'No hay otros horarios disponibles.',
+                  );
+                }
                 return ListView.builder(
+                  padding: const EdgeInsets.all(AppSpacing.base),
                   itemCount: slots.length,
-                  itemBuilder: (context, i) => ListTile(
-                    leading: const Icon(Icons.schedule),
-                    title: Text(formato.format(DateTime.parse(slots[i]).toLocal())),
-                    enabled: !_reprogramando,
-                    onTap: () => _reprogramar(slots[i]),
+                  itemBuilder: (context, i) => Padding(
+                    padding: const EdgeInsets.only(bottom: AppSpacing.md),
+                    child: _HorarioCard(
+                      texto: formato.format(DateTime.parse(slots[i]).toLocal()),
+                      habilitado: !_reprogramando,
+                      onTap: () => _reprogramar(slots[i]),
+                    ),
                   ),
                 );
               },
@@ -93,6 +109,99 @@ class _ReprogramarTurnoScreenState extends State<ReprogramarTurnoScreen> {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// Fila de horario — mismo criterio visual que `_HorarioCard`
+/// (`horarios_disponibles_screen.dart`), duplicada localmente a propósito, con el agregado de
+/// [habilitado]: reemplaza al `enabled: !_reprogramando` que tenía el `ListTile` original, para no
+/// perder la protección contra doble-tap mientras el PATCH está en vuelo.
+class _HorarioCard extends StatelessWidget {
+  const _HorarioCard({required this.texto, required this.habilitado, required this.onTap});
+
+  final String texto;
+  final bool habilitado;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = AppColors.of(context);
+    final fg = habilitado ? colors.textPrimary : colors.textDisabled;
+    return Container(
+      width: double.infinity,
+      decoration: BoxDecoration(
+        color: colors.surface,
+        borderRadius: BorderRadius.circular(AppRadius.card),
+        boxShadow: AppRadius.cardShadow,
+      ),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(AppRadius.card),
+        onTap: habilitado ? onTap : null,
+        child: Padding(
+          padding: const EdgeInsets.all(AppSpacing.base),
+          child: Row(
+            children: [
+              Icon(Icons.schedule_outlined, color: habilitado ? colors.primary : colors.textDisabled),
+              const SizedBox(width: AppSpacing.base),
+              Expanded(
+                child: Text(texto, style: AppTypography.subtitle(context).copyWith(color: fg, fontWeight: FontWeight.bold)),
+              ),
+              Icon(Icons.chevron_right, color: colors.textSecondary),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _EstadoVacio extends StatelessWidget {
+  const _EstadoVacio({required this.icon, required this.texto});
+
+  final IconData icon;
+  final String texto;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = AppColors.of(context);
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(AppSpacing.xl),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 48, color: colors.textSecondary),
+            const SizedBox(height: AppSpacing.base),
+            Text(
+              texto,
+              textAlign: TextAlign.center,
+              style: AppTypography.subtitle(context).copyWith(color: colors.textPrimary, fontWeight: FontWeight.w600),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Mismo patrón de banner de error que el resto de las pantallas de esta app (ej.
+/// `registro_cliente_screen.dart`), duplicado localmente a propósito.
+class _FeedbackBanner extends StatelessWidget {
+  const _FeedbackBanner({required this.mensaje, required this.esError});
+
+  final String mensaje;
+  final bool esError;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = AppColors.of(context);
+    final estado = esError ? colors.danger : colors.success;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(AppSpacing.base),
+      decoration: BoxDecoration(color: estado.background, borderRadius: BorderRadius.circular(AppRadius.card)),
+      child: Text(mensaje, style: AppTypography.body(context).copyWith(color: estado.base)),
     );
   }
 }
