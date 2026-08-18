@@ -7,7 +7,15 @@ import { asyncHandler } from '../middleware/asyncHandler';
 import { calcularSlotsDisponibles, inicioDelDiaLocal } from '../dominio/disponibilidad';
 import { uuidSchema, fechaIsoSchema, respuestaValidacionFallida } from '../dominio/validacion';
 import { LimitePlanGratisError, cuerpoLimitePlanAlcanzado, exigirLimiteTurnosConfirmadosDelMes } from '../dominio/suscripciones';
+import {
+  armarAsuntoNotificacion,
+  armarMensajeNotificacion,
+  obtenerDatosNotificacionTurno,
+  DatosMensajeNotificacion,
+  TipoNotificacion,
+} from '../dominio/notificaciones';
 import { pagoProvider, IntencionDePago } from '../integraciones/pagos';
+import { emailProvider } from '../integraciones/email';
 
 export const turnosRouter = Router();
 
@@ -30,6 +38,77 @@ const VENTANA_MIN_MINUTOS = Number(process.env.VENTANA_CANCELACION_MIN ?? 120);
 function dentroDeVentanaMinima(inicioTurno: string): boolean {
   const minutosParaElTurno = (new Date(inicioTurno).getTime() - Date.now()) / 60_000;
   return minutosParaElTurno < VENTANA_MIN_MINUTOS;
+}
+
+// ============================================================================
+// Envío de notificaciones por email (ampliación 2026-08-18, pedido explícito del CEO: además de
+// la bandeja in-app, reenviar cada notificación por correo real vía Resend — ver
+// integraciones/email.ts). Helpers de ESTE archivo (no compartidos con routes/profesionales.ts ni
+// jobs/recordarTurnosProximos.ts, que definen los suyos propios): mismo criterio ya documentado en
+// este mismo backend para no extraer glue code sencillo a un módulo común (ver el comentario junto
+// a `POST /profesionales/:id/turnos` en profesionales.ts, "se duplica acá... a propósito").
+//
+// CRÍTICO — dónde se llaman: SIEMPRE después de que `withTransaction` ya resolvió (fuera de la
+// transacción que hizo los INSERT de `turno`/`notificacion`), nunca adentro de su callback. Un
+// email es un efecto secundario best-effort: si tarda o falla, no puede demorar ni arriesgar el
+// COMMIT/ROLLBACK de esa transacción, que ya no tiene nada que ver con el envío. Ver cada call
+// site más abajo.
+// ============================================================================
+
+/** Envía UN email de notificación y nunca lanza — cualquier error (Resend caído, red,
+ *  `RESEND_API_KEY` sin configurar) se loguea acá mismo y no interrumpe al caller. Mismo criterio
+ *  fail-closed/no-throw que integraciones/pagos.ts (`validarWebhook`) para no tirar abajo el flujo
+ *  principal (crear/cancelar/reprogramar un turno) por un problema de un sistema externo. */
+async function enviarEmailNotificacion(destinatarioEmail: string, datos: DatosMensajeNotificacion): Promise<void> {
+  try {
+    await emailProvider.enviarNotificacion(
+      destinatarioEmail,
+      armarAsuntoNotificacion(datos.tipo),
+      armarMensajeNotificacion(datos)
+    );
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error(
+      `[turnos] Error enviando email de notificación (tipo=${datos.tipo}, destinatarioEsCliente=${datos.destinatarioEsCliente}) a ${destinatarioEmail}:`,
+      err
+    );
+  }
+}
+
+/**
+ * Notifica por email a LAS 2 partes de `turnoId` para un evento de tipo `tipo` — mismas 2 filas
+ * que ya quedaron insertadas en la bandeja (`notificacion`) por el caller, ahora también por
+ * correo. Nunca lanza (ver `enviarEmailNotificacion`); si la propia lectura de datos falla (ej.
+ * problema de conexión a la base ya fuera de la transacción principal), tampoco — se loguea y se
+ * corta ahí, sin mandar ningún email para este turno.
+ */
+async function enviarEmailsNotificacionTurno(turnoId: string, tipo: TipoNotificacion): Promise<void> {
+  let datos;
+  try {
+    datos = await obtenerDatosNotificacionTurno(pool, turnoId);
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error(`[turnos] Error leyendo datos para notificar por email (turno ${turnoId}, tipo ${tipo}):`, err);
+    return;
+  }
+  // No debería poder pasar — turnoId ya existe y se acaba de confirmar en la transacción de
+  // arriba (turno nunca se borra físicamente, ver dominio/notificaciones.ts). Cubierto igual,
+  // nunca asumido.
+  if (!datos) return;
+
+  const datosBase = {
+    tipo,
+    clienteNombre: datos.clienteNombre,
+    profesionalNombre: datos.profesionalNombre,
+    turnoInicio: datos.turnoInicio,
+  };
+
+  // En paralelo — un destinatario cuyo envío falla no frena al otro (cada uno ya atrapa su propio
+  // error adentro de `enviarEmailNotificacion`, así que `Promise.all` acá nunca rechaza).
+  await Promise.all([
+    enviarEmailNotificacion(datos.clienteEmail, { ...datosBase, destinatarioEsCliente: true }),
+    enviarEmailNotificacion(datos.profesionalEmail, { ...datosBase, destinatarioEsCliente: false }),
+  ]);
 }
 
 // HU-09 / HU-09b: reservar un turno. Ver documento-arquitectura.md §4 — la garantía
@@ -244,6 +323,23 @@ turnosRouter.post(
             [uuid(), turnoId, 'confirmacion', profesional!.usuario_id, ts]
           );
 
+          // Ampliación (2026-08-18, Backend — pedido explícito del CEO): notificar a AMBAS
+          // partes, no solo al profesional — 2do INSERT con destinatario = el propio cliente que
+          // está reservando (`req.auth!.sub`, ya autenticado con `requireAuth('cliente')`), mismo
+          // `tipo`/`turno_id`/`creado_en` que el de arriba (mismo evento, 2 destinatarios).
+          // `armarMensajeNotificacion` (dominio/notificaciones.ts) ya resolvía el texto correcto
+          // para `destinatarioEsCliente: true` desde el origen (ver ese archivo) — no hace falta
+          // tocarlo, el mensaje se arma recién al leer (GET /notificaciones). Tampoco hace falta
+          // ningún cambio de identidad de RLS para este 2do INSERT: `app.usuario_id` sigue siendo
+          // el CLIENTE durante toda esta transacción, y `notificacion_insert_evento_turno`
+          // (004_notificaciones.sql) ya admite `destinatario_usuario_id = turno.cliente_id` bajo
+          // esa misma identidad (la 1ra rama de su 2da condición) — sin necesitar la rama "staff
+          // del negocio" que sí usa el INSERT de arriba.
+          await client.query(
+            'INSERT INTO notificacion (id, turno_id, tipo, destinatario_usuario_id, creado_en) VALUES ($1, $2, $3, $4, $5)',
+            [uuid(), turnoId, 'confirmacion', req.auth!.sub, ts]
+          );
+
           // HU-19/HU-20 (ver 03-arquitectura/modelo-datos.md §2quinquies y backlog.md HU-19):
           // alta automática de la fila `paciente` en el primer turno entre este profesional y
           // este cliente — sin esto, "Gestión de Pacientes" (Mobile) y el criterio "Nuevo" de
@@ -298,6 +394,12 @@ turnosRouter.post(
       }
       throw err;
     }
+
+    // Envío real por email (best-effort, FUERA de la transacción de arriba — ver el comentario
+    // grande junto a `enviarEmailsNotificacionTurno` más arriba): recién acá, una vez que
+    // `withTransaction` ya hizo COMMIT sin errores — nunca puede demorar ni arriesgar esa
+    // transacción. Nunca lanza, no hace falta un try/catch en este call site.
+    await enviarEmailsNotificacionTurno(turnoId, 'confirmacion');
 
     res.status(201).json({
       id: turnoId,
@@ -465,10 +567,31 @@ turnosRouter.patch(
           [uuid(), req.params.id, 'cancelacion', profesional!.usuario_id, ts]
         );
 
+        // Ampliación (2026-08-18, Backend — pedido explícito del CEO): notificar a AMBAS partes
+        // — 2do INSERT con destinatario = el cliente mismo (`turno.cliente_id`, ya leído arriba
+        // por `turno_propio_para_gestion`; es el mismo valor que `req.auth!.sub` en este punto,
+        // ya confirmado más arriba por el chequeo `turno.cliente_id !== req.auth!.sub` -> 403).
+        // Mismo `tipo`/`turno_id`/`creado_en` que el INSERT de arriba. Mismo razonamiento de RLS
+        // que ese INSERT: `app.usuario_id` sigue siendo el CLIENTE en toda esta transacción, y
+        // `notificacion_insert_evento_turno` (004_notificaciones.sql) admite
+        // `destinatario_usuario_id = turno.cliente_id` bajo esa misma identidad.
+        await client.query(
+          'INSERT INTO notificacion (id, turno_id, tipo, destinatario_usuario_id, creado_en) VALUES ($1, $2, $3, $4, $5)',
+          [uuid(), req.params.id, 'cancelacion', turno.cliente_id, ts]
+        );
+
         return { tipo: 'ok' as const };
       },
       { usuarioId: req.auth!.sub, negocioId: req.auth!.negocio_id }
     );
+
+    // Envío real por email (best-effort, FUERA de la transacción de arriba — ver el comentario
+    // grande junto a `enviarEmailsNotificacionTurno`): solo si la cancelación efectivamente pasó
+    // (`tipo === 'ok'`) — en cualquier otro caso no se insertó ninguna fila de notificación, así
+    // que no hay nada que reenviar por email.
+    if (resultado.tipo === 'ok') {
+      await enviarEmailsNotificacionTurno(req.params.id, 'cancelacion');
+    }
 
     switch (resultado.tipo) {
       case 'no_encontrado':
@@ -616,6 +739,22 @@ turnosRouter.patch(
             [uuid(), nuevoTurnoId, 'confirmacion', profesionalConfig!.usuario_id, ts]
           );
 
+          // Ampliación (2026-08-18, Backend — pedido explícito del CEO): notificar a AMBAS
+          // partes — 2do INSERT con destinatario = el cliente mismo (`turno.cliente_id`, el turno
+          // VIEJO — reprogramar no cambia de cliente, sigue siendo el mismo en el turno nuevo).
+          // Mismo `turno_id` (el NUEVO, `nuevoTurnoId` — igual que el INSERT de arriba: la
+          // notificación de este evento vive en la fila nueva, no en la vieja marcada
+          // 'reprogramado') y mismo `tipo`/`creado_en`. `tipo` se mantiene 'confirmacion' por el
+          // mismo motivo ya documentado arriba (no es un cambio de este ciclo). Mismo
+          // razonamiento de RLS que el INSERT de arriba: `app.usuario_id` sigue siendo el CLIENTE
+          // en toda esta transacción, y `notificacion_insert_evento_turno`
+          // (004_notificaciones.sql) admite `destinatario_usuario_id = turno.cliente_id` bajo esa
+          // misma identidad.
+          await client.query(
+            'INSERT INTO notificacion (id, turno_id, tipo, destinatario_usuario_id, creado_en) VALUES ($1, $2, $3, $4, $5)',
+            [uuid(), nuevoTurnoId, 'confirmacion', turno.cliente_id, ts]
+          );
+
           return { tipo: 'ok' as const, estadoFinal };
         },
         { usuarioId: req.auth!.sub, negocioId: req.auth!.negocio_id }
@@ -627,6 +766,14 @@ turnosRouter.patch(
         });
       }
       throw err;
+    }
+
+    // Envío real por email (best-effort, FUERA de la transacción de arriba — ver el comentario
+    // grande junto a `enviarEmailsNotificacionTurno`): solo si la reprogramación efectivamente
+    // pasó (`tipo === 'ok'`) — sobre el turno NUEVO (`nuevoTurnoId`), que es donde quedaron las 2
+    // filas de notificación de este evento.
+    if (resultado.tipo === 'ok') {
+      await enviarEmailsNotificacionTurno(nuevoTurnoId, 'confirmacion');
     }
 
     switch (resultado.tipo) {

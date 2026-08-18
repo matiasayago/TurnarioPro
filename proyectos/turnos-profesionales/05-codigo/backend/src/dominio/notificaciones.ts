@@ -1,14 +1,19 @@
 // Helpers de dominio para la bandeja de notificaciones (HU-14b/HU-25) — extraídos a un módulo
 // propio (mismo criterio que dominio/disponibilidad.ts, lógica compartida sin dependencia de
-// Express/HTTP): hoy solo lo usa GET /notificaciones (src/routes/notificaciones.ts), pero el
-// armado de texto es independiente del transporte y puede reutilizarse a futuro (ej. el día que
-// integraciones/notificaciones.ts tenga un proveedor real de push y necesite el mismo texto).
+// Express/HTTP): lo usa GET /notificaciones (src/routes/notificaciones.ts) para armar el texto de
+// la bandeja, y (ampliación 2026-08-18, pedido explícito del CEO — envío real por email vía
+// Resend, ver integraciones/email.ts) también routes/turnos.ts, routes/profesionales.ts y
+// jobs/recordarTurnosProximos.ts, para armar el mismo texto (más el asunto,
+// `armarAsuntoNotificacion` más abajo) como cuerpo del email que replica cada notificación — el
+// armado de texto es independiente del transporte, tal como preveía este comentario desde el
+// origen.
 //
 // Decisión heredada de DBA (ver database/migrations/001_init.sql, bloque "Bandeja de
 // notificaciones", y 004_notificaciones.sql): la fila `notificacion` NO guarda texto/nombre/hora
 // "congelados" — se arman acá, en el momento de leer, a partir de los datos de `turno` (que
 // nunca se borra físicamente, solo cambia de `estado` — la referencia por turno_id sigue siendo
 // válida para siempre).
+import { Queryable } from '../db';
 
 /** Espejo de tipo_notificacion (database/migrations/001_init.sql). */
 export type TipoNotificacion = 'confirmacion' | 'recordatorio' | 'cancelacion' | 'reprogramacion';
@@ -21,13 +26,14 @@ export interface DatosMensajeNotificacion {
   profesionalNombre: string;
   /** turno.inicio, ISO-8601. */
   turnoInicio: string;
-  /** true si el DESTINATARIO de esta notificación puntual es el cliente del turno. Hoy ningún
-   *  productor real genera este caso — los 4 INSERT existentes (POST /turnos, PATCH
-   *  /:id/reprogramar, PATCH /:id/cancelar en routes/turnos.ts; el job en
-   *  jobs/recordarTurnosProximos.ts) siempre apuntan al profesional, ver el razonamiento de DBA
-   *  en 001_init.sql ("es la bandeja del PROFESIONAL") — pero el mensaje debe hablar desde la
-   *  perspectiva de QUIEN LO RECIBE, no asumir siempre "destinatario = profesional", para no
-   *  quedar mal armado el día que exista un productor que notifique al cliente. */
+  /** true si el DESTINATARIO de esta notificación puntual es el cliente del turno, false si es
+   *  el profesional — el mensaje habla siempre desde la perspectiva de QUIEN LO RECIBE, nunca
+   *  asume un valor fijo. Hasta el 2026-08-17 ningún productor real generaba el caso `true` (ver
+   *  el razonamiento original de DBA en 001_init.sql, "es la bandeja del PROFESIONAL"); desde
+   *  `POST /profesionales/:id/turnos` (HU-23, routes/profesionales.ts) ya no es así, y desde la
+   *  ampliación del 2026-08-18 (pedido explícito del CEO: notificar a AMBAS partes en los 5
+   *  productores existentes, más el envío real por email vía Resend, ver integraciones/email.ts)
+   *  los 5 productores generan SIEMPRE los 2 casos para cada evento. */
   destinatarioEsCliente: boolean;
 }
 
@@ -90,4 +96,94 @@ export function armarMensajeNotificacion(datos: DatosMensajeNotificacion): strin
     default:
       return `${datos.clienteNombre} confirmó su turno de las ${hora}`;
   }
+}
+
+/**
+ * Asunto del email que replica una notificación de la bandeja (ampliación 2026-08-18 — envío
+ * real por email vía Resend, pedido explícito del CEO; ver integraciones/email.ts). Mapeo fijo
+ * por `tipo`, tal como lo definió el CEO — a diferencia de `armarMensajeNotificacion`, el asunto
+ * NO depende de `destinatarioEsCliente` (mismo asunto para ambas partes de un mismo evento; el
+ * cuerpo sí sigue siendo el texto de `armarMensajeNotificacion`, que cambia según quién lo recibe).
+ */
+export function armarAsuntoNotificacion(tipo: TipoNotificacion): string {
+  switch (tipo) {
+    case 'cancelacion':
+      return 'Turno cancelado';
+    case 'reprogramacion':
+      return 'Turno reprogramado';
+    case 'recordatorio':
+      return 'Recordatorio de tu turno';
+    case 'confirmacion':
+    default:
+      return 'Confirmación de tu turno';
+  }
+}
+
+/** Lo que hace falta para notificar POR EMAIL a las 2 partes de un turno — ver
+ *  `obtenerDatosNotificacionTurno` más abajo (ampliación 2026-08-18). */
+export interface DatosNotificacionTurno {
+  clienteNombre: string;
+  clienteEmail: string;
+  profesionalNombre: string;
+  profesionalEmail: string;
+  /** turno.inicio, ISO-8601 — mismo campo que `DatosMensajeNotificacion.turnoInicio`. */
+  turnoInicio: string;
+}
+
+/**
+ * Junta, en una sola lectura, todo lo que hace falta para notificar POR EMAIL a las 2 partes de
+ * un turno (ampliación 2026-08-18, pedido explícito del CEO — envío real vía Resend, ver
+ * integraciones/email.ts): nombre y email de cliente y profesional, más `turno.inicio` (insumo de
+ * `armarMensajeNotificacion`). `turno` nunca se borra físicamente (solo cambia de `estado`, ver
+ * el header de este archivo) — sigue siendo válido leerlo por `turnoId` después de que la
+ * transacción que lo creó/modificó ya hizo COMMIT, que es justamente cuándo se usa esto (ver cada
+ * call site en routes/turnos.ts, routes/profesionales.ts y jobs/recordarTurnosProximos.ts: el
+ * envío de email es un efecto secundario best-effort que corre SIEMPRE fuera de la transacción
+ * principal — nunca debe poder demorarla ni arriesgar su rollback).
+ *
+ * Recibe un `Queryable` (mismo criterio que dominio/disponibilidad.ts) — el uso real de hoy
+ * siempre pasa `pool` (nunca un `client` de una transacción ya resuelta: a esa altura ya está
+ * liberado de vuelta al pool por `withTransaction`, ver db.ts), pero queda igual de genérico por
+ * si algún caller futuro necesitara llamarlo dentro de una transacción todavía abierta.
+ *
+ * Sin contexto RLS a propósito: `turno` tiene la policy pública transitoria `turno_select_publico`,
+ * `profesional` es de lectura pública, y `usuario` no tiene RLS habilitada en absoluto (ver
+ * database/migrations/001_init.sql) — mismo criterio que ya usa, por ejemplo, el primer SELECT de
+ * `POST /turnos` (routes/turnos.ts) para leer `profesional` antes de abrir cualquier transacción.
+ * No se filtra por ningún estado de `turno` (a diferencia de otras lecturas de este backend): para
+ * este uso puntual (arma el texto de un evento que YA pasó — confirmación/cancelación/etc.) el
+ * estado actual de la fila es irrelevante, solo importan sus datos descriptivos.
+ */
+export async function obtenerDatosNotificacionTurno(
+  db: Queryable,
+  turnoId: string
+): Promise<DatosNotificacionTurno | undefined> {
+  const result = await db.query(
+    `SELECT t.inicio AS turno_inicio,
+            uc.nombre AS cliente_nombre, uc.email AS cliente_email,
+            up.nombre AS profesional_nombre, up.email AS profesional_email
+     FROM turno t
+     JOIN usuario uc ON uc.id = t.cliente_id
+     JOIN profesional p ON p.id = t.profesional_id
+     JOIN usuario up ON up.id = p.usuario_id
+     WHERE t.id = $1`,
+    [turnoId]
+  );
+  const fila = result.rows[0] as
+    | {
+        turno_inicio: string;
+        cliente_nombre: string;
+        cliente_email: string;
+        profesional_nombre: string;
+        profesional_email: string;
+      }
+    | undefined;
+  if (!fila) return undefined;
+  return {
+    turnoInicio: fila.turno_inicio,
+    clienteNombre: fila.cliente_nombre,
+    clienteEmail: fila.cliente_email,
+    profesionalNombre: fila.profesional_nombre,
+    profesionalEmail: fila.profesional_email,
+  };
 }
