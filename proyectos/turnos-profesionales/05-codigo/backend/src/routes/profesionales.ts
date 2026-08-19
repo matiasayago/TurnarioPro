@@ -74,6 +74,7 @@ async function enviarEmailsNotificacionTurno(turnoId: string): Promise<void> {
     tipo: 'confirmacion' as const,
     clienteNombre: datos.clienteNombre,
     profesionalNombre: datos.profesionalNombre,
+    negocioNombre: datos.negocioNombre,
     turnoInicio: datos.turnoInicio,
   };
 

@@ -100,6 +100,7 @@ async function enviarEmailsNotificacionTurno(turnoId: string, tipo: TipoNotifica
     tipo,
     clienteNombre: datos.clienteNombre,
     profesionalNombre: datos.profesionalNombre,
+    negocioNombre: datos.negocioNombre,
     turnoInicio: datos.turnoInicio,
   };
 
