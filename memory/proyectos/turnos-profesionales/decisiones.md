@@ -2416,3 +2416,81 @@ sin verificar):
 - No se identificó la causa raíz exacta del timing en el runner — queda documentado acá por si
   reaparece en un contexto distinto (mismo criterio que Task #103, Render/Mercado Pago: escalado
   y anotado, no reintentado desde cero sin evidencia nueva).
+
+## Dominio propio verificado en Resend + envío real de emails (2026-08-19)
+
+PR #24 mergeado a `main` (commit `cf72fa1`) y desplegado a Render. El CEO cargó
+`RESEND_API_KEY` en el entorno de Render (con un error de tipeo inicial —`RESEND_API` en vez de
+`RESEND_API_KEY`— detectado comparando el ancho del campo contra las demás variables y corregido
+en un segundo intento). Con la key sola, Resend solo permite entregar al email de la propia
+cuenta (`matiasayago@gmail.com`) — confirmado con un turno de prueba real contra producción: los
+2 intentos de notificación (cliente con alias `+resendtest`, profesional con email @test.com)
+fueron rechazados por Resend con 403 `validation_error`, mensaje que sin embargo confirmó que la
+key autentica correctamente (no es un 401) y reveló el email exacto de la cuenta.
+
+Para desbloquear el envío a clientes/profesionales reales, se verificó un dominio propio:
+`turnarioapp.com.ar` (ya era propiedad del CEO, registrado en NIC Argentina).
+
+- **NIC Argentina no ofrece gestión de Zona DNS propia** para dominios `.com.ar` no delegados —
+  el panel "Trámites a Distancia" (TAD) solo permite Transferir o Delegar el dominio, sin
+  registros TXT/MX personalizables. Para cargar los registros que pide Resend (DKIM, MX+SPF,
+  DMARC) hubo que delegar el dominio a un proveedor de DNS externo.
+- **Proveedor elegido: Cloudflare** (plan Free) — estándar de la industria, gratis, sin downside
+  para este caso de uso. El dominio se agregó en Cloudflare, se cargaron los 4 registros DNS que
+  pide Resend, y se delegó el dominio desde NIC.ar a los 2 nameservers de Cloudflare
+  (`aria.ns.cloudflare.com`, `dexter.ns.cloudflare.com`).
+- **El primer intento de delegación en NIC.ar no tomó** — el CEO confirmó "ya lo hice" pero la
+  columna "Delegado" seguía en "NO" y una consulta NS directa contra los servidores autoritativos
+  del TLD `.ar` (`e.dns.ar`, no un resolver cacheado) seguía devolviendo NXDOMAIN. Reintentar el
+  mismo trámite en NIC.ar sí lo aplicó (columna pasó a "SI", propagación visible en `.ar` unos
+  segundos después). Lección: en NIC.ar, verificar el resultado del trámite de delegación en la
+  lista de "Mis dominios" tras guardarlo — no asumir que "lo hice" implica que se guardó.
+- **Verificación en Resend**: una vez propagado el DNS, Resend detectó los registros y verificó
+  el dominio en un par de minutos (estado `Verified`, no las "unas horas" que advierte el mensaje
+  genérico — ese mensaje es conservador para el caso de DNS todavía no propagado).
+- `RESEND_FROM_EMAIL` configurado en Render como `Turnario <notificaciones@turnarioapp.com.ar>`.
+  Cargado por el Director General IA directamente (no es una credencial sensible, a diferencia
+  de `RESEND_API_KEY`).
+- **Verificación end-to-end final**: turno de prueba nuevo contra producción → en el dashboard de
+  Resend (`/emails`), el envío al cliente figura `delivered` y el envío al profesional (dirección
+  `@test.com` ficticia) figura `sent` (aceptado, sin el 403 de antes) → el CEO confirmó
+  recepción real en su bandeja de Gmail, remitente y contenido correctos. Sistema de
+  notificaciones por email confirmado funcionando de punta a punta en producción real.
+
+### Nota técnica: bug de compositing en el Browser pane durante esta sesión
+
+Durante gran parte de esta ronda, el Browser pane dejó de compositar frames visualmente
+(`screenshot` fallaba con timeout, y los `ref` de `read_page` reportaban bounding rects en
+`(0,0)` aunque el DOM real seguía accesible). `read_page`, `get_page_text` y `javascript_tool`
+siguieron funcionando con normalidad durante todo el incidente. Workaround aplicado en Resend y
+Render: en vez de `computer.click()` por coordenadas, usar `javascript_tool` para setear valores
+de inputs controlados por React vía el native property setter (`Object.getOwnPropertyDescriptor
+(HTMLInputElement.prototype, 'value').set` + `dispatchEvent(new Event('input'/'change'))`) y
+disparar el submit con `form.requestSubmit()` cuando el botón está dentro de un `<form>`, o con
+`button.click()` cuando no lo está (funciona pese al bug, porque no depende de la geometría del
+elemento). Mismo patrón ya documentado en esta sesión como alternativa a Puppeteer para cuando el
+Browser pane falla por compositing — agregado acá el detalle concreto de qué hacer con
+formularios de apps React/Next modernas (Resend, Render) en vez de sitios estáticos simples.
+
+## Notificaciones: agregar fecha completa y negocio al texto (2026-08-19)
+
+Pedido explícito del CEO tras revisar en Gmail el email real de confirmación de turno de la
+ronda anterior: el texto solo decía con qué profesional y a qué HORA (ej. "Tu turno con X de las
+11:00 fue confirmado") — nunca la fecha (día/mes) ni el negocio/consultorio.
+
+- `dominio/notificaciones.ts`: nueva `formatearFechaHoraLocal` (día de semana + día + mes vía
+  `Intl.DateTimeFormat('es-AR', ...)`, nativo de Node — sin agregar date-fns/luxon/moment como
+  dependencia nueva) reemplaza a `formatearHoraLocal` en los 8 casos de `armarMensajeNotificacion`
+  (2 perspectivas × 4 tipos). `DatosMensajeNotificacion`/`DatosNotificacionTurno` ganan
+  `negocioNombre: string`. `obtenerDatosNotificacionTurno` amplía su SQL con
+  `JOIN negocio ng ON ng.id = t.negocio_id` (`turno.negocio_id` es columna propia, `NOT NULL` —
+  no hace falta pasar por el N:M profesional↔negocio; `negocio` no tiene RLS, INNER JOIN seguro).
+- 4 call sites actualizados para pasar `negocioNombre`: `routes/turnos.ts`,
+  `routes/profesionales.ts`, `routes/notificaciones.ts` (bandeja in-app — su propio SELECT
+  también ganó el JOIN a `negocio`, alias `neg` para no chocar con el alias `n` de la tabla
+  `notificacion`), y `jobs/recordarTurnosProximos.ts` (este último NO necesitó ampliar su SELECT
+  de "candidatos" — ese solo alimenta el INSERT de la bandeja sin columnas de texto; el cuerpo del
+  email de recordatorio ya se arma con una lectura propia de `obtenerDatosNotificacionTurno` por
+  turno, así que `negocioNombre` le llegó gratis con el cambio del paso anterior).
+- Ejemplo real de texto resultante: "Tu turno con María Pérez en Clínica Vida el martes 25 de
+  agosto a las 11:00 fue confirmado".
