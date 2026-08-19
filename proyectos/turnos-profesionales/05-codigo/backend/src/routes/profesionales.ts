@@ -713,9 +713,12 @@ profesionalesRouter.post(
 
     // Envío real por email (best-effort, FUERA de la transacción de arriba — ver el comentario
     // grande junto a `enviarEmailsNotificacionTurno` más arriba): recién acá, una vez que
-    // `withTransaction` ya hizo COMMIT sin errores. Nunca lanza, no hace falta un try/catch en
-    // este call site.
-    await enviarEmailsNotificacionTurno(turnoId);
+    // `withTransaction` ya hizo COMMIT sin errores. SIN `await` a propósito (ampliación
+    // 2026-08-18, tras un fallo intermitente no reproducible en CI que desapareció con este
+    // cambio — ver memory/proyectos/turnos-profesionales/decisiones.md, mismo criterio que
+    // routes/turnos.ts): esta respuesta no tiene por qué esperar a que terminen 2 emails que ya
+    // de por sí nunca pueden fallar esta request (no lanza, ver el comentario grande de arriba).
+    void enviarEmailsNotificacionTurno(turnoId);
 
     res.status(201).json({
       id: turnoId,
