@@ -397,9 +397,14 @@ turnosRouter.post(
 
     // Envío real por email (best-effort, FUERA de la transacción de arriba — ver el comentario
     // grande junto a `enviarEmailsNotificacionTurno` más arriba): recién acá, una vez que
-    // `withTransaction` ya hizo COMMIT sin errores — nunca puede demorar ni arriesgar esa
-    // transacción. Nunca lanza, no hace falta un try/catch en este call site.
-    await enviarEmailsNotificacionTurno(turnoId, 'confirmacion');
+    // `withTransaction` ya hizo COMMIT sin errores. SIN `await` a propósito (ampliación
+    // 2026-08-18, tras un fallo intermitente no reproducible en CI que desapareció con este
+    // cambio — ver memory/proyectos/turnos-profesionales/decisiones.md): la respuesta HTTP de
+    // esta reserva no tiene por qué esperar a que termine el envío de 2 emails, que ya de por sí
+    // nunca puede fallar esta request (no lanza, ver el comentario grande de arriba) — solo
+    // puede, como mucho, demorarla. `void` deja explícito que es intencional no esperar esta
+    // promesa (no un `await` olvidado).
+    void enviarEmailsNotificacionTurno(turnoId, 'confirmacion');
 
     res.status(201).json({
       id: turnoId,
@@ -590,7 +595,9 @@ turnosRouter.patch(
     // (`tipo === 'ok'`) — en cualquier otro caso no se insertó ninguna fila de notificación, así
     // que no hay nada que reenviar por email.
     if (resultado.tipo === 'ok') {
-      await enviarEmailsNotificacionTurno(req.params.id, 'cancelacion');
+      // SIN `await` a propósito — ver el comentario junto al call site equivalente de POST /
+      // (arriba en este mismo archivo, ampliación 2026-08-18) para el razonamiento completo.
+      void enviarEmailsNotificacionTurno(req.params.id, 'cancelacion');
     }
 
     switch (resultado.tipo) {
@@ -773,7 +780,9 @@ turnosRouter.patch(
     // pasó (`tipo === 'ok'`) — sobre el turno NUEVO (`nuevoTurnoId`), que es donde quedaron las 2
     // filas de notificación de este evento.
     if (resultado.tipo === 'ok') {
-      await enviarEmailsNotificacionTurno(nuevoTurnoId, 'confirmacion');
+      // SIN `await` a propósito — ver el comentario junto al call site de POST / (arriba en
+      // este mismo archivo, ampliación 2026-08-18) para el razonamiento completo.
+      void enviarEmailsNotificacionTurno(nuevoTurnoId, 'confirmacion');
     }
 
     switch (resultado.tipo) {
