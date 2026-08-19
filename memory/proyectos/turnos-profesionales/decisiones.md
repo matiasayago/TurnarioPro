@@ -2494,3 +2494,42 @@ ronda anterior: el texto solo decía con qué profesional y a qué HORA (ej. "Tu
   turno, así que `negocioNombre` le llegó gratis con el cambio del paso anterior).
 - Ejemplo real de texto resultante: "Tu turno con María Pérez en Clínica Vida el martes 25 de
   agosto a las 11:00 fue confirmado".
+
+## Selector real de servicio en Gestión de Horarios + "Servicios que brindo" en Editar Perfil (2026-08-19)
+
+Durante una demo en vivo del rol Profesional (pedida por el CEO: "tres demos, una de cada
+perfil"), se encontró que "Gestión de Horarios" pedía pegar a mano el UUID del servicio en un
+`TextField` de texto libre — limitación ya documentada como "simplificación temporal" desde que
+se creó esa pantalla, nunca resuelta. El CEO pidió sacarla, y de paso poder gestionar "qué
+servicio brindo" desde "Editar Perfil".
+
+No hizo falta backend nuevo — `GET /profesionales/:id/servicios` (servicios ya asociados),
+`GET /negocios/:id/servicios` (catálogo del negocio) y `POST /profesionales/:id/servicios` ya
+existían y estaban probados en otros flujos.
+
+- `gestion_horarios_screen.dart`: el `TextField` se reemplaza por un selector resuelto contra
+  `GET /profesionales/:id/servicios` en `initState` — 0 servicios: guardado deshabilitado con un
+  mensaje que manda a "Editar Perfil"; 1 servicio: autoseleccionado, sin mostrar ningún control
+  ("Horarios para: X"); 2+: chips de selección (mismo patrón `_ToggleChip` que "Replicar en
+  semanas/meses" en la misma pantalla).
+- `editar_perfil_screen.dart`: sección nueva "Servicios que brindo", condicionada a
+  `Rol.profesional` (esta pantalla también la abren Cliente y Administrador, para quienes la
+  sección no aplica — mismo criterio que `configuracion_consultorio_screen.dart`). Lista el
+  catálogo completo del negocio; cada servicio ya asociado queda fijo ("Ya asociado", sin
+  control — no existe ningún DELETE en `profesionales.ts` para desasociar); los no asociados
+  tienen un botón "Agregar" que dispara el POST.
+- **Verificación end-to-end real bloqueada por CORS de producción** (`ENABLE_DEV_ROUTES=false` en
+  Render, a propósito — ver el comentario en `app.ts`: CORS solo se habilita en ese modo dev, así
+  que servir el build de Flutter Web desde `localhost:8092` y loguear contra
+  `https://turnos-profesionales-backend.onrender.com` directo falla con
+  "blocked by CORS policy", no es un bug). Resuelto sin tocar producción: el propio
+  `static-server.js` del scratchpad (el que sirve `build/web`) se amplió con un proxy transparente
+  — cualquier request a un prefijo de ruta conocido de la API (`/auth`, `/turnos`, `/negocios`,
+  etc.) se reenvía server-to-server a Render en vez de servirse como archivo estático, así el
+  navegador ve un único origen (`localhost:8092`) para todo, sin preflight. `ApiClient.baseUrl` se
+  overrideó temporalmente a `http://localhost:8092` en `main.dart` (mismo patrón ya usado y
+  revertido en rondas anteriores, ver Task #47) — revertido de nuevo antes de commitear.
+- Confirmado visualmente en producción real, logueado como el profesional de la demo: Gestión de
+  Horarios muestra "🧰 Servicio — Horarios para: Consulta General" (sin campo de UUID) y el
+  guardado de horarios funcionó ("Guardado: 10 bloque(s) de horario..."); Editar Perfil muestra
+  "Servicios que brindo — Consulta General, 30 min · $8000, ✅ Ya asociado".
