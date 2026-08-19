@@ -2337,3 +2337,82 @@ Backend ni DBA — el backend de notificaciones (`routes/notificaciones.ts`) ya 
   incluido, instrucción explícita — pero tampoco `notificaciones_screen.dart`,
   `editar_perfil_screen.dart`, `privacidad_screen.dart`, `configuracion_notificaciones_screen.dart`,
   `ayuda_soporte_screen.dart` ni `acerca_de_screen.dart`).
+
+## Notificaciones por email a ambas partes (Resend) — Backend (2026-08-18, PR #24)
+
+Pedido explícito del CEO: hasta esta ronda, cada uno de los 5 eventos que generan una
+notificación (reservar, cancelar, reprogramar, turno manual, recordatorio automático)
+avisaba a UNA sola parte — siempre la contraparte de quien actuó, nunca a ambas (decisión
+original de DBA, "es la bandeja del PROFESIONAL", ver 001_init.sql). Se cierran 2 gaps a la
+vez: (a) notificar a AMBAS partes en los 5 productores, y (b) reenviar cada notificación por
+correo real vía Resend, no solo dejarla en la bandeja in-app.
+
+- `dominio/notificaciones.ts`: `armarAsuntoNotificacion(tipo)` (mapeo fijo, no depende de
+  `destinatarioEsCliente` a diferencia del cuerpo) y `obtenerDatosNotificacionTurno(db, turnoId)`
+  (nombre+email de ambas partes de un turno, sin RLS especial — mismo criterio que el primer
+  SELECT de `POST /turnos`).
+- `integraciones/email.ts`: `EmailProvider` generalizado con `enviarNotificacion(destinatarioEmail,
+  asunto, cuerpo)` (antes solo tenía `enviarRecuperacionPassword`, HU-37). `ResendEmailProvider`
+  nuevo, API REST directa vía `fetch` (sin agregar el paquete npm `resend`) — selección
+  condicional al final del archivo según `RESEND_API_KEY` esté seteada o no, mismo patrón que
+  `pagoProvider`/`MP_ACCESS_TOKEN`. Remitente por default el dominio de pruebas de Resend
+  (`onboarding@resend.dev`, limitado a la cuenta que lo creó hasta que el CEO verifique un
+  dominio propio vía `RESEND_FROM_EMAIL`). `RESEND_API_KEY`/`RESEND_FROM_EMAIL` declaradas en
+  `render.yaml` (`sync: false`, sin valor) y documentadas en `.env.example` — ninguna cuenta de
+  Resend creada, ninguna credencial real cargada.
+- `routes/turnos.ts` (x3: POST /, PATCH /:id/cancelar, PATCH /:id/reprogramar) y
+  `routes/profesionales.ts` (POST /:id/turnos, HU-23): segundo `INSERT INTO notificacion` por
+  evento (el destinatario que faltaba) + disparo del email a ambas partes.
+- `jobs/recordarTurnosProximos.ts`: el query de candidatos ahora trae también `cliente_id`: el
+  loop impersona y hace INSERT una vez por cada uno de los 2 destinatarios (mismo `WHERE NOT
+  EXISTS`, sin tocar su SQL — cada impersonación por RLS solo ve sus propias filas). Solo dispara
+  email para los que realmente insertaron fila nueva en esa corrida (evita reenviar el mismo
+  recordatorio en cada tick del intervalo).
+- Diseño: el envío de email es best-effort y corre SIEMPRE fuera de la transacción de DB que
+  insertó la notificación — un email que falla o tarda no puede demorar ni arriesgar el
+  COMMIT/ROLLBACK de crear/cancelar/reprogramar un turno. `enviarRecuperacionPassword` (HU-37)
+  no se tocó.
+
+### Incidente de CI: fallo intermitente en `test-rn8-ventana-cancelacion.mjs`, no reproducible en local
+
+El PR #23 (verificación previa) mergeó limpio, pero el PR #24 falló 2/2 veces en el mismo punto
+del CI (`Fase 2/2 - correr test-rn8-ventana-cancelacion`, GitHub Actions): al crear el 3er turno
+de la corrida (`turno lejano #1`), el log del servidor se cortaba limpiamente sin ningún stack
+trace ni excepción — compatible con un timeout/cuelgue de esa request puntual, no con un crash
+del proceso completo (los otros jobs del mismo run seguían sirviendo).
+
+Se investigó a fondo antes de tocar código (mismo criterio que toda esta sesión: nunca asumir
+sin verificar):
+- El log de `server-fase1.log` confirmaba que TODOS los otros 9 scripts de Fase 1 (con volúmenes
+  similares o mayores de turnos, incluidos varios seguidos con las 2 notificaciones dobles ya
+  funcionando) pasaron sin ningún problema — descarta un bug sistemático de "crashea con
+  volumen".
+- Reproducido 3 veces en local sin lograr fallar NUNCA: (1) contra la base real de Render (con
+  meses de datos acumulados) vía `ts-node-dev --respawn`; (2) mismo backend, pero forzando
+  explícitamente Node 22.18.0 (descargado portable, sin nvm disponible) + `ts-node` PLANO sin
+  `--respawn` — replicando exactamente el comando y la versión de Node que usa
+  `turnos-backend-ci.yml` (`NODE_VERSION: "22"`). Las 3 corridas: 100% verde, incluido el turno
+  lejano que fallaba en CI. Esto descartó tanto "volumen de datos" como "diferencia de versión
+  de Node" como causa.
+- El propio `test-rn8-ventana-cancelacion.mjs` ya tiene historial de flakiness documentado en
+  este proyecto (Task #35, causa distinta y ya resuelta entonces — franja horaria de
+  `dias=1`).
+- Diferencias que quedaron sin descartar por no ser reproducibles sin un esfuerzo
+  desproporcionado: Postgres EFÍMERO recién migrado del runner (vs. Render gestionado) +
+  recursos de CPU/IO compartidos y limitados del runner + el estado EXACTO que dejan los 9
+  scripts de Fase 1 antes de RN8 — cualquiera de estos, combinado con que cada `POST /turnos`
+  ahora hace más trabajo asíncrono antes de responder (2 INSERT + 1 SELECT post-transacción + el
+  envío de 2 emails, todo esperado con `await` en la versión original de este PR), es la
+  hipótesis más plausible para un timing/race condition que no se manifiesta en una máquina más
+  rápida con menos contención.
+- **Decisión del CEO** (sin invertir más tiempo en aislar la causa exacta en el runner): hacer el
+  envío de notificaciones (bandeja + email) NO bloqueante — se saca el `await` de los 4 call
+  sites HTTP (`void enviarEmailsNotificacionTurno(...)`, con comentario explícito de que es
+  intencional, no un `await` olvidado) para que ninguna respuesta HTTP de reservar/cancelar/
+  reprogramar/turno-manual tenga que esperar a que terminen 2 emails que de todos modos ya nunca
+  pueden hacerla fallar (mismo try/catch interno de antes, sin cambios). El loop de
+  `jobs/recordarTurnosProximos.ts` NO se tocó (no bloquea ninguna respuesta HTTP, no era la causa
+  del incidente).
+- No se identificó la causa raíz exacta del timing en el runner — queda documentado acá por si
+  reaparece en un contexto distinto (mismo criterio que Task #103, Render/Mercado Pago: escalado
+  y anotado, no reintentado desde cero sin evidencia nueva).
