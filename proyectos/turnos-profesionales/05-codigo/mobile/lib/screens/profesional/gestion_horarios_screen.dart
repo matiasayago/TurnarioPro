@@ -55,9 +55,20 @@ class GestionHorariosScreen extends StatefulWidget {
 }
 
 class _GestionHorariosScreenState extends State<GestionHorariosScreen> {
-  // Simplificación deliberada heredada de `definir_disponibilidad_screen.dart`: selector de
-  // servicio como texto libre (UUID) en vez de un dropdown poblado desde la API.
-  final _servicioIdCtrl = TextEditingController();
+  // Selector de servicio real (fast-follow 2026-08-19: el CEO probó la app como Profesional y
+  // encontró que este campo pedía pegar el UUID a mano). Reemplaza el `TextField` de texto libre
+  // que había acá — se resuelve contra `GET /profesionales/:id/servicios` (servicios que el
+  // profesional YA asoció a su agenda; mismo contrato que ya consume `precios_senas_screen.dart`)
+  // en [_cargarServicios], con 3 casos según cuántos devuelva (ver [_servicioSelector]):
+  // - 0: nada para elegir — el guardado queda deshabilitado y se explica que primero hay que
+  //   agregar un servicio desde "Editar Perfil" > "Servicios que brindo" (mismo fast-follow, ver
+  //   `editar_perfil_screen.dart`).
+  // - 1: se autoselecciona, sin mostrar ningún control (cero fricción).
+  // - 2+: chips de selección (mismo `_ToggleChip` que "Replicar en semanas/meses" más abajo).
+  List<_ServicioProfesional> _servicios = [];
+  bool _cargandoServicios = true;
+  String? _errorServicios;
+  String? _servicioIdSeleccionado;
 
   DateTime _mesVisible = DateTime(DateTime.now().year, DateTime.now().month, 1);
   final Set<DateTime> _fechasSeleccionadas = {};
@@ -90,9 +101,29 @@ class _GestionHorariosScreenState extends State<GestionHorariosScreen> {
   bool _mensajeEsError = false;
 
   @override
-  void dispose() {
-    _servicioIdCtrl.dispose();
-    super.dispose();
+  void initState() {
+    super.initState();
+    _cargarServicios();
+  }
+
+  Future<void> _cargarServicios() async {
+    final sesion = context.read<Sesion>();
+    try {
+      final raw = await sesion.api.getList('/profesionales/${sesion.profesionalId}/servicios');
+      final servicios = raw.map((e) => _ServicioProfesional.fromApi(e as Map<String, dynamic>)).toList();
+      if (!mounted) return;
+      setState(() {
+        _servicios = servicios;
+        _cargandoServicios = false;
+        if (servicios.length == 1) _servicioIdSeleccionado = servicios.single.servicioId;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _cargandoServicios = false;
+        _errorServicios = e.toString();
+      });
+    }
   }
 
   int _diaSemanaBackend(DateTime fecha) => fecha.weekday % 7; // Dart lun=1..dom=7 -> dom=0..sáb=6
@@ -161,10 +192,13 @@ class _GestionHorariosScreenState extends State<GestionHorariosScreen> {
   }
 
   Future<void> _guardar() async {
-    final servicioId = _servicioIdCtrl.text.trim();
-    if (servicioId.isEmpty) {
+    final servicioId = _servicioIdSeleccionado;
+    if (servicioId == null) {
       setState(() {
-        _mensaje = 'Ingresá el ID del servicio (ver nota debajo del campo) antes de guardar.';
+        _mensaje = _servicios.isEmpty
+            ? 'Todavía no tenés servicios asociados a tu agenda — agregá uno desde "Editar '
+                'Perfil" antes de configurar horarios.'
+            : 'Elegí a qué servicio aplican estos horarios.';
         _mensajeEsError = true;
       });
       return;
@@ -239,7 +273,16 @@ class _GestionHorariosScreenState extends State<GestionHorariosScreen> {
       body: ListView(
         padding: const EdgeInsets.all(AppSpacing.base),
         children: [
-          _servicioIdField(context),
+          _sectionCard(
+            context,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const _SectionTitle(emoji: '🧰', text: 'Servicio'),
+                _servicioSelector(context),
+              ],
+            ),
+          ),
           const SizedBox(height: AppSpacing.lg),
           _sectionCard(
             context,
@@ -474,7 +517,9 @@ class _GestionHorariosScreenState extends State<GestionHorariosScreen> {
                   child: PrimaryButton(
                     label: 'Guardar ${_fechasSeleccionadas.length} Fechas',
                     loading: _guardando,
-                    onPressed: (_guardando || _fechasSeleccionadas.isEmpty) ? null : _guardar,
+                    onPressed: (_guardando || _fechasSeleccionadas.isEmpty || _servicioIdSeleccionado == null)
+                        ? null
+                        : _guardar,
                   ),
                 ),
               ],
@@ -487,19 +532,49 @@ class _GestionHorariosScreenState extends State<GestionHorariosScreen> {
 
   List<DateTime> _fechasOrdenadas() => _fechasSeleccionadas.toList()..sort();
 
-  Widget _servicioIdField(BuildContext context) {
+  Widget _servicioSelector(BuildContext context) {
+    final colors = AppColors.of(context);
+    if (_cargandoServicios) {
+      return Row(
+        children: [
+          const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
+          const SizedBox(width: AppSpacing.sm),
+          Text('Cargando tus servicios...', style: AppTypography.caption(context)),
+        ],
+      );
+    }
+    if (_errorServicios != null) {
+      return Text(
+        'No se pudieron cargar tus servicios: $_errorServicios',
+        style: AppTypography.caption(context).copyWith(color: colors.danger.base),
+      );
+    }
+    if (_servicios.isEmpty) {
+      return Text(
+        'Todavía no asociaste ningún servicio a tu agenda. Andá a "Editar Perfil" > "Servicios '
+        'que brindo" para agregar al menos uno — recién ahí vas a poder configurar horarios.',
+        style: AppTypography.body(context),
+      );
+    }
+    if (_servicios.length == 1) {
+      return Text('Horarios para: ${_servicios.single.nombre}', style: AppTypography.caption(context));
+    }
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        TextField(
-          controller: _servicioIdCtrl,
-          decoration: const InputDecoration(labelText: 'ID del servicio *'),
-        ),
+        Text('¿A qué servicio aplican estos horarios?', style: AppTypography.caption(context)),
         const SizedBox(height: AppSpacing.xs),
-        Text(
-          'Simplificación temporal: todavía no hay un selector de servicios — pegá el UUID del '
-          'servicio al que aplican estos horarios.',
-          style: AppTypography.caption(context),
+        Wrap(
+          spacing: AppSpacing.sm,
+          runSpacing: AppSpacing.sm,
+          children: [
+            for (final servicio in _servicios)
+              _ToggleChip(
+                label: servicio.nombre,
+                selected: _servicioIdSeleccionado == servicio.servicioId,
+                onTap: () => setState(() => _servicioIdSeleccionado = servicio.servicioId),
+              ),
+          ],
         ),
       ],
     );
@@ -520,6 +595,22 @@ class _GestionHorariosScreenState extends State<GestionHorariosScreen> {
   }
 
   static String _capitalize(String s) => s.isEmpty ? s : '${s[0].toUpperCase()}${s.substring(1)}';
+}
+
+/// Fila de `GET /profesionales/:id/servicios` — solo los 2 campos que este selector necesita
+/// (nombre para mostrar, servicio_id para el POST de `_guardar`). El resto del contrato
+/// (`duracion_min`, `precio_referencia`, `negocio_id`, `negocio_nombre`, `requiere_sena`,
+/// `monto_sena` — ver `precios_senas_screen.dart` para el shape completo) no hace falta acá.
+class _ServicioProfesional {
+  const _ServicioProfesional({required this.servicioId, required this.nombre});
+
+  final String servicioId;
+  final String nombre;
+
+  factory _ServicioProfesional.fromApi(Map<String, dynamic> json) => _ServicioProfesional(
+        servicioId: json['servicio_id'] as String,
+        nombre: json['nombre'] as String,
+      );
 }
 
 class _SectionTitle extends StatelessWidget {
