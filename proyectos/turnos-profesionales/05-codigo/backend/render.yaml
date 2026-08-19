@@ -168,6 +168,23 @@ services:
       - key: MP_WEBHOOK_SECRET
         sync: false
 
+      # RESEND_API_KEY / RESEND_FROM_EMAIL — envío real por email de las notificaciones de la
+      # bandeja (HU-25, src/integraciones/email.ts `ResendEmailProvider` +
+      # src/dominio/notificaciones.ts) y, una vez configurada, también del email de recuperación
+      # de contraseña (HU-37). Mismo mecanismo exacto que MP_ACCESS_TOKEN arriba: "sync: false"
+      # porque Render no puede generar ni resolver ningún valor para estas claves (las emite
+      # Resend, no Render) — quedan declaradas acá sin valor, pendientes de cargarse A MANO desde
+      # el dashboard del servicio una vez que el CEO tenga una cuenta de Resend real. Mientras no
+      # estén cargadas, `emailProvider` resuelve a `MockEmailProvider` (ver .env.example) — el
+      # resto del servicio sigue funcionando con normalidad sin esto, incluida la bandeja in-app
+      # de notificaciones (que no depende de este proveedor). RESEND_FROM_EMAIL es opcional incluso
+      # con RESEND_API_KEY configurada (tiene default de aplicación, ver .env.example) — se declara
+      # igual acá para que quede visible en el dashboard sin tener que ir a leer el código.
+      - key: RESEND_API_KEY
+        sync: false
+      - key: RESEND_FROM_EMAIL
+        sync: false
+
       # No se listan acá EXPIRACION_PAGO_MIN / VENTANA_CANCELACION_MIN / RATE_LIMIT_* —
       # tienen defaults de aplicación ya pensados para producción (15 min, 120 min, 10
       # intentos/15 min, ver ../../08-despliegue/README.md §3). Agregarlas acá (o a mano en

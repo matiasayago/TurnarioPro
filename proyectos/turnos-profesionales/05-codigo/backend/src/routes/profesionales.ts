@@ -14,11 +14,73 @@ import {
   respuestaValidacionFallida,
 } from '../dominio/validacion';
 import { LimitePlanGratisError, cuerpoLimitePlanAlcanzado, exigirLimiteTurnosConfirmadosDelMes } from '../dominio/suscripciones';
+import {
+  armarAsuntoNotificacion,
+  armarMensajeNotificacion,
+  obtenerDatosNotificacionTurno,
+  DatosMensajeNotificacion,
+} from '../dominio/notificaciones';
+import { emailProvider } from '../integraciones/email';
 
 export const profesionalesRouter = Router();
 
 function esPropioProfesional(req: AuthedRequest): boolean {
   return req.auth!.rol === 'profesional' && req.auth!.profesional_id === req.params.id;
+}
+
+// Envío de notificaciones por email (ampliación 2026-08-18, pedido explícito del CEO) — mismo
+// criterio y mismo diseño que el bloque equivalente de routes/turnos.ts (ver el comentario grande
+// ahí): helper propio de ESTE archivo, no compartido entre routers, mismo criterio ya usado en
+// este backend para glue code sencillo (ver el comentario junto a `POST /profesionales/:id/turnos`
+// más abajo, "se duplica acá... a propósito"). Este archivo solo tiene UN productor de
+// notificaciones (a diferencia de turnos.ts, con 3) y siempre de `tipo: 'confirmacion'` — por eso
+// esta versión no recibe `tipo` como parámetro, a diferencia de `enviarEmailsNotificacionTurno` en
+// turnos.ts.
+
+/** Envía UN email de notificación y nunca lanza — ver el comentario equivalente en
+ *  routes/turnos.ts (mismo criterio fail-closed/no-throw que integraciones/pagos.ts
+ *  `validarWebhook`, para no tirar abajo el flujo principal por un problema de un sistema externo). */
+async function enviarEmailNotificacion(destinatarioEmail: string, datos: DatosMensajeNotificacion): Promise<void> {
+  try {
+    await emailProvider.enviarNotificacion(
+      destinatarioEmail,
+      armarAsuntoNotificacion(datos.tipo),
+      armarMensajeNotificacion(datos)
+    );
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error(
+      `[profesionales] Error enviando email de notificación (tipo=${datos.tipo}, destinatarioEsCliente=${datos.destinatarioEsCliente}) a ${destinatarioEmail}:`,
+      err
+    );
+  }
+}
+
+/** Notifica por email a LAS 2 partes de `turnoId` (tipo 'confirmacion', el único que produce este
+ *  archivo) — ver `enviarEmailsNotificacionTurno` en routes/turnos.ts para el razonamiento
+ *  completo (mismo diseño). Nunca lanza. */
+async function enviarEmailsNotificacionTurno(turnoId: string): Promise<void> {
+  let datos;
+  try {
+    datos = await obtenerDatosNotificacionTurno(pool, turnoId);
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error(`[profesionales] Error leyendo datos para notificar por email (turno ${turnoId}):`, err);
+    return;
+  }
+  if (!datos) return;
+
+  const datosBase = {
+    tipo: 'confirmacion' as const,
+    clienteNombre: datos.clienteNombre,
+    profesionalNombre: datos.profesionalNombre,
+    turnoInicio: datos.turnoInicio,
+  };
+
+  await Promise.all([
+    enviarEmailNotificacion(datos.clienteEmail, { ...datosBase, destinatarioEsCliente: true }),
+    enviarEmailNotificacion(datos.profesionalEmail, { ...datosBase, destinatarioEsCliente: false }),
+  ]);
 }
 
 // MEDIUM-3 (ver 07-seguridad/informe-seguridad.md): esquemas de validación de entrada — se
@@ -596,6 +658,28 @@ profesionalesRouter.post(
             [uuid(), turnoId, 'confirmacion', paciente_id, ts]
           );
 
+          // Ampliación (2026-08-18, Backend — pedido explícito del CEO): más allá del paciente,
+          // también se agrega un 2do INSERT con destinatario = el profesional que ejecutó la
+          // carga (`req.auth!.sub` — este endpoint corre con `requireAuth('profesional')` y, como
+          // señala el comentario grande más arriba, el actor autenticado acá YA ES el profesional
+          // del turno, así que `req.auth!.sub` es exactamente `profesional.usuario_id`, sin
+          // necesidad de resolverlo aparte). No contradice el razonamiento del INSERT de arriba
+          // ("notificarse a sí mismo no aporta nada" seguía siendo válido cuando la bandeja
+          // in-app era la ÚNICA superficie de esta notificación) — con el envío real por email
+          // (ver integraciones/email.ts) el criterio pasa a ser "ambas partes del turno quedan
+          // notificadas por los 2 canales", igual que los otros 4 productores de este backend
+          // (routes/turnos.ts, jobs/recordarTurnosProximos.ts). Mismo `tipo`/`turno_id`/
+          // `creado_en` que el INSERT de arriba. Sin cambio de identidad de RLS: `app.usuario_id`
+          // ya es el profesional en toda esta transacción (ver comentario grande más arriba,
+          // "simplifica el manejo de identidad RLS"), y `notificacion_insert_evento_turno`
+          // (004_notificaciones.sql) admite `destinatario_usuario_id = profesional.usuario_id` de
+          // ESTE turno bajo esa misma identidad (vía la rama "staff del negocio" de su 1ra
+          // condición + la rama `p.usuario_id = destinatario_usuario_id` de su 2da condición).
+          await client.query(
+            'INSERT INTO notificacion (id, turno_id, tipo, destinatario_usuario_id, creado_en) VALUES ($1, $2, $3, $4, $5)',
+            [uuid(), turnoId, 'confirmacion', req.auth!.sub, ts]
+          );
+
           // Alta automática de `paciente` — mismo mecanismo exacto que `POST /turnos` (turnos.ts,
           // ver ese comentario extenso), pero sin el cambio de identidad RLS que esa ruta
           // necesita: acá `app.usuario_id` YA es el profesional (ver comentario de arriba), la
@@ -626,6 +710,15 @@ profesionalesRouter.post(
       }
       throw err;
     }
+
+    // Envío real por email (best-effort, FUERA de la transacción de arriba — ver el comentario
+    // grande junto a `enviarEmailsNotificacionTurno` más arriba): recién acá, una vez que
+    // `withTransaction` ya hizo COMMIT sin errores. SIN `await` a propósito (ampliación
+    // 2026-08-18, tras un fallo intermitente no reproducible en CI que desapareció con este
+    // cambio — ver memory/proyectos/turnos-profesionales/decisiones.md, mismo criterio que
+    // routes/turnos.ts): esta respuesta no tiene por qué esperar a que terminen 2 emails que ya
+    // de por sí nunca pueden fallar esta request (no lanza, ver el comentario grande de arriba).
+    void enviarEmailsNotificacionTurno(turnoId);
 
     res.status(201).json({
       id: turnoId,
