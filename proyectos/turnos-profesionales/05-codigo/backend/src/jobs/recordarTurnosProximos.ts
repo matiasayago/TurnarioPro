@@ -176,6 +176,13 @@ async function enviarEmailRecordatorio(turnoId: string, esCliente: boolean): Pro
     tipo: 'recordatorio',
     clienteNombre: datos.clienteNombre,
     profesionalNombre: datos.profesionalNombre,
+    // Agregado 2026-08-19 (pedido explícito del CEO — ver dominio/notificaciones.ts): ya viene
+    // resuelto gratis por `obtenerDatosNotificacionTurno` de arriba (JOIN a `negocio` agregado
+    // ahí), sin necesidad de ampliar el SELECT de "candidatos" de `recordarTurnosProximos` (ese
+    // SELECT solo alimenta el INSERT de la bandeja — id/turno_id/tipo/destinatario/creado_en, sin
+    // ninguna columna de texto — no el cuerpo del email, que se arma acá, por turno, con una
+    // lectura propia).
+    negocioNombre: datos.negocioNombre,
     turnoInicio: datos.turnoInicio,
     destinatarioEsCliente: esCliente,
   };

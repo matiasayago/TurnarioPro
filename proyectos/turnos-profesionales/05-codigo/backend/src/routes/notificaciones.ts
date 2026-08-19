@@ -90,12 +90,14 @@ notificacionesRouter.get(
           `SELECT
              n.id, n.tipo, n.leido, n.creado_en, n.turno_id,
              t.inicio AS turno_inicio, t.cliente_id AS turno_cliente_id,
-             uc.nombre AS cliente_nombre, up.nombre AS profesional_nombre
+             uc.nombre AS cliente_nombre, up.nombre AS profesional_nombre,
+             neg.nombre AS negocio_nombre
            FROM notificacion n
            JOIN turno t ON t.id = n.turno_id
            JOIN usuario uc ON uc.id = t.cliente_id
            JOIN profesional pr ON pr.id = t.profesional_id
            JOIN usuario up ON up.id = pr.usuario_id
+           JOIN negocio neg ON neg.id = t.negocio_id
            WHERE n.destinatario_usuario_id = $1
            ORDER BY n.creado_en DESC`,
           [req.auth!.sub]
@@ -115,6 +117,7 @@ notificacionesRouter.get(
         tipo: fila.tipo,
         clienteNombre: fila.cliente_nombre,
         profesionalNombre: fila.profesional_nombre,
+        negocioNombre: fila.negocio_nombre,
         turnoInicio: fila.turno_inicio,
         destinatarioEsCliente: fila.turno_cliente_id === req.auth!.sub,
       }),
