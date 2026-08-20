@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 
+import '../../api_client.dart';
 import '../../state/sesion.dart';
 import '../../theme/app_colors.dart';
 import '../../theme/app_radius.dart';
@@ -68,6 +69,28 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
   void _marcarCompletada(String turnoId) {
     setState(() => _completadosLocalmente.add(turnoId));
+  }
+
+  /// Pedido del CEO (2026-08-20): al marcar un turno como completado, ofrecer cargar una nota
+  /// médica y/o un tratamiento para ese cliente. [_marcarCompletada] se dispara primero y de
+  /// forma incondicional — no depende de lo que pase en el modal: el turno queda marcado como
+  /// completado localmente lo haya cerrado el profesional cargando algo o no (ver
+  /// [_CompletarTurnoModal]). Mismo mecanismo que [_abrirNuevaCita] (`AppModalSheet.show`) en vez
+  /// de un `Navigator.push` a pantalla completa suelto.
+  void _completarYAbrirModal(BuildContext context, _TurnoDashboard turno) {
+    _marcarCompletada(turno.id);
+    final profesionalId = context.read<Sesion>().profesionalId;
+    // Defensivo: esta pantalla ya necesita `profesionalId` no nulo para haber podido cargar
+    // `turnosHoy` en primer lugar (ver `_cargarTurnos`) — no debería poder ser nulo acá.
+    if (profesionalId == null) return;
+    AppModalSheet.show<void>(
+      context,
+      builder: (_) => _CompletarTurnoModal(
+        profesionalId: profesionalId,
+        clienteId: turno.clienteId,
+        clienteNombre: turno.cliente,
+      ),
+    );
   }
 
   bool _esHoy(DateTime fecha) {
@@ -222,7 +245,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     _ProximaCitaCard(
                       turno: turno,
                       completada: _completadosLocalmente.contains(turno.id),
-                      onCompletar: () => _marcarCompletada(turno.id),
+                      onCompletar: () => _completarYAbrirModal(context, turno),
                     ),
                     const SizedBox(height: AppSpacing.md),
                   ],
@@ -288,6 +311,7 @@ class _TurnoDashboard {
   const _TurnoDashboard({
     required this.id,
     required this.cliente,
+    required this.clienteId,
     required this.servicio,
     required this.inicio,
     required this.estado,
@@ -295,6 +319,13 @@ class _TurnoDashboard {
 
   final String id;
   final String cliente;
+
+  /// `usuario.id` real del cliente (NO el id de la ficha `paciente`) — mismo `:pacienteId` que ya
+  /// consume `GET /profesionales/:id/pacientes/:pacienteId/historial`
+  /// (`historial_paciente_screen.dart`). Lo agrega Backend (fast-follow 2026-08-20) a este mismo
+  /// `GET /profesionales/:id/turnos`, para poder cargar nota médica/tratamiento desde acá sin un
+  /// round-trip extra — ver [_DashboardScreenState._completarYAbrirModal].
+  final String clienteId;
   final String servicio;
   final DateTime inicio;
   final TurnoEstado estado;
@@ -303,6 +334,7 @@ class _TurnoDashboard {
     return _TurnoDashboard(
       id: json['id'] as String,
       cliente: json['cliente'] as String,
+      clienteId: json['cliente_id'] as String,
       servicio: json['servicio'] as String,
       inicio: DateTime.parse(json['inicio'] as String).toLocal(),
       estado: turnoEstadoFromApi(json['estado'] as String),
@@ -394,6 +426,384 @@ class _ProximaCitaCard extends StatelessWidget {
               ],
             ),
           ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Modal ofrecido al marcar un turno como completado (pedido del CEO, 2026-08-20) — nota médica
+/// y tratamiento son 2 acciones independientes y **opcionales**, cada una con su propio botón
+/// "Guardar" y su propio feedback inline: mismo criterio de "guardado por fila/sección
+/// independiente, no un botón general único" que `precios_senas_screen.dart` (ver el doc comment
+/// de esa clase) — así, si una de las 2 falla, no hay ambigüedad sobre qué quedó guardado y qué
+/// no. El profesional puede cerrar sin cargar nada (botón "Listo" del footer, o el "✕" de
+/// `AppModalSheet`) — el turno ya se marcó como completado localmente ANTES de abrir este modal
+/// (ver `_DashboardScreenState._completarYAbrirModal`), así que cerrar sin cargar nada es un
+/// flujo válido y esperado, no una cancelación.
+class _CompletarTurnoModal extends StatelessWidget {
+  const _CompletarTurnoModal({required this.profesionalId, required this.clienteId, required this.clienteNombre});
+
+  final String profesionalId;
+  final String clienteId;
+  final String clienteNombre;
+
+  @override
+  Widget build(BuildContext context) {
+    return AppModalSheet(
+      title: 'Completar turno',
+      secondaryLabel: 'Listo',
+      child: ListView(
+        padding: const EdgeInsets.all(AppSpacing.base),
+        children: [
+          Text(
+            'Turno de $clienteNombre marcado como completado. Opcionalmente, registrá acá una '
+            'nota médica y/o un tratamiento — podés cerrar sin cargar nada.',
+            style: AppTypography.caption(context),
+          ),
+          const SizedBox(height: AppSpacing.base),
+          _NotaMedicaForm(profesionalId: profesionalId, clienteId: clienteId),
+          const SizedBox(height: AppSpacing.md),
+          _TratamientoForm(profesionalId: profesionalId, clienteId: clienteId),
+          const SizedBox(height: AppSpacing.base),
+        ],
+      ),
+    );
+  }
+}
+
+/// Sección "Nota médica" del modal de arriba — `POST
+/// /profesionales/:profesionalId/pacientes/:clienteId/notas-medicas`, body `{ texto }`. Mismo
+/// criterio de estado propio (loading/error/mensaje) que `_ServicioSenaCardState`
+/// (`precios_senas_screen.dart`).
+class _NotaMedicaForm extends StatefulWidget {
+  const _NotaMedicaForm({required this.profesionalId, required this.clienteId});
+
+  final String profesionalId;
+  final String clienteId;
+
+  @override
+  State<_NotaMedicaForm> createState() => _NotaMedicaFormState();
+}
+
+class _NotaMedicaFormState extends State<_NotaMedicaForm> {
+  final _textoCtrl = TextEditingController();
+
+  bool _guardando = false;
+  String? _mensaje;
+  bool _mensajeEsError = false;
+
+  @override
+  void dispose() {
+    _textoCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _guardar() async {
+    final texto = _textoCtrl.text.trim();
+    if (texto.isEmpty) {
+      setState(() {
+        _mensaje = 'La nota no puede estar vacía.';
+        _mensajeEsError = true;
+      });
+      return;
+    }
+    setState(() {
+      _guardando = true;
+      _mensaje = null;
+    });
+    final sesion = context.read<Sesion>();
+    try {
+      await sesion.api.post(
+        '/profesionales/${widget.profesionalId}/pacientes/${widget.clienteId}/notas-medicas',
+        {'texto': texto},
+      );
+      if (!mounted) return;
+      setState(() {
+        _guardando = false;
+        _mensaje = 'Nota guardada.';
+        _mensajeEsError = false;
+        _textoCtrl.clear();
+      });
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _guardando = false;
+        _mensaje = 'No se pudo guardar la nota: ${e.message}';
+        _mensajeEsError = true;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _guardando = false;
+        _mensaje = 'No se pudo guardar la nota: $e';
+        _mensajeEsError = true;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = AppColors.of(context);
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(AppSpacing.base),
+      decoration: BoxDecoration(
+        color: colors.surface,
+        borderRadius: BorderRadius.circular(AppRadius.card),
+        boxShadow: AppRadius.cardShadow,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('Nota médica', style: AppTypography.sectionTitle(context)),
+          const SizedBox(height: AppSpacing.sm),
+          TextField(
+            controller: _textoCtrl,
+            enabled: !_guardando,
+            maxLines: 4,
+            decoration: const InputDecoration(labelText: 'Notas de la consulta'),
+          ),
+          if (_mensaje != null) ...[
+            const SizedBox(height: AppSpacing.xs),
+            Text(
+              _mensaje!,
+              style: AppTypography.caption(context)
+                  .copyWith(color: _mensajeEsError ? colors.danger.base : colors.success.base),
+            ),
+          ],
+          const SizedBox(height: AppSpacing.sm),
+          Align(
+            alignment: Alignment.centerRight,
+            child: PrimaryButton(
+              label: 'Guardar nota',
+              radiusVariant: AppButtonRadius.card,
+              expand: false,
+              loading: _guardando,
+              onPressed: _guardando ? null : _guardar,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Sección "Tratamiento" del modal de arriba — `POST
+/// /profesionales/:profesionalId/pacientes/:clienteId/tratamientos`, body `{ descripcion,
+/// fecha_inicio, fecha_fin }`. `fecha_inicio` arranca en hoy (requerida, siempre se manda);
+/// `fecha_fin` es opcional — sin elegir queda `null` ("tratamiento en curso"). Mismo selector de
+/// fecha que `_campoFechaNacimiento` (`ficha_paciente_screen.dart`): diálogo compacto con
+/// `MonthCalendarPicker(allowPastSelection: true, showLegend: false)` en vez de un date picker
+/// nuevo — `allowPastSelection` también habilita fechas futuras (ver ese widget), útil acá para
+/// poder cargar un tratamiento con inicio o fin programado.
+class _TratamientoForm extends StatefulWidget {
+  const _TratamientoForm({required this.profesionalId, required this.clienteId});
+
+  final String profesionalId;
+  final String clienteId;
+
+  @override
+  State<_TratamientoForm> createState() => _TratamientoFormState();
+}
+
+class _TratamientoFormState extends State<_TratamientoForm> {
+  final _descripcionCtrl = TextEditingController();
+  DateTime _fechaInicio = MonthCalendarPicker.dateOnly(DateTime.now());
+  DateTime? _fechaFin;
+
+  bool _guardando = false;
+  String? _mensaje;
+  bool _mensajeEsError = false;
+
+  @override
+  void dispose() {
+    _descripcionCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<DateTime?> _elegirFecha(DateTime? actual) {
+    var mesVisible = actual ?? _fechaInicio;
+    return showDialog<DateTime>(
+      context: context,
+      builder: (dialogContext) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return Dialog(
+              child: Padding(
+                padding: const EdgeInsets.all(AppSpacing.base),
+                child: MonthCalendarPicker(
+                  month: mesVisible,
+                  onMonthChanged: (m) => setDialogState(() => mesVisible = m),
+                  selectedDates: actual != null ? {MonthCalendarPicker.dateOnly(actual)} : {},
+                  onDayTap: (d) => Navigator.of(dialogContext).pop(d),
+                  allowPastSelection: true,
+                  showLegend: false,
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Future<void> _elegirFechaInicio() async {
+    final elegida = await _elegirFecha(_fechaInicio);
+    if (elegida != null) setState(() => _fechaInicio = elegida);
+  }
+
+  Future<void> _elegirFechaFin() async {
+    final elegida = await _elegirFecha(_fechaFin);
+    if (elegida != null) setState(() => _fechaFin = elegida);
+  }
+
+  Future<void> _guardar() async {
+    final descripcion = _descripcionCtrl.text.trim();
+    if (descripcion.isEmpty) {
+      setState(() {
+        _mensaje = 'La descripción no puede estar vacía.';
+        _mensajeEsError = true;
+      });
+      return;
+    }
+    setState(() {
+      _guardando = true;
+      _mensaje = null;
+    });
+    final sesion = context.read<Sesion>();
+    final formato = DateFormat('yyyy-MM-dd');
+    try {
+      await sesion.api.post(
+        '/profesionales/${widget.profesionalId}/pacientes/${widget.clienteId}/tratamientos',
+        {
+          'descripcion': descripcion,
+          'fecha_inicio': formato.format(_fechaInicio),
+          'fecha_fin': _fechaFin != null ? formato.format(_fechaFin!) : null,
+        },
+      );
+      if (!mounted) return;
+      setState(() {
+        _guardando = false;
+        _mensaje = 'Tratamiento guardado.';
+        _mensajeEsError = false;
+        _descripcionCtrl.clear();
+        _fechaInicio = MonthCalendarPicker.dateOnly(DateTime.now());
+        _fechaFin = null;
+      });
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _guardando = false;
+        _mensaje = 'No se pudo guardar el tratamiento: ${e.message}';
+        _mensajeEsError = true;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _guardando = false;
+        _mensaje = 'No se pudo guardar el tratamiento: $e';
+        _mensajeEsError = true;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = AppColors.of(context);
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(AppSpacing.base),
+      decoration: BoxDecoration(
+        color: colors.surface,
+        borderRadius: BorderRadius.circular(AppRadius.card),
+        boxShadow: AppRadius.cardShadow,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('Tratamiento', style: AppTypography.sectionTitle(context)),
+          const SizedBox(height: AppSpacing.sm),
+          TextField(
+            controller: _descripcionCtrl,
+            enabled: !_guardando,
+            maxLines: 2,
+            decoration: const InputDecoration(labelText: 'Descripción'),
+          ),
+          const SizedBox(height: AppSpacing.md),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: _campoFecha(
+                  context,
+                  label: 'Fecha de inicio',
+                  fecha: _fechaInicio,
+                  onTap: _guardando ? null : _elegirFechaInicio,
+                ),
+              ),
+              const SizedBox(width: AppSpacing.base),
+              Expanded(
+                child: _campoFecha(
+                  context,
+                  label: 'Fecha de fin',
+                  fecha: _fechaFin,
+                  onTap: _guardando ? null : _elegirFechaFin,
+                  onClear: _fechaFin != null && !_guardando ? () => setState(() => _fechaFin = null) : null,
+                ),
+              ),
+            ],
+          ),
+          if (_fechaFin == null) ...[
+            const SizedBox(height: AppSpacing.xs),
+            Text('Sin fecha de fin: tratamiento en curso.', style: AppTypography.caption(context)),
+          ],
+          if (_mensaje != null) ...[
+            const SizedBox(height: AppSpacing.xs),
+            Text(
+              _mensaje!,
+              style: AppTypography.caption(context)
+                  .copyWith(color: _mensajeEsError ? colors.danger.base : colors.success.base),
+            ),
+          ],
+          const SizedBox(height: AppSpacing.sm),
+          Align(
+            alignment: Alignment.centerRight,
+            child: PrimaryButton(
+              label: 'Guardar tratamiento',
+              radiusVariant: AppButtonRadius.card,
+              expand: false,
+              loading: _guardando,
+              onPressed: _guardando ? null : _guardar,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _campoFecha(
+    BuildContext context, {
+    required String label,
+    required DateTime? fecha,
+    required VoidCallback? onTap,
+    VoidCallback? onClear,
+  }) {
+    final colors = AppColors.of(context);
+    final texto = fecha != null ? DateFormat('dd/MM/yyyy').format(fecha) : 'Sin definir';
+    return InkWell(
+      onTap: onTap,
+      child: InputDecorator(
+        decoration: InputDecoration(
+          labelText: label,
+          enabled: onTap != null,
+          suffixIcon: onClear != null
+              ? IconButton(icon: const Icon(Icons.clear, size: 18), tooltip: 'Quitar fecha', onPressed: onClear)
+              : const Icon(Icons.calendar_today_outlined, size: 18),
+        ),
+        child: Text(
+          texto,
+          style: AppTypography.body(context).copyWith(color: onTap != null ? colors.textPrimary : colors.textSecondary),
         ),
       ),
     );

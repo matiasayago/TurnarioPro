@@ -8,6 +8,7 @@ import '../../theme/app_radius.dart';
 import '../../theme/app_spacing.dart';
 import '../../theme/app_typography.dart';
 import '../../widgets/widgets.dart';
+import 'precios_senas_screen.dart';
 
 /// Editar Perfil (Configuración > Cuenta > Editar Perfil, `configuracion_screen.dart`) — HU-32
 /// (bloque "Cuenta" de `usuario.ts`, no el de privacidad). Contrato: `GET /usuario/perfil` ->
@@ -38,8 +39,11 @@ import '../../widgets/widgets.dart';
 /// (mismo contrato que `precios_senas_screen.dart`, expone `servicio_id`); alta,
 /// `POST /profesionales/:id/servicios`, body `{ servicio_id, requiere_sena: false }` -> 201. **Sin
 /// baja**: `profesionales.ts` no publica ningún DELETE para desasociar, así que un servicio ya
-/// asociado queda fijo ("Ya asociado", sin control) — la seña sí se configura después, servicio
-/// por servicio, en "Precios y Señas" (`precios_senas_screen.dart`).
+/// asociado no se puede quitar desde acá. La seña sí se puede editar — un servicio "Ya asociado"
+/// muestra un botón "Editar seña" que navega a `PreciosSenasScreen` (fast-follow 2026-08-20: el
+/// CEO probó la app, encontró la fila fija y preguntó por qué no se podía editar — la pantalla de
+/// edición ya existía, pero nada en "Servicios que brindo" enlazaba a ella; el fix es ese enlace,
+/// no una edición duplicada acá).
 class EditarPerfilScreen extends StatefulWidget {
   const EditarPerfilScreen({super.key});
 
@@ -383,11 +387,11 @@ class _ServicioCatalogo {
 /// para los montos típicos de este dominio.
 String _formatMonto(num valor) => valor == valor.roundToDouble() ? valor.toStringAsFixed(0) : valor.toStringAsFixed(2);
 
-/// Fila de "Servicios que brindo" — ya asociado (indicador fijo, sin acción: `profesionales.ts`
-/// no publica ningún DELETE para esta asociación, ver el doc comment de
-/// [_EditarPerfilScreenState._asociarServicio]) o todavía no asociado (botón "Agregar" que
-/// dispara [onAsociar]). `StatefulWidget` solo para llevar `_procesando` mientras el POST está en
-/// vuelo — mismo criterio que `_ServicioCardState` en `administrador/servicios_negocio_screen.dart`.
+/// Fila de "Servicios que brindo" — ya asociado (botón "Editar seña" que navega a
+/// `PreciosSenasScreen`, ver el doc comment de la clase) o todavía no asociado (botón "Agregar"
+/// que dispara [onAsociar]). `StatefulWidget` solo para llevar `_procesando` mientras el POST está
+/// en vuelo — mismo criterio que `_ServicioCardState` en
+/// `administrador/servicios_negocio_screen.dart`.
 class _ServicioAsociacionTile extends StatefulWidget {
   const _ServicioAsociacionTile({required this.servicio, required this.asociado, required this.onAsociar});
 
@@ -435,16 +439,25 @@ class _ServicioAsociacionTileState extends State<_ServicioAsociacionTile> {
         ),
         const SizedBox(width: AppSpacing.sm),
         if (widget.asociado)
-          Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(Icons.check_circle, size: 18, color: colors.success.base),
-              const SizedBox(width: AppSpacing.xs),
-              Text(
-                'Ya asociado',
-                style: AppTypography.caption(context).copyWith(color: colors.success.base, fontWeight: FontWeight.w600),
+          InkWell(
+            borderRadius: BorderRadius.circular(AppRadius.chip),
+            onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const PreciosSenasScreen())),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: AppSpacing.xs, vertical: AppSpacing.xs),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.check_circle, size: 18, color: colors.success.base),
+                  const SizedBox(width: AppSpacing.xs),
+                  Text(
+                    'Editar seña',
+                    style: AppTypography.caption(context).copyWith(color: colors.success.base, fontWeight: FontWeight.w600),
+                  ),
+                  const SizedBox(width: 2),
+                  Icon(Icons.chevron_right, size: 16, color: colors.success.base),
+                ],
               ),
-            ],
+            ),
           )
         else
           SuccessButton(

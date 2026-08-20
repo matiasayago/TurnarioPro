@@ -13,7 +13,10 @@ import '../../widgets/widgets.dart';
 /// Pagos" (Panel Profesional) y "Pagos y Señas" (sección propia) — la seña ya se configura por
 /// asociación profesional↔servicio (HU-04b); no hay backend para los otros sub-ítems que muestra
 /// `mapa-pantallas.md` §5.11bis bajo "Pagos y Señas" (el toggle "Reservas online con seña" a
-/// nivel negocio, "Historial de Señas"), así que quedan fuera de esta ronda.
+/// nivel negocio, "Historial de Señas"), así que quedan fuera de esta ronda. También alcanzable
+/// (2026-08-20) desde "Editar Perfil" > "Servicios que brindo", botón "Editar seña" de un
+/// servicio ya asociado (ver `editar_perfil_screen.dart`) — mismo destino, sin duplicar la lógica
+/// de edición en 2 pantallas.
 ///
 /// Contrato: `GET /profesionales/:id/servicios` -> array de `{ servicio_id, nombre,
 /// duracion_min, precio_referencia, negocio_id, negocio_nombre, requiere_sena, monto_sena }` —

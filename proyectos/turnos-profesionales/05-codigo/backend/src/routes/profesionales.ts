@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { v4 as uuid } from 'uuid';
+import { PoolClient } from 'pg';
 import { pool, nowIso, withTransaction } from '../db';
 import { requireAuth, AuthedRequest } from '../auth';
 import { asyncHandler } from '../middleware/asyncHandler';
@@ -149,6 +150,24 @@ const fichaPacienteSchema = z.object({
   alergias: z.string().nullable(),
   notas_medicas_generales: z.string().nullable(),
   activo: z.boolean(),
+});
+
+// Body de POST /:id/pacientes/:pacienteId/notas-medicas (HU-21/D8/RN13, ver el comentario grande
+// junto a ese endpoint más abajo, después del GET .../historial): un único campo requerido, la
+// anotación en sí. Sin `fecha` — la pone la propia tabla (`nota_medica.fecha DATE NOT NULL
+// DEFAULT CURRENT_DATE`, ver 001_init.sql), esta HU no pide elegir una fecha distinta a hoy.
+const notaMedicaBodySchema = z.object({
+  texto: z.string().min(1, 'texto es requerido'),
+});
+
+// Body de POST /:id/pacientes/:pacienteId/tratamientos — mismo criterio que la de arriba, pero
+// `tratamiento` sí trae su propio rango de fechas (fecha_inicio NOT NULL, fecha_fin nullable —
+// "puede seguir abierto/en curso", ver 001_init.sql): sin default de tabla para ninguna de las 2,
+// así que acá SÍ viajan explícitas en el body. `fecha_fin` opcional/`null` para "todavía en curso".
+const tratamientoBodySchema = z.object({
+  descripcion: z.string().min(1, 'descripcion es requerido'),
+  fecha_inicio: fechaIsoSchema,
+  fecha_fin: fechaIsoSchema.nullable().optional(),
 });
 
 // Configuración de Pagos (Precios y Señas, mapa-pantallas.md §5.11bis "Panel Profesional >
@@ -442,8 +461,14 @@ profesionalesRouter.get(
     }
     const turnos = await withTransaction(
       async (client) => {
+        // `u.id AS cliente_id` (ampliación 2026-08-20, pedido explícito del Director General
+        // IA): Mobile necesita el `cliente_id` real (usuario.id, mismo alias `u` ya joineado
+        // acá) en cada fila para poder armar la URL de POST
+        // /:id/pacientes/:pacienteId/notas-medicas y /tratamientos (ver esos 2 endpoints más
+        // abajo, sección "HU-20/HU-21") al marcar un turno como completado — hasta ahora esta
+        // fila solo traía `u.nombre AS cliente` (para mostrar en pantalla), sin ID.
         const result = await client.query(
-          `SELECT t.id, t.inicio, t.fin, t.estado, s.nombre AS servicio, u.nombre AS cliente
+          `SELECT t.id, t.inicio, t.fin, t.estado, s.nombre AS servicio, u.id AS cliente_id, u.nombre AS cliente
            FROM turno t
            JOIN servicio s ON s.id = t.servicio_id
            JOIN usuario u ON u.id = t.cliente_id
@@ -1142,6 +1167,188 @@ profesionalesRouter.get(
           tratamientos: resultado.tratamientos,
           notas_medicas: resultado.notas_medicas,
         });
+    }
+  })
+);
+
+type ResolucionPacienteId =
+  | { tipo: 'no_encontrado' }
+  | { tipo: 'sin_negocio' }
+  | { tipo: 'ok'; pacienteId: string };
+
+/**
+ * Resuelve el `paciente.id` de la ficha de `clienteId` en la cartera de `profesionalId` — alta
+ * perezosa (crea la fila mínima si todavía no existe) para poder colgarle una `nota_medica`/
+ * `tratamiento` nueva (POST .../notas-medicas y POST .../tratamientos, ambos más abajo). MISMA
+ * lógica de resolución de `negocio_id` y MISMA validación de legitimidad (ficha `paciente`
+ * previa, en cualquier negocio, O turno previo) que el upsert de `PATCH
+ * /:id/pacientes/:pacienteId` más arriba (ver ese comentario extenso) — se extrae acá como
+ * helper compartido ENTRE ESOS 2 ENDPOINTS NUEVOS (que la necesitan idéntica), pero sin tocar el
+ * PATCH en sí (ya aprobado/probado): ese handler hace upsert de LOS 9 CAMPOS de la ficha clínica
+ * a la vez (viene con el form completo, ver `fichaPacienteSchema`) — un caso distinto de este,
+ * que solo necesita el id de la fila para insertar la nota/tratamiento, sin tocar ni pisar
+ * ningún campo clínico existente. Por eso el INSERT de acá es deliberadamente mínimo (solo las
+ * columnas NOT NULL) en vez de reusar el `INSERT ... ON CONFLICT ... DO UPDATE SET <9 columnas>`
+ * del PATCH.
+ *
+ * `ON CONFLICT ... DO UPDATE SET negocio_id = excluded.negocio_id` (un "no-op" a propósito, en
+ * vez de `DO NOTHING`): asegura que la sentencia siempre pueda hacer `RETURNING id`, incluso si
+ * 2 requests concurrentes (ej. el profesional carga una nota y un tratamiento casi al mismo
+ * tiempo para un paciente sin ficha previa) corren esta misma alta en paralelo — `DO NOTHING` no
+ * devuelve fila en el request que pierde la carrera, y forzaría una 2da consulta para
+ * recuperarla.
+ */
+async function resolverPacienteId(
+  client: PoolClient,
+  profesionalId: string,
+  clienteId: string,
+  negocioIdSesion: string | undefined
+): Promise<ResolucionPacienteId> {
+  // Ficha existente (en cualquier negocio) — mismo criterio que el PATCH: su sola existencia ya
+  // prueba que `clienteId` es legítimo (RLS de `paciente` no deja crear una fila ajena).
+  const existenteResult = await client.query(
+    `SELECT id, negocio_id FROM paciente WHERE profesional_id = $1 AND cliente_id = $2
+     ORDER BY creado_en DESC LIMIT 1`,
+    [profesionalId, clienteId]
+  );
+  const existente = existenteResult.rows[0] as { id: string; negocio_id: string } | undefined;
+  if (existente) {
+    return { tipo: 'ok', pacienteId: existente.id };
+  }
+
+  // Ficha nueva — confirma que este cliente_id efectivamente tuvo trato con este profesional
+  // (mismo criterio que el PATCH) antes de crear una fila de la nada para cualquier UUID de
+  // usuario.
+  const esClienteResult = await client.query(
+    'SELECT 1 FROM turno WHERE profesional_id = $1 AND cliente_id = $2 LIMIT 1',
+    [profesionalId, clienteId]
+  );
+  if (!esClienteResult.rowCount) return { tipo: 'no_encontrado' };
+  if (!negocioIdSesion) return { tipo: 'sin_negocio' };
+
+  const insertResult = await client.query(
+    `INSERT INTO paciente (negocio_id, profesional_id, cliente_id, creado_en)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (negocio_id, profesional_id, cliente_id) DO UPDATE SET negocio_id = excluded.negocio_id
+     RETURNING id`,
+    [negocioIdSesion, profesionalId, clienteId, nowIso()]
+  );
+  return { tipo: 'ok', pacienteId: insertResult.rows[0].id };
+}
+
+// HU-21/D8/RN13 — primer productor real de `nota_medica`: hasta acá solo existía el GET del
+// historial (arriba) y el modelo de datos (database/migrations/001_init.sql), pero ningún
+// endpoint para cargar una nota nueva. Ligada a la FICHA GENERAL del paciente (mismo modelo
+// actual, sin `turno_id` — decisión ya tomada, la nota no referencia un turno puntual) aunque
+// Mobile la dispare al marcar un turno como completado.
+//
+// Contrato: POST /profesionales/:id/pacientes/:pacienteId/notas-medicas, body { texto: string }
+// -> 201 { id, fecha, texto } | 400 datos inválidos (texto vacío/ausente) | 403 rol distinto de
+// profesional o `:id` ajeno | 404 `:pacienteId` no es un cliente legítimo de este profesional
+// (sin ficha previa ni turno previo) | 409 no se pudo resolver el negocio para dar de alta la
+// ficha nueva (mismo caso 'sin_negocio' que el PATCH de arriba).
+profesionalesRouter.post(
+  '/:id/pacientes/:pacienteId/notas-medicas',
+  requireAuth('profesional'),
+  asyncHandler(async (req: AuthedRequest, res) => {
+    const paramsParsed = profesionalPacienteParamsSchema.safeParse(req.params);
+    if (!paramsParsed.success) return respuestaValidacionFallida(res, paramsParsed.error);
+    if (!esPropioProfesional(req)) {
+      return res.status(403).json({ error: 'Solo podés cargar notas médicas de tus propios pacientes' });
+    }
+    const bodyParsed = notaMedicaBodySchema.safeParse(req.body);
+    if (!bodyParsed.success) return respuestaValidacionFallida(res, bodyParsed.error);
+    const { texto } = bodyParsed.data;
+
+    const resultado = await withTransaction(
+      async (client) => {
+        const resolucion = await resolverPacienteId(
+          client,
+          req.params.id,
+          req.params.pacienteId,
+          req.auth!.negocio_id
+        );
+        if (resolucion.tipo !== 'ok') return resolucion;
+
+        const notaResult = await client.query(
+          `INSERT INTO nota_medica (paciente_id, texto, creado_en, creado_por)
+           VALUES ($1, $2, $3, $4)
+           RETURNING id, fecha, texto`,
+          [resolucion.pacienteId, texto, nowIso(), req.auth!.sub]
+        );
+        return { tipo: 'ok' as const, nota: notaResult.rows[0] };
+      },
+      { usuarioId: req.auth!.sub, negocioId: req.auth!.negocio_id }
+    );
+
+    switch (resultado.tipo) {
+      case 'no_encontrado':
+        return res.status(404).json({ error: 'Paciente no encontrado en tu cartera' });
+      case 'sin_negocio':
+        return res.status(409).json({
+          error:
+            'No se pudo determinar el negocio para esta ficha nueva — volvé a iniciar sesión e intentá de nuevo.',
+        });
+      case 'ok':
+        return res.status(201).json(resultado.nota);
+    }
+  })
+);
+
+// HU-21/D8/RN13 — mismo gap y mismo criterio que POST .../notas-medicas de arriba, pero para
+// `tratamiento`. A diferencia de la nota, acá SÍ viaja un rango de fechas propio en el body
+// (`fecha_inicio` requerida, `fecha_fin` opcional/`null` para "todavía en curso" — ver
+// `tratamientoBodySchema`), porque la tabla no tiene default para ninguna de las 2.
+//
+// Contrato: POST /profesionales/:id/pacientes/:pacienteId/tratamientos, body { descripcion:
+// string, fecha_inicio: ISO-8601, fecha_fin?: ISO-8601 | null } -> 201 { id, descripcion,
+// fecha_inicio, fecha_fin } | 400 datos inválidos | 403 rol distinto de profesional o `:id`
+// ajeno | 404 `:pacienteId` no es un cliente legítimo de este profesional | 409 no se pudo
+// resolver el negocio para dar de alta la ficha nueva (mismo caso que arriba).
+profesionalesRouter.post(
+  '/:id/pacientes/:pacienteId/tratamientos',
+  requireAuth('profesional'),
+  asyncHandler(async (req: AuthedRequest, res) => {
+    const paramsParsed = profesionalPacienteParamsSchema.safeParse(req.params);
+    if (!paramsParsed.success) return respuestaValidacionFallida(res, paramsParsed.error);
+    if (!esPropioProfesional(req)) {
+      return res.status(403).json({ error: 'Solo podés cargar tratamientos de tus propios pacientes' });
+    }
+    const bodyParsed = tratamientoBodySchema.safeParse(req.body);
+    if (!bodyParsed.success) return respuestaValidacionFallida(res, bodyParsed.error);
+    const { descripcion, fecha_inicio, fecha_fin } = bodyParsed.data;
+
+    const resultado = await withTransaction(
+      async (client) => {
+        const resolucion = await resolverPacienteId(
+          client,
+          req.params.id,
+          req.params.pacienteId,
+          req.auth!.negocio_id
+        );
+        if (resolucion.tipo !== 'ok') return resolucion;
+
+        const tratamientoResult = await client.query(
+          `INSERT INTO tratamiento (paciente_id, descripcion, fecha_inicio, fecha_fin, creado_en, creado_por)
+           VALUES ($1, $2, $3, $4, $5, $6)
+           RETURNING id, descripcion, fecha_inicio, fecha_fin`,
+          [resolucion.pacienteId, descripcion, fecha_inicio, fecha_fin ?? null, nowIso(), req.auth!.sub]
+        );
+        return { tipo: 'ok' as const, tratamiento: tratamientoResult.rows[0] };
+      },
+      { usuarioId: req.auth!.sub, negocioId: req.auth!.negocio_id }
+    );
+
+    switch (resultado.tipo) {
+      case 'no_encontrado':
+        return res.status(404).json({ error: 'Paciente no encontrado en tu cartera' });
+      case 'sin_negocio':
+        return res.status(409).json({
+          error:
+            'No se pudo determinar el negocio para esta ficha nueva — volvé a iniciar sesión e intentá de nuevo.',
+        });
+      case 'ok':
+        return res.status(201).json(resultado.tratamiento);
     }
   })
 );
