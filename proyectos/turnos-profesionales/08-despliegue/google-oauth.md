@@ -382,7 +382,8 @@ invisible) porque la naturaleza del caso es distinta a las otras dos.
 
 | Ítem | Bloquea | Dueño | Estado |
 |---|---|---|---|
-| Proyecto de Google Cloud + pantalla de consentimiento + Client ID Web (§2, Pasos 1–3) | Que el endpoint funcione con datos reales — no bloquea construirlo (§5) | CEO | Pendiente |
+| Proyecto de Google Cloud + Client ID Web (§2, Pasos 1 y 3) | Que el endpoint funcione con datos reales — no bloquea construirlo (§5) | CEO | **Resuelto y confirmado en Render** (DevOps, 2026-08-22 — ver §9) |
+| Pantalla de consentimiento OAuth pasada de "Testing" a "In production" (§2, Paso 2, punto 6) | Que cualquier cliente real (no solo test users) pueda usar "Continuar con Google" | CEO | No verificable desde este test — ver §9 |
 | Nombre de paquete Android definitivo | Client ID Android (§2, Paso 4) | Arquitecto/Mobile | Pendiente, no resuelto en este documento |
 | Keystore de firma (debug + subida) y su SHA-1 | Client ID Android (§2, Paso 4) | Mobile/DevOps | Pendiente, no resuelto en este documento |
 | Confirmar el parámetro `serverClientId` (o equivalente) en el paquete de Google Sign-In que use Mobile | Que el ID token de Android traiga `aud = GOOGLE_CLIENT_ID` (web) (§1) | Mobile, coordinado con Backend | Pendiente de implementación, no de este documento |
@@ -396,12 +397,15 @@ dos preguntas de HU-35, ver `../02-backlog/backlog.md`).
 
 ## 7. Checklist para el CEO (resumen ejecutivo, sin tecnicismos)
 
-- [ ] Crear el proyecto en Google Cloud Console — gratis, cualquier cuenta de Google (§2, Paso 1).
+- [x] Crear el proyecto en Google Cloud Console — gratis, cualquier cuenta de Google (§2, Paso 1).
+      Confirmado indirectamente (§9): no puede existir un Client ID Web funcional sin este paso.
 - [ ] Completar la Pantalla de Consentimiento OAuth, tipo "External", con permisos básicos
-      únicamente (email, perfil) (§2, Paso 2).
-- [ ] Crear el Client ID **"Web application"** (§2, Paso 3) — este es el valor que hay que
+      únicamente (email, perfil) (§2, Paso 2). Prerrequisito de hecho del paso siguiente (la
+      consola de Google no deja crear credenciales OAuth sin esto), pero no se verificó de forma
+      independiente — no confundir con el punto de abajo ("In production"), que sí sigue abierto.
+- [x] Crear el Client ID **"Web application"** (§2, Paso 3) — este es el valor que hay que
       entregarle a Backend/DevOps como `GOOGLE_CLIENT_ID`. No hace falta el "Client secret" que
-      Google muestra al lado.
+      Google muestra al lado. **Confirmado cargado y funcionando en Render (§9).**
 - [ ] Cuando Arquitecto/Mobile confirmen el nombre de paquete Android y exista al menos un SHA-1
       de debug: crear el Client ID **"Android"** (§2, Paso 4) — no bloquea nada de lo anterior, se
       puede hacer después.
@@ -409,11 +413,13 @@ dos preguntas de HU-35, ver `../02-backlog/backlog.md`).
 - [ ] Antes de que cualquier cliente real use "Continuar con Google": volver a la Pantalla de
       Consentimiento y pasar el estado de "Testing" a **"In production"** (§2, Paso 2, punto 6) —
       puede pedir la URL de política de privacidad (ya es un pendiente compartido con Google Play,
-      ver `../03-arquitectura/plan-produccion.md` ítem B9).
-- [ ] Entregar el Client ID Web a DevOps/Backend para cargarlo como `GOOGLE_CLIENT_ID` en el
+      ver `../03-arquitectura/plan-produccion.md` ítem B9). **Sigue sin verificar — ver §9**, el
+      comportamiento del endpoint del backend es idéntico en "Testing" o "In production", así que
+      ningún test contra el backend puede confirmar ni descartar este punto.
+- [x] Entregar el Client ID Web a DevOps/Backend para cargarlo como `GOOGLE_CLIENT_ID` en el
       dashboard de Render del servicio `turnos-profesionales-backend` (§4.3) — no hace falta
       tratarlo con el mismo secreto que una contraseña (§1/§3), pero tampoco conviene publicarlo
-      más de lo necesario.
+      más de lo necesario. **Ya cargado y confirmado (§9).**
 
 ## 8. Registro de este ciclo (motivo, cambios, forma de rollback)
 
@@ -479,3 +485,77 @@ después se revierte este `render.yaml`, ese valor cargado a mano queda intacto 
 Render no borra variables del servicio por dejar de declararlas (mismo criterio ya documentado
 para el resto de este archivo). Ningún rollback, igual que ningún forward-deploy, ocurre sin
 aprobación previa (`docs/04-manual-operativo.md`, reglas de actuación de DevOps).
+
+## 9. Confirmación de carga en Render — DevOps (2026-08-22)
+
+**Motivo:** encargo puntual de DevOps (Director General IA) para cargar `GOOGLE_CLIENT_ID` en el
+dashboard de Render del servicio `turnos-profesionales-backend` y confirmar con un test HTTP real
+que `POST /auth/google` deje de responder 503. El encargo asumía como punto de partida que la
+variable **todavía no** estaba cargada — antes de repetir cualquier paso del dashboard, este ciclo
+verificó primero el estado real en vez de asumir el punto de partida del encargo.
+
+**Resultado de esa verificación: la variable ya estaba cargada y funcionando desde antes de este
+ciclo**, no en este ciclo. `memory/project_turnos_profesionales_infra.md` (nota de infraestructura,
+entrada sobre el bug de `MP_ACCESS_TOKEN`/`MP_WEBHOOK_SECRET` del 2026-08-17) ya dejaba registrado,
+de paso, que "`GOOGLE_CLIENT_ID` (mismo mecanismo `sync: false`, cargada en una sesión anterior) sí
+funciona" — sin una fecha exacta de cuándo el CEO la cargó, ni un ciclo de DevOps que lo documentara
+en su momento en este archivo. Este ciclo cierra ese vacío de documentación y agrega verificación
+propia contra el servicio real, en vez de aceptar el antecedente sin más.
+
+**Verificación propia contra `https://turnos-profesionales-backend.onrender.com` (2026-08-22):**
+
+1. `GET /health` → `{"ok":true}` — servicio arriba, sin necesitar ningún redeploy para esta
+   verificación.
+2. `POST /auth/google` con el payload tal como lo sugería el encargo original (`{"idToken":"test"}`,
+   camelCase) → **400**
+   `{"error":"Datos inválidos","detalles":{"id_token":["Invalid input: expected string, received undefined"]}}`.
+   Ya cumple el criterio original de "no 503", aunque por un motivo más superficial: el endpoint
+   real espera el campo en snake_case (`googleBodySchema` en `../05-codigo/backend/src/routes/auth.ts`
+   línea 266: `z.object({ id_token: z.string()... })`), no `idToken`.
+3. `POST /auth/google` con el nombre de campo correcto (`{"id_token":"test"}`) → **401**
+   `{"error":"Token de Google inválido"}`. Esta es la confirmación fuerte, no la de arriba: por
+   `verificarIdTokenGoogle` (mismo archivo, líneas 230–256), el único camino hacia ese 401 es que
+   `process.env.GOOGLE_CLIENT_ID` ya haya pasado el chequeo `if (!clientId)` de la línea 231-234 (que
+   devuelve 503 inmediatamente si la variable falta) y el código haya llegado a invocar
+   `googleOAuthClient.verifyIdToken(...)`, que falla porque el string `"test"` no tiene forma de JWT
+   — capturado por el `catch` que responde 401. Un 401 acá es evidencia directa de que la variable
+   está seteada con algún valor en el proceso real de Render en este momento, no una inferencia.
+
+**Qué NO quedó verificado en este ciclo (límite honesto, mismo criterio que el resto de este
+documento) — este entorno de desarrollo sigue sin acceso al dashboard de Render** (sin navegador,
+sin `RENDER_API_KEY`/CLI configurado; mismo tipo de limitación ya documentada en `./README.md`
+§0/§5, y confirmado de nuevo en este ciclo: ni `render` CLI ni ninguna variable `RENDER_*` están
+disponibles en este entorno):
+
+- No se pudo entrar a Environment del servicio para leer a simple vista el valor exacto cargado, ni
+  revisar los logs de deploy desde la consola — la verificación de arriba (comportamiento HTTP real
+  del proceso vivo) es evidencia más directa que un log de texto para esta pregunta puntual
+  ("¿el proceso tiene la variable seteada?"), pero no reemplaza una inspección visual del dashboard
+  si en algún momento hiciera falta por otro motivo.
+- No se pudo confirmar que el valor cargado sea efectivamente el Client ID "Web application" real
+  emitido por Google Cloud Console (a diferencia de cualquier otro string no vacío): el chequeo de
+  `auth.ts` solo verifica presencia/no-vacío, no valida el contenido. Solo un login real de Mobile
+  contra un ID token emitido de verdad por Google podría confirmar esto de punta a punta — pendiente
+  de Mobile, no de este ciclo.
+- No se pudo confirmar si la Pantalla de Consentimiento OAuth ya pasó de "Testing" a
+  "In production" (§2 Paso 2, punto 6; checklist §7) — el comportamiento del endpoint del backend
+  es idéntico en ambos estados, así que ningún test contra el backend puede confirmarlo ni
+  descartarlo. Sigue como pendiente explícito del CEO antes del lanzamiento público real.
+- No se disparó ningún redeploy — no hacía falta: el servicio ya viene respondiendo con la
+  variable cargada desde antes de este ciclo.
+
+**No se modificó `render.yaml` en este ciclo** — ya declaraba `GOOGLE_CLIENT_ID` con `sync: false`
+y sin valor, que sigue siendo el estado final correcto (nunca escribir el valor real en el repo,
+ver §4.3); no hay ningún cambio "si aplica" que aplicar acá, el archivo ya estaba bien.
+
+**§6 y §7 de este documento actualizados** para reflejar este cierre (fila de Client ID Web en §6
+pasa de "Pendiente" a resuelta; en el checklist de §7 se marcan como hechos los 3 puntos que este
+test puede confirmar — crear el proyecto, crear el Client ID Web, cargarlo en Render — dejando
+explícitamente sin marcar los que este ciclo no pudo verificar, en vez de darlos por buenos).
+
+**Forma de rollback:** ninguna acción de este ciclo requiere rollback — no se cargó ningún valor
+nuevo (ya estaba cargado de antes), no se tocó código ni `render.yaml`, solo se confirmó un estado
+ya existente y se actualizó documentación/memoria. Si en el futuro hiciera falta rotar el Client ID
+(p. ej. por sospecha de uso indebido, aunque no es secreto por diseño — ver §1/§3), el procedimiento
+es: crear un Client ID nuevo en Google Cloud Console (§2 Paso 3) y reemplazar el valor a mano en el
+dashboard de Render (Environment) — no requiere cambios de código ni de `render.yaml`.

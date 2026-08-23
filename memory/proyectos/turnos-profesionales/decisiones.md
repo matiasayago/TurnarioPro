@@ -2533,3 +2533,109 @@ existían y estaban probados en otros flujos.
   Horarios muestra "🧰 Servicio — Horarios para: Consulta General" (sin campo de UUID) y el
   guardado de horarios funcionó ("Guardado: 10 bloque(s) de horario..."); Editar Perfil muestra
   "Servicios que brindo — Consulta General, 30 min · $8000, ✅ Ya asociado".
+
+## Bottom nav persistente en Cliente — Navigator anidado por pestaña — Arquitecto (2026-08-22)
+
+Task #115 (CEO): "los botones de navegacion deben estar visibles en todas las pantallas". Diseño
+completo, diagramas y pseudocódigo en
+`03-arquitectura/bottom-nav-persistente-cliente.md` — **no se tocó código en este ciclo**, es
+diseño puro a cargo de Arquitecto. Resumen para reutilizar:
+
+- **Causa raíz verificada (no solo el síntoma reportado):** `ClienteShell` pone la bottom nav en
+  el `Scaffold` que envuelve su `IndexedStack`, pero todo `Navigator.push` de este código apila
+  sobre el **único** Navigator raíz de la app (`MaterialApp.home: _Router()`) — por encima de ese
+  mismo `Scaffold`, no dentro de él. Por grep sistemático sobre `screens/cliente/` se confirmó que
+  son **13 pantallas afectadas en 4 puntos de entrada**, no solo los 2 flujos que mencionaba el
+  encargo: (1) el flujo de reserva de 4 pantallas (Buscar), (2) Reprogramar Turno (Mis Turnos), (3)
+  el ícono ⚙ de `NotificacionesScreen` que abre `ConfiguracionNotificacionesScreen` (pestaña
+  Notificaciones — hallazgo nuevo, no estaba en el encargo original), y (4) las 6 pantallas de
+  Configuración.
+- **Recomendación: Navigator anidado por pestaña** (un `Navigator` propio con
+  `GlobalKey<NavigatorState>` dentro de cada entrada del `IndexedStack`, más `NavigatorPopHandler`
+  para el botón atrás del sistema) **sobre `go_router`/`StatefulShellRoute`** — ambas opciones
+  evaluadas con criterio explícito, no solo la primera aceptable. La recomendada usa únicamente
+  SDK de Flutter (sin dependencia nueva a `pubspec.yaml`), dos archivos tocados
+  (`cliente_shell.dart` + `confirmar_turno_screen.dart`), y las 13 pantallas hoja siguen
+  funcionando sin ningún cambio (`Navigator.of(context)` ya usado en todas resuelve solo al
+  ancestro más cercano, que pasa a ser el anidado de su pestaña). `go_router` es la solución de
+  fondo a mediano plazo, pero implica reescribir la navegación de Cliente **y** Profesional **y**
+  Administrador (30+ archivos, mismo patrón de fondo confirmado por grep en los 3 shells) más una
+  dependencia nueva — queda fuera de este ciclo, marcada como pendiente de validación de CTO IA
+  antes de iniciarse (regla de gobierno: nueva tecnología requiere ese paso), no autorizada ni
+  descartada por este documento.
+- **Pieza nueva que Flutter no resuelve solo:** cambiar de pestaña desde una pantalla empujada 4
+  niveles adentro de OTRA pestaña (el caso real: `ConfirmarTurnoScreen`, al confirmar con éxito,
+  hoy salta a "Mis Turnos" con un hack — `pushAndRemoveUntil` + una segunda instancia de
+  `MisTurnosScreen` — que **también** pierde la bottom nav hoy y quedaría roto si solo se
+  "envuelve" el resto sin migrarlo). Se diseñó `ClienteTabController`, expuesto vía `Provider`
+  (paquete ya usado en el proyecto para `Sesion`/`ThemeController`, sin dependencia nueva) desde
+  `ClienteShell` a todo su subárbol, con un único método de intención (`irAMisTurnos()`) para no
+  filtrar el índice de pestaña fuera de `cliente_shell.dart`.
+- **Hallazgo adicional, no pedido explícitamente, encontrado al auditar el mismo archivo que ya
+  había que tocar:** el diálogo "Seña requerida" de `ConfirmarTurnoScreen` es el único `showDialog`
+  de las 7 pantallas de esta app que lo usan que NO sigue el patrón ya establecido en las otras 6
+  (`login_screen.dart` y 5 más — todas nombran el `BuildContext` propio del diálogo, `builder:
+  (dialogContext) => ...`, y hacen `Navigator.of(dialogContext).pop(...)`); esta pantalla descarta
+  ese contexto (`builder: (_) => ...`) y reusa el `context` exterior de la pantalla para el pop del
+  botón "Entendido". Funciona hoy solo porque hay un único Navigator en toda la app — con Navigator
+  anidado, el pop apuntaría a la pestaña "Buscar" en vez de al diálogo (que vive en el Navigator
+  raíz por diseño, `showDialog` usa `useRootNavigator: true` por default, correcto para un modal).
+  Fix de una línea, incluido en el contrato de archivos de este mismo diseño (no abre un archivo
+  nuevo).
+- **Riesgo más importante para QA, no cosmético:** sin `NavigatorPopHandler` envolviendo cada
+  Navigator anidado, el botón/gesto atrás **del sistema operativo** (Android) cerraría/minimizaría
+  la app en vez de retroceder un paso apenas la pestaña activa tuviera algo pusheado — distinto del
+  botón "volver" del `AppHeader` (`Navigator.maybePop(context)`, ya funciona y sigue funcionando
+  sin cambios). QA debe probar explícitamente el botón/gesto atrás nativo, no solo el de la UI.
+- **Confirmado por grep, fuera de alcance de Task #115 (acotada a Cliente por el CEO) pero
+  dejado explícito como riesgo/fast-follow:** `ProfesionalShell` y `AdministradorShell` tienen el
+  mismo bug de fondo (`administrador_shell.dart`, `pacientes_negocio_screen.dart`,
+  `profesionales_negocio_screen.dart`, `agenda_screen.dart`, `configuracion_screen.dart`,
+  `dashboard_screen.dart`, `gestion_pacientes_screen.dart`, `mis_clientes_screen.dart`,
+  `notificaciones_screen.dart` todos empujan pantallas fuera de su propio shell) — mismo patrón de
+  solución aplicaría 1:1 si se decide replicarlo.
+- **No verificado con el SDK de Flutter real** (mismo caveat de siempre en este proyecto — este
+  entorno no tiene Flutter/Dart instalado): la firma exacta de `NavigatorPopHandler` se citó desde
+  conocimiento de entrenamiento, no contra la versión `stable` real que usa `turnos-mobile-ci.yml`
+  — Mobile debe confirmarla al implementar. Ningún archivo `.dart` fue modificado en este ciclo.
+- Reutilizable para futuros proyectos de la Factory: "Navigator anidado por pestaña +
+  `NavigatorPopHandler` + controller expuesto vía Provider para saltos cross-tab desde pantallas
+  profundas" es candidato a `knowledge-base/patrones-arquitectonicos/` una vez implementado y
+  probado — no creado todavía (no hay código real corrido que lo respalde).
+
+## GOOGLE_CLIENT_ID en Render — confirmado ya cargado y funcionando, no era un pendiente real — DevOps (2026-08-22)
+
+Task #116 (Director General IA): "cargar GOOGLE_CLIENT_ID en Render", con la premisa de que la
+variable todavía no estaba cargada (`../../../proyectos/turnos-profesionales/08-despliegue/google-oauth.md`,
+§4.3, quedaba con ese paso "a confirmar"). **Antes de repetir el paso del dashboard, se verificó el
+estado real primero — la premisa del ticket estaba desactualizada:** la variable ya estaba cargada
+y funcionando desde una sesión anterior, sin fecha exacta documentada (`project_turnos_profesionales_infra.md`,
+memoria de usuario, ya lo mencionaba de paso al narrar el bug no relacionado de
+`MP_ACCESS_TOKEN`/`MP_WEBHOOK_SECRET` del 2026-08-17, sin que ningún ciclo de DevOps lo hubiera
+registrado en `memory/` del repo hasta ahora).
+
+- **Verificación propia contra `https://turnos-profesionales-backend.onrender.com`:**
+  `POST /auth/google` con `{"id_token":"test"}` (nombre de campo real, `src/routes/auth.ts` línea
+  266 — el ticket sugería `idToken`, camelCase, que da 400 por campo faltante, no por lo que
+  realmente hace falta probar) → **401 "Token de Google inválido"**. Ese 401 (no 503) es prueba
+  directa de que `process.env.GOOGLE_CLIENT_ID` está seteada en el proceso real: por
+  `verificarIdTokenGoogle` (líneas 230-256), el único camino a 401 pasa primero por el chequeo
+  `if (!clientId)` de la línea 231-234, que devuelve 503 de inmediato si falta.
+- **Sin acceso a Render en este entorno** (sin navegador, sin `RENDER_API_KEY`/CLI — reconfirmado en
+  este ciclo, mismo tipo de límite ya documentado para Docker/Render en ciclos anteriores de DevOps):
+  no se pudo entrar al dashboard a leer el valor cargado ni sus logs — el test HTTP de arriba es la
+  evidencia disponible, más directa que un log para esta pregunta puntual, pero no confirma que el
+  valor cargado sea el Client ID real de Google (solo que algo no vacío está seteado) ni si la
+  Pantalla de Consentimiento OAuth ya pasó a "In production" (ninguna de las dos cosas es
+  observable desde el comportamiento HTTP del backend).
+- **No se modificó `render.yaml`** (ya declaraba `GOOGLE_CLIENT_ID` con `sync: false`, sin valor —
+  ese es el estado final correcto, nada que corregir) ni se disparó ningún redeploy (no hacía
+  falta, el servicio ya respondía con la variable cargada).
+- Documentación actualizada en el propio plan (`08-despliegue/google-oauth.md` §6/§7/§9 nueva) para
+  que quede el cierre registrado con evidencia, en vez de dejar ese plan con el punto "a confirmar"
+  desactualizado indefinidamente.
+- **Lección operativa para reutilizar:** un ticket que describe una acción pendiente puede estar
+  basado en información vieja — verificar el estado real contra el sistema real (acá: un curl al
+  endpoint real) antes de ejecutar la acción pedida, en vez de asumir el premise del encargo. Mismo
+  criterio que ya aplicó Director General IA al refutar su propia hipótesis con evidencia en la
+  entrada "Primera corrida real del CI de Backend" (2026-08-06, más arriba en este archivo).
