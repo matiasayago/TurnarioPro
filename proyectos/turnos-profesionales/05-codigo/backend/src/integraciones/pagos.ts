@@ -161,11 +161,12 @@ export class MercadoPagoProvider implements PagoProvider {
       throw new Error(`Mercado Pago no devolvió un id de preferencia válido para el turno ${turnoId}`);
     }
 
-    // Credenciales de prueba (prefijo "TEST-", ver documentación oficial de credenciales de
-    // Mercado Pago) -> `sandbox_init_point`; credenciales de producción -> `init_point`. Si el
+    // Credenciales de prueba (prefijo "TEST-" o "APP_USR-" en sandbox, ver documentación oficial
+    // de Mercado Pago) -> `sandbox_init_point`; credenciales de producción -> `init_point`. Si el
     // campo "correcto" según esta regla faltara en la respuesta, se cae al otro antes de fallar
     // — la propia respuesta de Mercado Pago manda por sobre la heurística del prefijo.
-    const esCredencialDePrueba = accessToken.startsWith('TEST-');
+    // (2026-08-23) Actualización: Mercado Pago devuelve tokens APP_USR- en sandbox, no TEST-.
+    const esCredencialDePrueba = accessToken.startsWith('TEST-') || accessToken.startsWith('APP_USR-');
     const urlCheckout =
       (esCredencialDePrueba ? preferencia.sandbox_init_point : preferencia.init_point) ??
       preferencia.init_point ??
