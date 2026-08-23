@@ -94,8 +94,11 @@ class _ConfirmarTurnoScreenState extends State<ConfirmarTurnoScreen> {
 
   /// Post-creación del turno (D2/RN10, Task #114): si requiere seña, pide a Backend la URL de
   /// checkout de Mercado Pago (`POST /turnos/:id/pago`, ver `routes/turnos.ts`/
-  /// `integraciones/pagos.ts`) y la abre en el navegador del sistema — `externalApplication`,
-  /// nunca un WebView propio de la app — para que el cliente pague ahí, afuera de la app.
+  /// `integraciones/pagos.ts`) y la abre en el navegador del sistema — `platformDefault` en web
+  /// (nueva pestaña), navegador nativo en mobile — para que el cliente pague ahí, afuera de la
+  /// app. Cambio de `externalApplication` a `platformDefault` (2026-08-23): en web,
+  /// `externalApplication` intenta un popup que puede ser bloqueado; `platformDefault` abre
+  /// pestaña nueva que funciona en todos los navegadores.
   ///
   /// Esta pantalla NO espera ninguna confirmación de pago acá: eso lo resuelve, aparte, el job de
   /// verificación (Task #103, todavía no implementado) cuando Mercado Pago avise por webhook
@@ -118,7 +121,7 @@ class _ConfirmarTurnoScreenState extends State<ConfirmarTurnoScreen> {
       final urlCheckout = pago['url_checkout'] as String?;
       if (urlCheckout == null || urlCheckout.isEmpty) return;
 
-      final abierto = await launchUrl(Uri.parse(urlCheckout), mode: LaunchMode.externalApplication);
+      final abierto = await launchUrl(Uri.parse(urlCheckout), mode: LaunchMode.platformDefault);
       if (abierto) return;
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
