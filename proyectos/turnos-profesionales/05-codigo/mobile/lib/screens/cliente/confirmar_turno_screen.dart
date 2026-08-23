@@ -119,9 +119,13 @@ class _ConfirmarTurnoScreenState extends State<ConfirmarTurnoScreen> {
     try {
       final pago = await api.post('/turnos/$turnoId/pago', const {});
       final urlCheckout = pago['url_checkout'] as String?;
+      // ignore: avoid_print
+      print('[MP-DEBUG] URL checkout recibida: $urlCheckout');
       if (urlCheckout == null || urlCheckout.isEmpty) return;
 
       final abierto = await launchUrl(Uri.parse(urlCheckout), mode: LaunchMode.platformDefault);
+      // ignore: avoid_print
+      print('[MP-DEBUG] launchUrl retornó: $abierto');
       if (abierto) return;
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
