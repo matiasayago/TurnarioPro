@@ -177,6 +177,8 @@ export class MercadoPagoProvider implements PagoProvider {
       );
     }
 
+    // eslint-disable-next-line no-console
+    console.log(`[MP-CHECKOUT] Turno ${turnoId}: URL=${urlCheckout}, esCredencialDePrueba=${esCredencialDePrueba}`);
     return { id: preferencia.id, monto, urlCheckout };
   }
 

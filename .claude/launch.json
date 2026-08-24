@@ -4,6 +4,12 @@
     {
       "name": "turnos-backend",
       "url": "http://localhost:3000"
+    },
+    {
+      "name": "turnos-mobile-web",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["C:/Users/BANGHO/AppData/Local/Temp/claude/C--Mi-Compania-Software-IA-Equipo-de-Agentes/ab78ac83-99d6-46f7-80d6-d1f7423ff644/scratchpad/static-server.js"],
+      "port": 8092
     }
   ]
 }

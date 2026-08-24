@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
+import 'dart:js' as js;
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
-import 'package:url_launcher/url_launcher.dart';
 import '../../api_client.dart';
 import '../../state/sesion.dart';
 import '../../theme/app_colors.dart';
@@ -119,22 +119,20 @@ class _ConfirmarTurnoScreenState extends State<ConfirmarTurnoScreen> {
     try {
       final pago = await api.post('/turnos/$turnoId/pago', const {});
       final urlCheckout = pago['url_checkout'] as String?;
-      // ignore: avoid_print
-      print('[MP-DEBUG] URL checkout recibida: $urlCheckout');
       if (urlCheckout == null || urlCheckout.isEmpty) return;
 
-      final abierto = await launchUrl(Uri.parse(urlCheckout), mode: LaunchMode.platformDefault);
-      // ignore: avoid_print
-      print('[MP-DEBUG] launchUrl retornó: $abierto');
-      if (abierto) return;
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
-            'No encontramos una app para abrir Mercado Pago. Podés pagar la seña más tarde desde "Mis Turnos".',
+      try {
+        js.context.callMethod('open', [urlCheckout, '_blank']);
+      } catch (e) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'No pudimos abrir Mercado Pago ($e). Podés pagar la seña más tarde desde "Mis Turnos".',
+            ),
           ),
-        ),
-      );
+        );
+      }
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
