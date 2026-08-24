@@ -117,13 +117,29 @@ class _ConfirmarTurnoScreenState extends State<ConfirmarTurnoScreen> {
   /// significa algo completamente distinto, "sin pago pendiente para cobrar", ver `turnos.ts`).
   Future<void> _abrirCheckoutDeMercadoPago(ApiClient api, String turnoId) async {
     try {
+      // ignore: avoid_print
+      print('[MP-FRONTEND] Iniciando solicitud de checkout para turno: $turnoId');
       final pago = await api.post('/turnos/$turnoId/pago', const {});
+      // ignore: avoid_print
+      print('[MP-FRONTEND] Respuesta recibida: $pago');
       final urlCheckout = pago['url_checkout'] as String?;
-      if (urlCheckout == null || urlCheckout.isEmpty) return;
+      // ignore: avoid_print
+      print('[MP-FRONTEND] URL checkout: $urlCheckout');
+      if (urlCheckout == null || urlCheckout.isEmpty) {
+        // ignore: avoid_print
+        print('[MP-FRONTEND] URL checkout vacía o null, retornando sin abrir ventana');
+        return;
+      }
 
       try {
+        // ignore: avoid_print
+        print('[MP-FRONTEND] Llamando window.open() con URL: $urlCheckout');
         js.context.callMethod('open', [urlCheckout, '_blank']);
+        // ignore: avoid_print
+        print('[MP-FRONTEND] window.open() completado');
       } catch (e) {
+        // ignore: avoid_print
+        print('[MP-FRONTEND] Error al llamar window.open(): $e');
         if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -134,6 +150,8 @@ class _ConfirmarTurnoScreenState extends State<ConfirmarTurnoScreen> {
         );
       }
     } catch (e) {
+      // ignore: avoid_print
+      print('[MP-FRONTEND] Error en _abrirCheckoutDeMercadoPago: $e');
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
