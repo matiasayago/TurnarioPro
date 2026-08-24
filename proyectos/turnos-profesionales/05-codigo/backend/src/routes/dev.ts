@@ -1,7 +1,9 @@
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import { v4 as uuid } from 'uuid';
-import { nowIso, withTransaction } from '../db';
+import { readFileSync } from 'fs';
+import { join } from 'path';
+import { nowIso, withTransaction, pool } from '../db';
 import { expirarPagosPendientesVencidos } from '../jobs/expirarPagosPendientes';
 import { recordarTurnosProximos } from '../jobs/recordarTurnosProximos';
 import { asyncHandler } from '../middleware/asyncHandler';
@@ -132,5 +134,23 @@ devRouter.post(
   asyncHandler(async (_req, res) => {
     const cantidad = await recordarTurnosProximos();
     res.json({ recordatorios_insertados: cantidad });
+  })
+);
+
+// Ejecuta manualmente la migración 002 (Google OAuth + Pacientes) contra la base de datos actual.
+// SOLO para desarrollo — útil cuando la conexión local a Render DB falla y necesita ejecutarse remotamente.
+devRouter.post(
+  '/ejecutar-migracion-002',
+  asyncHandler(async (_req, res) => {
+    const sqlPath = join(__dirname, '../../database/migrations/002_pacientes_historial_auth_google.sql');
+    const sql = readFileSync(sqlPath, 'utf-8');
+
+    const client = await pool.connect();
+    try {
+      await client.query(sql);
+      res.json({ mensaje: 'Migración 002 ejecutada exitosamente' });
+    } finally {
+      client.release();
+    }
   })
 );
