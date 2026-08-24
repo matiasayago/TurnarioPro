@@ -1,7 +1,9 @@
 import express, { NextFunction, Request, Response } from 'express';
 import helmet from 'helmet';
 import path from 'path';
-import { runMigrations } from './db';
+import { readFileSync } from 'fs';
+import { join } from 'path';
+import { runMigrations, pool } from './db';
 import { authRouter } from './routes/auth';
 import { negociosRouter } from './routes/negocios';
 import { profesionalesRouter } from './routes/profesionales';
@@ -11,6 +13,7 @@ import { notificacionesRouter } from './routes/notificaciones';
 import { usuarioRouter } from './routes/usuario';
 import { webhooksRouter } from './routes/webhooks';
 import { devRouter } from './routes/dev';
+import { asyncHandler } from './middleware/asyncHandler';
 
 export function createApp() {
   runMigrations();
@@ -57,6 +60,24 @@ export function createApp() {
   }
 
   app.get('/health', (_req, res) => res.json({ ok: true }));
+
+  // Endpoint temporal para ejecutar migración 002 (sin autenticación)
+  // Útil cuando la conexión local a Render falla por firewall/DNS
+  app.post(
+    '/migration/002',
+    asyncHandler(async (_req, res) => {
+      const sqlPath = join(__dirname, '..', 'database', 'migrations', '002_pacientes_historial_auth_google.sql');
+      const sql = readFileSync(sqlPath, 'utf-8');
+
+      const client = await pool.connect();
+      try {
+        await client.query(sql);
+        res.json({ mensaje: 'Migración 002 ejecutada exitosamente' });
+      } finally {
+        client.release();
+      }
+    })
+  );
 
   app.use('/auth', authRouter);
   app.use('/negocios', negociosRouter);
