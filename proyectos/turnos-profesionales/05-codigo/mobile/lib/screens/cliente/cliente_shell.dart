@@ -59,7 +59,7 @@ class _ClienteShellState extends State<ClienteShell> {
   @override
   Widget build(BuildContext context) {
     final screens = <Widget>[
-      const BuscarNegociosScreen(),
+      BuscarNegociosScreen(onTurnoConfirmado: () => _irATab(1)), // Task #115: cambiar a "Mis Turnos"
       MisTurnosScreen(onIrABuscar: () => _irATab(_tabBuscar)),
       const NotificacionesScreen(),
       const ConfiguracionClienteScreen(),

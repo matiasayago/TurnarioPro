@@ -11,10 +11,11 @@ import 'elegir_profesional_screen.dart';
 
 /// HU-07: el cliente elige un servicio dentro del negocio ya seleccionado.
 class DetalleNegocioScreen extends StatefulWidget {
-  const DetalleNegocioScreen({super.key, required this.negocioId, required this.nombreNegocio});
+  const DetalleNegocioScreen({super.key, required this.negocioId, required this.nombreNegocio, this.onTurnoConfirmado});
 
   final String negocioId;
   final String nombreNegocio;
+  final VoidCallback? onTurnoConfirmado;
 
   @override
   State<DetalleNegocioScreen> createState() => _DetalleNegocioScreenState();
@@ -67,6 +68,7 @@ class _DetalleNegocioScreenState extends State<DetalleNegocioScreen> {
                         negocioId: widget.negocioId,
                         servicioId: s['id'] as String,
                         servicioNombre: s['nombre'] as String,
+                        onTurnoConfirmado: widget.onTurnoConfirmado,
                       ),
                     ),
                   ),

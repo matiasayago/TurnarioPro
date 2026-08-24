@@ -16,11 +16,13 @@ class ElegirProfesionalScreen extends StatefulWidget {
     required this.negocioId,
     required this.servicioId,
     required this.servicioNombre,
+    this.onTurnoConfirmado,
   });
 
   final String negocioId;
   final String servicioId;
   final String servicioNombre;
+  final VoidCallback? onTurnoConfirmado;
 
   @override
   State<ElegirProfesionalScreen> createState() => _ElegirProfesionalScreenState();
@@ -75,6 +77,7 @@ class _ElegirProfesionalScreenState extends State<ElegirProfesionalScreen> {
                         profesionalNombre: p['nombre'] as String,
                         servicioId: widget.servicioId,
                         servicioNombre: widget.servicioNombre,
+                        onTurnoConfirmado: widget.onTurnoConfirmado,
                       ),
                     ),
                   ),

@@ -20,6 +20,7 @@ class HorariosDisponiblesScreen extends StatefulWidget {
     required this.profesionalNombre,
     required this.servicioId,
     required this.servicioNombre,
+    this.onTurnoConfirmado,
   });
 
   final String profesionalId;
@@ -31,6 +32,9 @@ class HorariosDisponiblesScreen extends StatefulWidget {
   /// (no hay endpoint `GET /servicios/:id`) — viaja por la cadena de navegación desde
   /// `DetalleNegocioScreen`, que ya lo conoce.
   final String servicioNombre;
+
+  /// Task #115: callback que se propaga a ConfirmarTurnoScreen.
+  final VoidCallback? onTurnoConfirmado;
 
   @override
   State<HorariosDisponiblesScreen> createState() => _HorariosDisponiblesScreenState();
@@ -92,6 +96,7 @@ class _HorariosDisponiblesScreenState extends State<HorariosDisponiblesScreen> {
                           servicioId: widget.servicioId,
                           servicioNombre: widget.servicioNombre,
                           inicio: inicio,
+                          onTurnoConfirmado: widget.onTurnoConfirmado,
                         ),
                       ),
                     ),

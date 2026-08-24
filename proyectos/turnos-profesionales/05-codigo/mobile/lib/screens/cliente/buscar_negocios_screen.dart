@@ -29,7 +29,12 @@ import 'detalle_negocio_screen.dart';
 ///   sin filtro, cacheado una sola vez) cubre servicios ofrecidos vía
 ///   `GET /negocios?servicio=texto` (HU-00b, fast-follow 2026-08-18) — ver [_buscar].
 class BuscarNegociosScreen extends StatefulWidget {
-  const BuscarNegociosScreen({super.key});
+  const BuscarNegociosScreen({super.key, this.onTurnoConfirmado});
+
+  /// Task #115: callback que se propaga a través de DetalleNegocioScreen, ElegirProfesionalScreen,
+  /// HorariosDisponiblesScreen, y finalmente a ConfirmarTurnoScreen — se ejecuta después de crear
+  /// un turno para cambiar el tab de ClienteShell a "Mis Turnos" sin destruir la pila.
+  final VoidCallback? onTurnoConfirmado;
 
   @override
   State<BuscarNegociosScreen> createState() => _BuscarNegociosScreenState();
@@ -273,7 +278,7 @@ class _BuscarNegociosScreenState extends State<BuscarNegociosScreen> {
                   context,
                   MaterialPageRoute(
                     builder: (_) =>
-                        DetalleNegocioScreen(negocioId: n['id'] as String, nombreNegocio: n['nombre'] as String),
+                        DetalleNegocioScreen(negocioId: n['id'] as String, nombreNegocio: n['nombre'] as String, onTurnoConfirmado: onTurnoConfirmado),
                   ),
                 ),
               ),

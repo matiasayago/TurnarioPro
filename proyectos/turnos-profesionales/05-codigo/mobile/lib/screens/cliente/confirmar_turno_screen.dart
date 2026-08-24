@@ -31,6 +31,7 @@ class ConfirmarTurnoScreen extends StatefulWidget {
     required this.servicioId,
     required this.servicioNombre,
     required this.inicio,
+    this.onTurnoConfirmado,
   });
 
   final String profesionalId;
@@ -41,6 +42,11 @@ class ConfirmarTurnoScreen extends StatefulWidget {
   /// cadena de navegación, originada en `DetalleNegocioScreen`.
   final String servicioNombre;
   final String inicio;
+
+  /// Task #115: callback que se ejecuta después de crear el turno (incluso si requiere pago).
+  /// Permite a la pantalla anterior indicar cómo navegar después de la confirmación — típicamente
+  /// para cambiar el tab de ClienteShell a "Mis Turnos" sin destruir la pila completa.
+  final VoidCallback? onTurnoConfirmado;
 
   @override
   State<ConfirmarTurnoScreen> createState() => _ConfirmarTurnoScreenState();
@@ -71,18 +77,20 @@ class _ConfirmarTurnoScreenState extends State<ConfirmarTurnoScreen> {
         await _abrirCheckoutDeMercadoPago(api, turno['id'] as String);
       }
       if (!mounted) return;
-      // `NavigatorState` (no el `BuildContext` de esta pantalla) para el callback
-      // `MisTurnosScreen.onIrABuscar`: el `pushAndRemoveUntil` de abajo saca a ESTA pantalla de
-      // la pila apenas corre, así que su propio `context` queda inválido para cualquier lookup
-      // posterior (ej. cuando el usuario recién más tarde toca el ícono "+" del header) — el
-      // `NavigatorState` en cambio sigue vivo mientras la app corra, es seguro guardarlo. Acá
-      // "ir a Buscar" equivale a volver a la pantalla de abajo en la pila (`ClienteShell`, ya en
-      // su pestaña "Buscar": es la única forma de haber llegado hasta este flujo de reserva).
+      // Task #115: en lugar de `pushAndRemoveUntil` que destruye la pila de navegación,
+      // ahora hacemos pop múltiples veces hasta volver a ClienteShell, luego ejecutamos el
+      // callback que le dice "cambié de tab a Mis Turnos". El callback viene del llamador
+      // (típicamente HorariosDisponiblesScreen → ClienteShell._irATab).
       final navigator = Navigator.of(context);
-      navigator.pushAndRemoveUntil(
-        MaterialPageRoute(builder: (_) => MisTurnosScreen(onIrABuscar: navigator.pop)),
-        (route) => route.isFirst,
-      );
+      // Salir de todo el flujo de reserva (ConfirmarTurnoScreen ← HorariosDisponiblesScreen ←
+      // ElegirProfesionalScreen ← DetalleNegocioScreen, todos con Navigator.push) hasta
+      // volver a ClienteShell (que es la raíz: route.isFirst).
+      navigator.popUntil((route) => route.isFirst);
+      // Indicarle al llamador que el turno se confirmó — típicamente para cambiar el tab
+      // a "Mis Turnos".
+      if (onTurnoConfirmado != null) {
+        onTurnoConfirmado!();
+      }
     } on ApiException catch (e) {
       setState(() => _error = e.statusCode == 409
           ? 'Ese horario ya no está disponible — alguien más lo reservó. Elegí otro horario.'
