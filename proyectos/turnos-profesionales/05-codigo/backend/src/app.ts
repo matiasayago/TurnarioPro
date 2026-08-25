@@ -61,33 +61,6 @@ export function createApp() {
 
   app.get('/health', (_req, res) => res.json({ ok: true }));
 
-  // Endpoint temporal para ejecutar migración 002 (sin autenticación)
-  // Útil cuando la conexión local a Render falla por firewall/DNS
-  app.post(
-    '/migration/002',
-    asyncHandler(async (_req, res) => {
-      try {
-        const sqlPath = join(__dirname, '../migrations/002_pacientes_historial_auth_google.sql');
-        console.log(`[MIGRATION] Leyendo SQL desde: ${sqlPath}`);
-        const sql = readFileSync(sqlPath, 'utf-8');
-        console.log(`[MIGRATION] SQL leído correctamente (${sql.length} bytes)`);
-
-        const client = await pool.connect();
-        console.log('[MIGRATION] Conexión a BD establecida');
-        try {
-          await client.query(sql);
-          console.log('[MIGRATION] Migración ejecutada exitosamente');
-          res.json({ mensaje: 'Migración 002 ejecutada exitosamente' });
-        } finally {
-          client.release();
-        }
-      } catch (err) {
-        console.error('[MIGRATION ERROR]', err);
-        res.status(500).json({ error: String(err) });
-      }
-    })
-  );
-
   app.use('/auth', authRouter);
   app.use('/negocios', negociosRouter);
   app.use('/profesionales', profesionalesRouter);
