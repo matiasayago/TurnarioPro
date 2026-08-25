@@ -54,7 +54,7 @@
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
 CREATE TYPE rol_usuario AS ENUM ('cliente', 'profesional', 'administrador');
-CREATE TYPE estado_turno AS ENUM ('pendiente_de_pago', 'confirmado', 'cancelado', 'reprogramado');
+CREATE TYPE estado_turno AS ENUM ('por_confirmar', 'pendiente_de_pago', 'confirmado', 'cancelado', 'reprogramado');
 CREATE TYPE estado_pago AS ENUM ('pendiente', 'acreditado', 'rechazado', 'expirado');
 
 -- usuario se crea antes que negocio porque negocio_administrador (definida más abajo,

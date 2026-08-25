@@ -248,7 +248,7 @@ turnosRouter.post(
     // devolvió antes de llegar a esta línea.
     const finDate = new Date(inicioDate.getTime() + slotsLibres!.duracionMin * 60_000);
     const requiereSena = !!relacion?.requiere_sena; // D2/RN10 — configurable por profesional+servicio
-    const estadoInicial = requiereSena ? 'pendiente_de_pago' : 'confirmado';
+    const estadoInicial = requiereSena ? 'pendiente_de_pago' : 'por_confirmar';
     const turnoId = uuid();
     const ts = nowIso();
 
