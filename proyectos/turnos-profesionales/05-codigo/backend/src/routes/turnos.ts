@@ -319,9 +319,10 @@ turnosRouter.post(
           // acá, a propósito: es un stub que solo loguea, sin ningún consumidor real todavía (D4
           // no resolvió qué proveedor de push real se usa) — conectar el "envío" es una decisión
           // de un ciclo futuro, no de este (que solo pide bandeja + configuración).
+          const tipoNotificacion = estadoInicial === 'por_confirmar' ? 'pendiente_confirmacion' : 'confirmacion';
           await client.query(
             'INSERT INTO notificacion (id, turno_id, tipo, destinatario_usuario_id, creado_en) VALUES ($1, $2, $3, $4, $5)',
-            [uuid(), turnoId, 'confirmacion', profesional!.usuario_id, ts]
+            [uuid(), turnoId, tipoNotificacion, profesional!.usuario_id, ts]
           );
 
           // Ampliación (2026-08-18, Backend — pedido explícito del CEO): notificar a AMBAS
@@ -338,7 +339,7 @@ turnosRouter.post(
           // del negocio" que sí usa el INSERT de arriba.
           await client.query(
             'INSERT INTO notificacion (id, turno_id, tipo, destinatario_usuario_id, creado_en) VALUES ($1, $2, $3, $4, $5)',
-            [uuid(), turnoId, 'confirmacion', req.auth!.sub, ts]
+            [uuid(), turnoId, tipoNotificacion, req.auth!.sub, ts]
           );
 
           // HU-19/HU-20 (ver 03-arquitectura/modelo-datos.md §2quinquies y backlog.md HU-19):
@@ -405,7 +406,8 @@ turnosRouter.post(
     // nunca puede fallar esta request (no lanza, ver el comentario grande de arriba) — solo
     // puede, como mucho, demorarla. `void` deja explícito que es intencional no esperar esta
     // promesa (no un `await` olvidado).
-    void enviarEmailsNotificacionTurno(turnoId, 'confirmacion');
+    const tipoNotificacion = estadoInicial === 'por_confirmar' ? 'pendiente_confirmacion' : 'confirmacion';
+    void enviarEmailsNotificacionTurno(turnoId, tipoNotificacion);
 
     res.status(201).json({
       id: turnoId,

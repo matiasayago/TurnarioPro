@@ -551,7 +551,7 @@ CREATE TABLE pago (
 --    mismo recordatorio en cada corrida del intervalo) — no resuelta acá, es lógica de Backend.
 -- POST /turnos (turno nuevo) también necesita el mismo destinatario_usuario_id agregado a su
 -- INSERT ya existente (no es un evento nuevo, es la misma fila 'confirmacion' de siempre).
-CREATE TYPE tipo_notificacion AS ENUM ('confirmacion', 'recordatorio', 'cancelacion', 'reprogramacion');
+CREATE TYPE tipo_notificacion AS ENUM ('pendiente_confirmacion', 'confirmacion', 'recordatorio', 'cancelacion', 'reprogramacion');
 
 CREATE TABLE notificacion (
   id                       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
