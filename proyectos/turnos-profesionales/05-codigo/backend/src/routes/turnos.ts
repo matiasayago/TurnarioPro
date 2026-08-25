@@ -803,6 +803,77 @@ turnosRouter.patch(
   })
 );
 
+// Confirmar turno pendiente (solo profesional, solo turnos 'por_confirmar' o 'pendiente_de_pago').
+turnosRouter.patch(
+  '/:id/confirmar',
+  requireAuth('profesional'),
+  asyncHandler(async (req: AuthedRequest, res: Response) => {
+    const paramsParsed = turnoIdParamsSchema.safeParse(req.params);
+    if (!paramsParsed.success) return respuestaValidacionFallida(res, paramsParsed.error);
+    const { id: turnoId } = paramsParsed.data;
+
+    const resultado = await withTransaction(
+      async (client) => {
+        const turnoResult = await client.query(
+          `SELECT t.estado, t.cliente_id, t.profesional_id, p.usuario_id
+           FROM turno t
+           JOIN profesional p ON p.id = t.profesional_id
+           WHERE t.id = $1`,
+          [turnoId]
+        );
+        const turno = turnoResult.rows[0] as
+          | { estado: string; cliente_id: string; profesional_id: string; usuario_id: string }
+          | undefined;
+
+        if (!turno) return { tipo: 'no_encontrado' as const };
+        if (turno.usuario_id !== req.auth!.sub) return { tipo: 'prohibido' as const };
+        if (turno.estado !== 'por_confirmar' && turno.estado !== 'pendiente_de_pago') {
+          return { tipo: 'estado_invalido' as const, estado: turno.estado };
+        }
+
+        // Si está en 'pendiente_de_pago', puede transicionar a 'confirmado' solo si el pago está acreditado
+        if (turno.estado === 'pendiente_de_pago') {
+          const pagoResult = await client.query('SELECT estado FROM pago WHERE turno_id = $1', [turnoId]);
+          const pago = pagoResult.rows[0] as { estado: string } | undefined;
+          if (!pago || pago.estado !== 'acreditado') {
+            return { tipo: 'pago_no_acreditado' as const };
+          }
+        }
+
+        await client.query('UPDATE turno SET estado = $1 WHERE id = $2', ['confirmado', turnoId]);
+
+        // Insertar notificación al cliente
+        const ts = nowIso();
+        await client.query(
+          'INSERT INTO notificacion (id, turno_id, tipo, destinatario_usuario_id, creado_en) VALUES ($1, $2, $3, $4, $5)',
+          [uuid(), turnoId, 'confirmacion', turno.cliente_id, ts]
+        );
+
+        return { tipo: 'ok' as const };
+      },
+      { usuarioId: req.auth!.sub }
+    );
+
+    // Email al cliente
+    if (resultado.tipo === 'ok') {
+      void enviarEmailsNotificacionTurno(turnoId, 'confirmacion');
+    }
+
+    switch (resultado.tipo) {
+      case 'no_encontrado':
+        return res.status(404).json({ error: 'Turno no encontrado' });
+      case 'prohibido':
+        return res.status(403).json({ error: 'No podés confirmar un turno que no es tuyo' });
+      case 'estado_invalido':
+        return res.status(409).json({ error: `No se puede confirmar un turno en estado '${resultado.estado}'` });
+      case 'pago_no_acreditado':
+        return res.status(409).json({ error: 'El pago de este turno aún no ha sido acreditado' });
+      case 'ok':
+        return res.json({ id: turnoId, estado: 'confirmado' });
+    }
+  })
+);
+
 // Mis turnos (cliente autenticado).
 turnosRouter.get(
   '/mios',
