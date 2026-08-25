@@ -16,7 +16,7 @@
 import { Queryable } from '../db';
 
 /** Espejo de tipo_notificacion (database/migrations/001_init.sql). */
-export type TipoNotificacion = 'confirmacion' | 'recordatorio' | 'cancelacion' | 'reprogramacion';
+export type TipoNotificacion = 'pendiente_confirmacion' | 'confirmacion' | 'recordatorio' | 'cancelacion' | 'reprogramacion';
 
 export interface DatosMensajeNotificacion {
   tipo: TipoNotificacion;
@@ -110,6 +110,8 @@ export function armarMensajeNotificacion(datos: DatosMensajeNotificacion): strin
 
   if (datos.destinatarioEsCliente) {
     switch (datos.tipo) {
+      case 'pendiente_confirmacion':
+        return `Tu turno con ${datos.profesionalNombre} en ${datos.negocioNombre} el ${fechaHora} está pendiente de confirmación`;
       case 'cancelacion':
         return `Tu turno con ${datos.profesionalNombre} en ${datos.negocioNombre} el ${fechaHora} fue cancelado`;
       case 'reprogramacion':
@@ -123,6 +125,8 @@ export function armarMensajeNotificacion(datos: DatosMensajeNotificacion): strin
   }
 
   switch (datos.tipo) {
+    case 'pendiente_confirmacion':
+      return `Nuevo turno pendiente de confirmación: ${datos.clienteNombre} en ${datos.negocioNombre} el ${fechaHora}`;
     case 'cancelacion':
       return `${datos.clienteNombre} canceló su turno en ${datos.negocioNombre} el ${fechaHora}`;
     case 'reprogramacion':
@@ -144,6 +148,8 @@ export function armarMensajeNotificacion(datos: DatosMensajeNotificacion): strin
  */
 export function armarAsuntoNotificacion(tipo: TipoNotificacion): string {
   switch (tipo) {
+    case 'pendiente_confirmacion':
+      return 'Turno pendiente de confirmación';
     case 'cancelacion':
       return 'Turno cancelado';
     case 'reprogramacion':

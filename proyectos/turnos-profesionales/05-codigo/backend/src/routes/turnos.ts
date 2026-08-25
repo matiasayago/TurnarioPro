@@ -248,7 +248,7 @@ turnosRouter.post(
     // devolvió antes de llegar a esta línea.
     const finDate = new Date(inicioDate.getTime() + slotsLibres!.duracionMin * 60_000);
     const requiereSena = !!relacion?.requiere_sena; // D2/RN10 — configurable por profesional+servicio
-    const estadoInicial = requiereSena ? 'pendiente_de_pago' : 'confirmado';
+    const estadoInicial = requiereSena ? 'pendiente_de_pago' : 'por_confirmar';
     const turnoId = uuid();
     const ts = nowIso();
 
@@ -319,9 +319,10 @@ turnosRouter.post(
           // acá, a propósito: es un stub que solo loguea, sin ningún consumidor real todavía (D4
           // no resolvió qué proveedor de push real se usa) — conectar el "envío" es una decisión
           // de un ciclo futuro, no de este (que solo pide bandeja + configuración).
+          const tipoNotificacion = estadoInicial === 'por_confirmar' ? 'pendiente_confirmacion' : 'confirmacion';
           await client.query(
             'INSERT INTO notificacion (id, turno_id, tipo, destinatario_usuario_id, creado_en) VALUES ($1, $2, $3, $4, $5)',
-            [uuid(), turnoId, 'confirmacion', profesional!.usuario_id, ts]
+            [uuid(), turnoId, tipoNotificacion, profesional!.usuario_id, ts]
           );
 
           // Ampliación (2026-08-18, Backend — pedido explícito del CEO): notificar a AMBAS
@@ -338,7 +339,7 @@ turnosRouter.post(
           // del negocio" que sí usa el INSERT de arriba.
           await client.query(
             'INSERT INTO notificacion (id, turno_id, tipo, destinatario_usuario_id, creado_en) VALUES ($1, $2, $3, $4, $5)',
-            [uuid(), turnoId, 'confirmacion', req.auth!.sub, ts]
+            [uuid(), turnoId, tipoNotificacion, req.auth!.sub, ts]
           );
 
           // HU-19/HU-20 (ver 03-arquitectura/modelo-datos.md §2quinquies y backlog.md HU-19):
@@ -405,7 +406,8 @@ turnosRouter.post(
     // nunca puede fallar esta request (no lanza, ver el comentario grande de arriba) — solo
     // puede, como mucho, demorarla. `void` deja explícito que es intencional no esperar esta
     // promesa (no un `await` olvidado).
-    void enviarEmailsNotificacionTurno(turnoId, 'confirmacion');
+    const tipoNotificacion = estadoInicial === 'por_confirmar' ? 'pendiente_confirmacion' : 'confirmacion';
+    void enviarEmailsNotificacionTurno(turnoId, tipoNotificacion);
 
     res.status(201).json({
       id: turnoId,
@@ -799,6 +801,77 @@ turnosRouter.patch(
         });
       case 'ok':
         return res.json({ id: nuevoTurnoId, estado: resultado.estadoFinal });
+    }
+  })
+);
+
+// Confirmar turno pendiente (solo profesional, solo turnos 'por_confirmar' o 'pendiente_de_pago').
+turnosRouter.patch(
+  '/:id/confirmar',
+  requireAuth('profesional'),
+  asyncHandler(async (req: AuthedRequest, res: Response) => {
+    const paramsParsed = turnoIdParamsSchema.safeParse(req.params);
+    if (!paramsParsed.success) return respuestaValidacionFallida(res, paramsParsed.error);
+    const { id: turnoId } = paramsParsed.data;
+
+    const resultado = await withTransaction(
+      async (client) => {
+        const turnoResult = await client.query(
+          `SELECT t.estado, t.cliente_id, t.profesional_id, p.usuario_id
+           FROM turno t
+           JOIN profesional p ON p.id = t.profesional_id
+           WHERE t.id = $1`,
+          [turnoId]
+        );
+        const turno = turnoResult.rows[0] as
+          | { estado: string; cliente_id: string; profesional_id: string; usuario_id: string }
+          | undefined;
+
+        if (!turno) return { tipo: 'no_encontrado' as const };
+        if (turno.usuario_id !== req.auth!.sub) return { tipo: 'prohibido' as const };
+        if (turno.estado !== 'por_confirmar' && turno.estado !== 'pendiente_de_pago') {
+          return { tipo: 'estado_invalido' as const, estado: turno.estado };
+        }
+
+        // Si está en 'pendiente_de_pago', puede transicionar a 'confirmado' solo si el pago está acreditado
+        if (turno.estado === 'pendiente_de_pago') {
+          const pagoResult = await client.query('SELECT estado FROM pago WHERE turno_id = $1', [turnoId]);
+          const pago = pagoResult.rows[0] as { estado: string } | undefined;
+          if (!pago || pago.estado !== 'acreditado') {
+            return { tipo: 'pago_no_acreditado' as const };
+          }
+        }
+
+        await client.query('UPDATE turno SET estado = $1 WHERE id = $2', ['confirmado', turnoId]);
+
+        // Insertar notificación al cliente
+        const ts = nowIso();
+        await client.query(
+          'INSERT INTO notificacion (id, turno_id, tipo, destinatario_usuario_id, creado_en) VALUES ($1, $2, $3, $4, $5)',
+          [uuid(), turnoId, 'confirmacion', turno.cliente_id, ts]
+        );
+
+        return { tipo: 'ok' as const };
+      },
+      { usuarioId: req.auth!.sub }
+    );
+
+    // Email al cliente
+    if (resultado.tipo === 'ok') {
+      void enviarEmailsNotificacionTurno(turnoId, 'confirmacion');
+    }
+
+    switch (resultado.tipo) {
+      case 'no_encontrado':
+        return res.status(404).json({ error: 'Turno no encontrado' });
+      case 'prohibido':
+        return res.status(403).json({ error: 'No podés confirmar un turno que no es tuyo' });
+      case 'estado_invalido':
+        return res.status(409).json({ error: `No se puede confirmar un turno en estado '${resultado.estado}'` });
+      case 'pago_no_acreditado':
+        return res.status(409).json({ error: 'El pago de este turno aún no ha sido acreditado' });
+      case 'ok':
+        return res.json({ id: turnoId, estado: 'confirmado' });
     }
   })
 );
