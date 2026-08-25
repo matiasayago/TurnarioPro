@@ -66,7 +66,7 @@ export function createApp() {
   app.post(
     '/migration/002',
     asyncHandler(async (_req, res) => {
-      const sqlPath = join(__dirname, '..', 'database', 'migrations', '002_pacientes_historial_auth_google.sql');
+      const sqlPath = join(__dirname, '../../database/migrations/002_pacientes_historial_auth_google.sql');
       const sql = readFileSync(sqlPath, 'utf-8');
 
       const client = await pool.connect();
