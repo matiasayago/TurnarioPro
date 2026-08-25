@@ -67,7 +67,7 @@ export function createApp() {
     '/migration/002',
     asyncHandler(async (_req, res) => {
       try {
-        const sqlPath = join(__dirname, '../../migrations/002_pacientes_historial_auth_google.sql');
+        const sqlPath = join(__dirname, '../migrations/002_pacientes_historial_auth_google.sql');
         console.log(`[MIGRATION] Leyendo SQL desde: ${sqlPath}`);
         const sql = readFileSync(sqlPath, 'utf-8');
         console.log(`[MIGRATION] SQL leído correctamente (${sql.length} bytes)`);
