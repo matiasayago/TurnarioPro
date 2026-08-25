@@ -5,6 +5,8 @@ import '../state/sesion.dart';
 import '../theme/app_radius.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_typography.dart';
+import '../widgets/buttons.dart';
+import '../widgets/google_logo.dart';
 import '../widgets/google_sign_in_button.dart';
 import '../widgets/selector_negocio.dart';
 import 'recuperar_password_screen.dart';
@@ -40,6 +42,7 @@ class _LoginScreenState extends State<LoginScreen> {
   final _passCtrl = TextEditingController();
   bool _cargando = false;
   bool _googleCargando = false;
+  bool _googleNoDisponible = false;
   String? _error;
 
   Future<void> _login() async {
@@ -112,7 +115,12 @@ class _LoginScreenState extends State<LoginScreen> {
   /// contrato es el mismo `ApiClient`/`Sesion` que usa [_login]:
   /// - `200`/`201` con `{token}` (o `{token, negocios}`, HU-27 — mismo manejo que [_login], ver
   ///   [_completarLogin]) → sesión iniciada (o selector de negocio si corresponde).
-  /// - `401`/`403`/`503` → error tal cual lo manda el backend (mismo patrón que [_login]).
+  /// - `401`/`403` → error tal cual lo manda el backend (mismo patrón que [_login]).
+  /// - `503` (`GOOGLE_CLIENT_ID` no configurado en el backend — ver `verificarIdTokenGoogle`,
+  ///   `src/routes/auth.ts`) → mismo mensaje de error que arriba, y además marca
+  ///   [_googleNoDisponible] para dejar este botón deshabilitado (ver [build]): no es un error
+  ///   transitorio de este intento puntual, es una condición de todo el entorno — reintentar sin
+  ///   que cambie la configuración del backend fallaría siempre igual.
   /// - `409` con `requiere_confirmacion_password: true` → ya existe una cuenta por contraseña con
   ///   ese email; pasa a [_pedirPasswordParaVincular] en vez de mostrarse como error.
   Future<void> _iniciarConGoogle(String idToken, String email) async {
@@ -129,7 +137,10 @@ class _LoginScreenState extends State<LoginScreen> {
       if (e.statusCode == 409 && e.body?['requiere_confirmacion_password'] == true) {
         if (mounted) await _pedirPasswordParaVincular(email, idToken);
       } else if (mounted) {
-        setState(() => _error = e.toString());
+        setState(() {
+          _error = e.toString();
+          if (e.statusCode == 503) _googleNoDisponible = true;
+        });
       }
     } catch (e) {
       if (mounted) setState(() => _error = e.toString());
@@ -306,11 +317,24 @@ class _LoginScreenState extends State<LoginScreen> {
             // HU-35 (mapa-pantallas.md §5.17): outline, con el logo de Google, debajo del botón
             // principal — mismo criterio de radio moderado (no píldora) que sistema-diseno.md
             // §7.1bis ya documenta para los botones de esta pantalla.
-            GoogleSignInButton(
-              onSignedIn: _iniciarConGoogle,
-              onError: _mostrarAviso,
-              onUnavailable: () => _mostrarAviso('Login con Google no está disponible en este momento'),
-            ),
+            //
+            // Tras un 503 de POST /auth/google (_googleNoDisponible, ver _iniciarConGoogle) este
+            // widget deja de montarse — se reemplaza por el mismo OutlineButton "deshabilitado"
+            // (onPressed null, mismo look que ya usan google_sign_in_button_web.dart/_stub.dart
+            // para sus propios estados "no disponible") para no dejar reintentar contra un
+            // backend que en este entorno no puede resolver Google.
+            if (_googleNoDisponible)
+              const OutlineButton(
+                label: 'Google no disponible',
+                leading: GoogleLogo(),
+                radiusVariant: AppButtonRadius.card,
+              )
+            else
+              GoogleSignInButton(
+                onSignedIn: _iniciarConGoogle,
+                onError: _mostrarAviso,
+                onUnavailable: () => _mostrarAviso('Login con Google no está disponible en este momento'),
+              ),
             const SizedBox(height: AppSpacing.xl),
             // HU-00a/HU-01: único punto de entrada Mobile al alta pre-autenticación — antes había
             // 2 links acá (uno a `RegistroNegocioScreen`, otro a `RegistroClienteScreen`),
