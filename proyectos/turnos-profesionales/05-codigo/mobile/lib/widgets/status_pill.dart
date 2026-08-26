@@ -13,15 +13,17 @@ enum TurnoEstado { porConfirmar, programada, confirmada, cancelada, completada }
 enum PacienteEstado { activo, inactivo }
 
 /// Convierte el `estado` crudo que devuelve la API (`estado_turno` de la base de datos:
-/// `pendiente_de_pago` | `confirmado` | `cancelado` | `reprogramado`) al estado semántico de
+/// `por_confirmar` | `pendiente_de_pago` | `confirmado` | `cancelado` | `reprogramado`) al estado semántico de
 /// diseño. `reprogramado` no tiene mapeo 1:1 documentado en §3.4 (el turno viejo queda
 /// archivado, no se lista en las pantallas que usan `GET /profesionales/:id/turnos`, que ya
-/// filtra por `pendiente_de_pago`/`confirmado`) — se resuelve como `completada` (gris/neutral)
+/// filtra por `por_confirmar`/`pendiente_de_pago`/`confirmado`) — se resuelve como `completada` (gris/neutral)
 /// por ser la opción menos alarmante para un valor inesperado, sin bloquear el render.
 TurnoEstado turnoEstadoFromApi(String estadoApi) {
   switch (estadoApi) {
-    case 'pendiente_de_pago':
+    case 'por_confirmar':
       return TurnoEstado.porConfirmar;
+    case 'pendiente_de_pago':
+      return TurnoEstado.programada;
     case 'confirmado':
       return TurnoEstado.confirmada;
     case 'cancelado':
