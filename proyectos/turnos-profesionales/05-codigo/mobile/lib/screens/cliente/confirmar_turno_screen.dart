@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
-// ignore: deprecated_member_use
+// ignore: deprecated_member_use, avoid_web_libraries_in_flutter
 import 'dart:js' as js;
 import '../../api_client.dart';
 import '../../state/sesion.dart';
@@ -11,7 +11,6 @@ import '../../theme/app_radius.dart';
 import '../../theme/app_spacing.dart';
 import '../../theme/app_typography.dart';
 import '../../widgets/widgets.dart';
-import 'mis_turnos_screen.dart';
 
 /// HU-09b: confirma la reserva. Si el profesional requiere seña para este servicio (D2/RN10),
 /// el backend responde con `estado: pendiente_de_pago` y esta pantalla abre el checkout de
