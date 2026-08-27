@@ -2,8 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
-// ignore: deprecated_member_use, avoid_web_libraries_in_flutter
-import 'dart:js' as js;
+import 'dart:js' as js; // ignore: deprecated_member_use, avoid_web_libraries_in_flutter
 import '../../api_client.dart';
 import '../../state/sesion.dart';
 import '../../theme/app_colors.dart';
