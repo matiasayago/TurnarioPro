@@ -278,7 +278,7 @@ class _BuscarNegociosScreenState extends State<BuscarNegociosScreen> {
                   context,
                   MaterialPageRoute(
                     builder: (_) =>
-                        DetalleNegocioScreen(negocioId: n['id'] as String, nombreNegocio: n['nombre'] as String, onTurnoConfirmado: onTurnoConfirmado),
+                        DetalleNegocioScreen(negocioId: n['id'] as String, nombreNegocio: n['nombre'] as String, onTurnoConfirmado: widget.onTurnoConfirmado),
                   ),
                 ),
               ),

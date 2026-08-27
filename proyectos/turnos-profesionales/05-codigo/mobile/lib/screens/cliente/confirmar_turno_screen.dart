@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'dart:js' as js;
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 import '../../api_client.dart';
@@ -88,8 +87,8 @@ class _ConfirmarTurnoScreenState extends State<ConfirmarTurnoScreen> {
       navigator.popUntil((route) => route.isFirst);
       // Indicarle al llamador que el turno se confirmó — típicamente para cambiar el tab
       // a "Mis Turnos".
-      if (onTurnoConfirmado != null) {
-        onTurnoConfirmado!();
+      if (widget.onTurnoConfirmado != null) {
+        widget.onTurnoConfirmado!();
       }
     } on ApiException catch (e) {
       setState(() => _error = e.statusCode == 409
