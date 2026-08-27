@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
+// ignore: deprecated_member_use
 import 'dart:js' as js;
 import '../../api_client.dart';
 import '../../state/sesion.dart';
