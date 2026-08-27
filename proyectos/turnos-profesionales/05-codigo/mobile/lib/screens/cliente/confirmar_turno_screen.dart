@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
+import 'dart:js' as js;
 import '../../api_client.dart';
 import '../../state/sesion.dart';
 import '../../theme/app_colors.dart';
@@ -141,7 +143,9 @@ class _ConfirmarTurnoScreenState extends State<ConfirmarTurnoScreen> {
       try {
         // ignore: avoid_print
         print('[MP-FRONTEND] Llamando window.open() con URL: $urlCheckout');
-        js.context.callMethod('open', [urlCheckout, '_blank']);
+        if (kIsWeb) {
+          js.context.callMethod('open', [urlCheckout, '_blank']);
+        }
         // ignore: avoid_print
         print('[MP-FRONTEND] window.open() completado');
       } catch (e) {
