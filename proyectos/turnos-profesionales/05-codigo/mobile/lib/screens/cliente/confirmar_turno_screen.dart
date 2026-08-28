@@ -1,12 +1,8 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../../api_client.dart';
-
-// Web-only import para Mercado Pago checkout
-// ignore: uri_does_not_exist
-import 'dart:js' as js if (dart.library.html) 'dart:js' as js;
 import '../../state/sesion.dart';
 import '../../theme/app_colors.dart';
 import '../../theme/app_radius.dart';
@@ -144,15 +140,16 @@ class _ConfirmarTurnoScreenState extends State<ConfirmarTurnoScreen> {
 
       try {
         // ignore: avoid_print
-        print('[MP-FRONTEND] Llamando window.open() con URL: $urlCheckout');
-        if (kIsWeb) {
-          js.context.callMethod('open', [urlCheckout, '_blank']);
+        print('[MP-FRONTEND] Abriendo URL de checkout: $urlCheckout');
+        final uri = Uri.parse(urlCheckout);
+        if (await canLaunchUrl(uri)) {
+          await launchUrl(uri, mode: LaunchMode.externalApplication);
         }
         // ignore: avoid_print
-        print('[MP-FRONTEND] window.open() completado');
+        print('[MP-FRONTEND] URL abierta exitosamente');
       } catch (e) {
         // ignore: avoid_print
-        print('[MP-FRONTEND] Error al llamar window.open(): $e');
+        print('[MP-FRONTEND] Error al abrir URL: $e');
         if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
