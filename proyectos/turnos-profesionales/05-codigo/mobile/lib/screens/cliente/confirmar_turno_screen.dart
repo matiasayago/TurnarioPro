@@ -2,8 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
-import 'dart:js' as js; // ignore: deprecated_member_use, avoid_web_libraries_in_flutter
 import '../../api_client.dart';
+
+// Web-only import para Mercado Pago checkout
+// ignore: uri_does_not_exist
+import 'dart:js' as js if (dart.library.html) 'dart:js' as js;
 import '../../state/sesion.dart';
 import '../../theme/app_colors.dart';
 import '../../theme/app_radius.dart';
