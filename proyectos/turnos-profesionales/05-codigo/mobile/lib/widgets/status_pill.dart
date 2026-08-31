@@ -24,7 +24,7 @@ TurnoEstado turnoEstadoFromApi(String estadoApi) => switch (estadoApi) {
   'confirmado' => TurnoEstado.confirmada,
   'cancelado' => TurnoEstado.cancelada,
   _ => TurnoEstado.completada,
-}
+};
 
 enum _PillKind { success, warning, danger, neutral }
 

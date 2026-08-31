@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
-import 'dart:js' as js;
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../../api_client.dart';
 import '../../state/sesion.dart';
 import '../../theme/app_colors.dart';
@@ -9,7 +9,6 @@ import '../../theme/app_radius.dart';
 import '../../theme/app_spacing.dart';
 import '../../theme/app_typography.dart';
 import '../../widgets/widgets.dart';
-import 'mis_turnos_screen.dart';
 
 /// HU-09b: confirma la reserva. Si el profesional requiere seña para este servicio (D2/RN10),
 /// el backend responde con `estado: pendiente_de_pago` y esta pantalla abre el checkout de
@@ -88,8 +87,8 @@ class _ConfirmarTurnoScreenState extends State<ConfirmarTurnoScreen> {
       navigator.popUntil((route) => route.isFirst);
       // Indicarle al llamador que el turno se confirmó — típicamente para cambiar el tab
       // a "Mis Turnos".
-      if (onTurnoConfirmado != null) {
-        onTurnoConfirmado!();
+      if (widget.onTurnoConfirmado != null) {
+        widget.onTurnoConfirmado!();
       }
     } on ApiException catch (e) {
       setState(() => _error = e.statusCode == 409
@@ -141,13 +140,16 @@ class _ConfirmarTurnoScreenState extends State<ConfirmarTurnoScreen> {
 
       try {
         // ignore: avoid_print
-        print('[MP-FRONTEND] Llamando window.open() con URL: $urlCheckout');
-        js.context.callMethod('open', [urlCheckout, '_blank']);
+        print('[MP-FRONTEND] Abriendo URL de checkout: $urlCheckout');
+        final uri = Uri.parse(urlCheckout);
+        if (await canLaunchUrl(uri)) {
+          await launchUrl(uri, mode: LaunchMode.externalApplication);
+        }
         // ignore: avoid_print
-        print('[MP-FRONTEND] window.open() completado');
+        print('[MP-FRONTEND] URL abierta exitosamente');
       } catch (e) {
         // ignore: avoid_print
-        print('[MP-FRONTEND] Error al llamar window.open(): $e');
+        print('[MP-FRONTEND] Error al abrir URL: $e');
         if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
